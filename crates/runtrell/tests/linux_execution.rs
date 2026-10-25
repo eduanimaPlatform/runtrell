@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(target_os = "linux")]
+// Type-check the privileged fixtures on Unix hosts; execute them only on Linux.
+#![cfg(unix)]
 use runtrell::{execution::*, *};
 fn context(id: &str) -> ToolContext {
     ToolContext {
+        recovery_proof: None,
         claim: Claim {
             run: RunHandle {
                 tenant: "linux-test".into(),
@@ -54,6 +56,13 @@ async fn stopped(b: &LinuxBackend, c: &ToolContext) -> Observation {
         loop {
             let o = b.lookup(c).await.unwrap().unwrap();
             if o.state == ExecutionState::Stopped {
+                assert!(o.released_resources.contains(&Resource::Cpu));
+                assert!(o.released_resources.contains(&Resource::Pid));
+                assert!(
+                    !o.released_resources.contains(&Resource::Memory),
+                    "tmpfs still retains memory after process stop"
+                );
+                assert!(!o.released_resources.contains(&Resource::Disk));
                 return o;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -87,6 +96,9 @@ async fn destroyed(b: &LinuxBackend, c: &ToolContext) {
     .await
     .unwrap();
     assert_eq!(b.destroy(c).await.unwrap(), Progress::Confirmed);
+    let o = b.lookup(c).await.unwrap().unwrap();
+    assert!(o.released_resources.contains(&Resource::Memory));
+    assert!(o.released_resources.contains(&Resource::Disk));
 }
 struct StateRoot(std::path::PathBuf);
 impl StateRoot {
@@ -343,6 +355,7 @@ async fn linux_python_workspace_output_is_saved_before_cleanup() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_non_cgroup_directory_is_rejected_before_resource_acquisition() {
     let root = tempfile::tempdir().unwrap();
@@ -367,6 +380,7 @@ fn linux_non_cgroup_directory_is_rejected_before_resource_acquisition() {
     assert_eq!(std::fs::read_dir(group.path()).unwrap().count(), 0);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_late_helper_cannot_join_after_stop_marker() {
     let control = tempfile::tempdir().unwrap();
@@ -385,7 +399,18 @@ fn linux_late_helper_cannot_join_after_stop_marker() {
         // Expected CANCELLED_BEFORE_JOIN stderr is not a libtest result.
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "late helper unexpectedly succeeded; child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("CANCELLED_BEFORE_JOIN"),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         std::fs::read(group.path().join("cgroup.procs")).unwrap(),
         b"untouched"
@@ -399,7 +424,7 @@ async fn linux_payload_has_no_privileges() {
     let b = backend(root.path());
     let c = context("privileges");
     let r = request(
-        r#"/usr/bin/python3 -c 'import json,os; print(json.dumps({"uid":os.getuid(),"gid":os.getgid(),"userns":os.readlink("/proc/self/ns/user"),"caps":{k:v.strip() for k,v in (line.split(":",1) for line in open("/proc/self/status") if line.startswith("Cap"))}}))'"#,
+        r#"/usr/bin/python3 -c 'import json,os; print(json.dumps({"uid":os.getuid(),"gid":os.getgid(),"userns":os.readlink("/proc/self/ns/user"),"caps":{k:v.strip() for k,v in (line.split(":",1) for line in open("/proc/self/status") if line.startswith(("Cap","NoNewPrivs")))}}))'"#,
     );
     let e = b.acquire(&c, &r).await.unwrap();
     b.start(&c, &e).await.unwrap();
@@ -416,6 +441,7 @@ async fn linux_payload_has_no_privileges() {
             .to_str()
             .unwrap()
     );
+    assert_eq!(result["caps"]["NoNewPrivs"], "1");
     for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
         assert_eq!(
             u64::from_str_radix(result["caps"][name].as_str().unwrap(), 16).unwrap(),
@@ -424,4 +450,30 @@ async fn linux_payload_has_no_privileges() {
         );
     }
     destroyed(&b, &c).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires delegated cgroup v2, host mounts and bubblewrap user namespaces"]
+async fn linux_concurrent_runs_reclaim_independently() {
+    let root = root();
+    let b = backend(root.path());
+    let mut jobs = tokio::task::JoinSet::new();
+    for index in 0..8 {
+        let b = b.clone();
+        jobs.spawn(async move {
+            let mut c = context(&format!("parallel-{index}"));
+            c.claim.run.id = format!("run-{index}");
+            let r = request("printf data > scratch-data; sleep 0.2");
+            let e = b.acquire(&c, &r).await.unwrap();
+            b.start(&c, &e).await.unwrap();
+            stopped(&b, &c).await;
+            destroyed(&b, &c).await;
+        });
+    }
+    while let Some(done) = jobs.join_next().await {
+        done.unwrap();
+    }
+    for item in b.inventory().unwrap() {
+        assert_eq!(item.state, ExecutionState::Destroyed);
+    }
 }

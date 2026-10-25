@@ -57,6 +57,7 @@ pub async fn policies<S: ControlStore>(s: &S) {
     let mut usage = Usage::measured(0, 0, 30);
     usage.quantities.insert("jobs".into(), 1);
     let result = ExternalResult::Applied {
+        physical_evidence: None,
         output: json!({}),
         usage,
         external_id: None,
@@ -182,6 +183,7 @@ pub async fn settlement_and_finalization<S: ControlStore>(s: &S) {
             &c,
             &op.id,
             ExternalResult::Applied {
+                physical_evidence: None,
                 output: json!({}),
                 usage: Usage::measured(10, 0, 10),
                 external_id: None,
@@ -253,6 +255,7 @@ pub async fn settlement_and_finalization<S: ControlStore>(s: &S) {
     let mut usage = Usage::measured(10, 10, 1);
     usage.model = "m".into();
     let result = |usage| ExternalResult::Applied {
+        physical_evidence: None,
         output: json!({}),
         usage,
         external_id: Some("one-bill".into()),
@@ -299,6 +302,7 @@ pub async fn settlement_and_finalization<S: ControlStore>(s: &S) {
     );
     let first = s.begin(&c, request.clone(), 0).await.unwrap();
     let failed = ExternalResult::Failed {
+        physical_evidence: None,
         code: "busy".into(),
         usage: Usage::measured(0, 0, 3),
         retry_after: Some(1),
@@ -355,8 +359,8 @@ pub async fn driver_policies<S: ControlStore>(s: std::sync::Arc<S>) {
             tools: Vec::<crate::BusinessTool>::new(),
             policy: crate::FakePolicy::default(),
             clock: crate::TestClock::default(),
-            validator: crate::DecisionValidator::default(),
-            finalizer: crate::DecisionFinalizer,
+            validator: std::sync::Arc::new(crate::DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(crate::DecisionFinalizer),
         };
         let r = rt.drive(&c).await.unwrap();
         match policy {
@@ -473,6 +477,7 @@ pub async fn axes<S: ControlStore>(s: &S) {
             &c,
             &op.id,
             ExternalResult::Applied {
+                physical_evidence: None,
                 output: json!({}),
                 usage: Usage::measured(reserve.tokens, 0, reserve.micro_usd),
                 external_id: None,
@@ -546,6 +551,7 @@ pub async fn axes<S: ControlStore>(s: &S) {
     req.quantities.insert("jobs".into(), 1);
     let op = s.begin(&c, req, 0).await.unwrap();
     let incomplete = ExternalResult::Applied {
+        physical_evidence: None,
         output: json!({}),
         usage: Usage::measured(0, 0, 0),
         external_id: None,
@@ -564,6 +570,7 @@ pub async fn axes<S: ControlStore>(s: &S) {
         &c,
         &op.id,
         ExternalResult::Applied {
+            physical_evidence: None,
             output: json!({}),
             usage,
             external_id: None,
@@ -587,6 +594,7 @@ impl Tool for QuantityJob {
         let mut usage = Usage::measured(0, 0, 7);
         usage.quantities.insert("jobs".into(), 1);
         Ok(ExternalResult::Applied {
+            physical_evidence: None,
             output: json!({}),
             usage,
             external_id: None,
@@ -629,8 +637,8 @@ pub async fn quantity_tool<S: ControlStore>(s: std::sync::Arc<S>) {
         tools: vec![QuantityJob],
         policy: crate::FakePolicy::default(),
         clock: crate::TestClock::default(),
-        validator: crate::DecisionValidator::default(),
-        finalizer: crate::DecisionFinalizer,
+        validator: std::sync::Arc::new(crate::DecisionValidator::default()),
+        finalizer: std::sync::Arc::new(crate::DecisionFinalizer),
     };
     assert_eq!(
         rt.drive(&c).await.unwrap().state,
@@ -642,4 +650,141 @@ pub async fn quantity_tool<S: ControlStore>(s: std::sync::Arc<S>) {
     assert_eq!(balance.quantity_reserved["jobs"], 0);
     let op = s.operation(&h, "tool:1:job").await.unwrap().unwrap();
     assert_eq!(op.request.quantities["jobs"], 1);
+}
+
+/// A second Run reserves between the first quote and atomic admission.
+pub async fn model_quote_race<S: ControlStore + 'static>(s: std::sync::Arc<S>) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct RaceClock<S> {
+        store: Arc<S>,
+        other: Claim,
+        ticks: Arc<AtomicUsize>,
+    }
+    impl<S: ControlStore + 'static> Clock for RaceClock<S> {
+        fn now(&self) -> u64 {
+            if self.ticks.fetch_add(1, Ordering::SeqCst) == 2 {
+                let s = self.store.clone();
+                let c = self.other.clone();
+                std::thread::spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(async move {
+                            s.begin(
+                                &c,
+                                DispatchRequest::new(
+                                    "racer",
+                                    OperationKind::Tool,
+                                    "job",
+                                    json!({}),
+                                    Amount::new(90, 90),
+                                ),
+                                0,
+                            )
+                            .await
+                            .unwrap();
+                        })
+                })
+                .join()
+                .unwrap();
+            }
+            0
+        }
+        async fn wait_until(&self, _: u64) {
+            std::future::pending::<()>().await
+        }
+    }
+    struct RaceModel {
+        inner: crate::FakeModel,
+        ticks: Arc<AtomicUsize>,
+    }
+    impl ModelPort for RaceModel {
+        fn limits(&self) -> ModelLimits {
+            self.inner.limits()
+        }
+        fn recovery(&self) -> Option<(String, u64)> {
+            self.inner.recovery()
+        }
+        fn input_upper_bound(&self, r: &ModelRequest) -> Result<u64> {
+            // Arm only on initial request construction, never on subsequent quotes.
+            if r.max_output == 0 {
+                self.ticks.store(0, Ordering::SeqCst);
+            }
+            self.inner.input_upper_bound(r)
+        }
+        async fn invoke(&self, c: &ToolContext, r: ModelRequest) -> Result<ExternalResult> {
+            self.inner.invoke(c, r).await
+        }
+        async fn lookup(&self, c: &ToolContext, r: ModelRequest) -> Result<Lookup> {
+            self.inner.lookup(c, r).await
+        }
+    }
+    let a = s
+        .create_account("t", Amount::new(100, 100), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new("t", "quote-race", a.clone(), "judge");
+    spec.budget = ReservationPolicy::Shrink {
+        min_output_budget_tokens: 1,
+    };
+    let h = s.start(spec).await.unwrap();
+    let c = s.claim(&h, "w", 0, 100).await.unwrap();
+    let other = s
+        .start(RunSpec::new("t", "quote-racer", a, "judge"))
+        .await
+        .unwrap();
+    let other = s.claim(&other, "other", 0, 100).await.unwrap();
+    let ticks = Arc::new(AtomicUsize::new(usize::MAX / 2));
+    let inner =
+        crate::FakeModel::scripted(vec![crate::FakeModel::decision(json!({"decision":"done"}))]);
+    let rt = Runtime {
+        store: s.clone(),
+        model: RaceModel {
+            inner: inner.clone(),
+            ticks: ticks.clone(),
+        },
+        tools: Vec::<crate::BusinessTool>::new(),
+        policy: crate::FakePolicy::default(),
+        clock: RaceClock {
+            store: s.clone(),
+            other,
+            ticks,
+        },
+        validator: std::sync::Arc::new(crate::DecisionValidator::default()),
+        finalizer: std::sync::Arc::new(crate::DecisionFinalizer),
+    };
+    let waiting = rt.drive(&c).await.unwrap();
+    assert_eq!(waiting.state, RunState::Waiting("budget requote".into()));
+    assert!(
+        inner.requests.lock().unwrap().is_empty(),
+        "contention must not send an under-reserved request"
+    );
+    let done = rt.drive(&c).await.unwrap();
+    assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded));
+    assert_eq!(inner.requests.lock().unwrap().len(), 1);
+    assert!(
+        s.operation(&other_run(&rt.clock.other), "racer")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let ops = s.list_operations(&h).await.unwrap();
+    for request in inner.requests.lock().unwrap().iter() {
+        let op = ops
+            .iter()
+            .find(|op| op.request.kind == OperationKind::Model)
+            .unwrap();
+        assert_eq!(
+            op.request.reserve,
+            rt.model.limits().estimate(5, request.max_output).unwrap(),
+            "sent cap and admitted reservation must have the same quote"
+        );
+    }
+    fn other_run(c: &Claim) -> RunHandle {
+        c.run.clone()
+    }
 }

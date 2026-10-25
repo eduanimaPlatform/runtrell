@@ -11,6 +11,12 @@ fn ns(run: &str) -> Namespace {
     }
 }
 fn drive(f: impl std::future::Future<Output = ()>) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
     let mut f = std::pin::pin!(f);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     loop {
@@ -122,8 +128,8 @@ fn validation_rejects_old_evidence_and_forged_receipt() {
         s.write(&a, "a", None, b"ok").await.unwrap();
         let snap = s.snapshot(&a).await.unwrap();
         let target = Target::artifact(snap.clone(), json!({"decision":"keep"}), 1, "cfg");
-        let validator = Rules;
-        let receipt = s.validate(&a, &target, &validator).await.unwrap();
+        let validator = std::sync::Arc::new(Rules);
+        let receipt = s.validate(&a, &target, validator.clone()).await.unwrap();
         let mut forged = receipt.clone();
         forged.receipt.hash = "fake".into();
         assert!(
@@ -141,7 +147,7 @@ fn validation_rejects_old_evidence_and_forged_receipt() {
                 .is_err()
         );
         let target = Target::structured(json!({"decision":"keep"}), 2, "cfg");
-        let receipt = s.validate(&a, &target, &validator).await.unwrap();
+        let receipt = s.validate(&a, &target, validator.clone()).await.unwrap();
         let done = s
             .finalize_target(
                 &a,
@@ -458,7 +464,10 @@ fn artifact_basis_config_version_and_validator_are_bound() {
             .unwrap();
         let target =
             Target::structured(json!({"decision":"keep"}), 1, "cfg").with_artifact(r.clone());
-        let evidence = s.validate(&a, &target, &Rules).await.unwrap();
+        let evidence = s
+            .validate(&a, &target, std::sync::Arc::new(Rules))
+            .await
+            .unwrap();
         for changed in [
             Target {
                 basis_revision: 2,
@@ -697,7 +706,10 @@ fn diagnostic_locations_and_workspace_validator_cannot_self_certify() {
             1,
             "cfg",
         );
-        let evidence = s.validate(&a, &target, &RejectRules).await.unwrap();
+        let evidence = s
+            .validate(&a, &target, std::sync::Arc::new(RejectRules))
+            .await
+            .unwrap();
         assert!(!evidence.receipt.passed);
         assert_eq!(evidence.receipt.diagnostics[0].span, Some((0, 2)));
         assert!(

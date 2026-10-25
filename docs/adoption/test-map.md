@@ -470,3 +470,14 @@ Rigの104 run unit/13 run doctestを含む既存試験は除外も弱体化も�
 - CIはdefault/Pythonを別jobとし、Linux実隔離は各試験名のlibtest結果と一覧を照合。macOS Seatbeltも名前を照合する。Hostedの成功はpush後のrunで確認し、本番構成と利用側の統合試験の成功とは分ける。
 
 Crash子processと遅延helperの起動を`status()`から`output()`へ変更し、子のstdout/stderrを親のlibtest結果行から分離した。子の実終了コード23、停止marker後の失敗、cgroup.procsが不変という既存assertionは維持する。
+
+
+## rt-3e contract changes
+
+- `model_quote_race` (shared Memory/Postgres): inserts another Run reservation during request construction. Before the fix, the sent request quoted 21 while its reservation was 10; the same exact-quote assertion failed on both backends. Shrink contention now waits without sending and requotes the request and reservation together on resume.
+- `preparation_and_physical_evidence` / `external_job_preparation` (shared Memory/Postgres): initial async preparation failure creates no intent/reservation/send; existing Unknown retains its original proof and reservation without preparing again. Physical-send evidence is saved for both successful and failed results, and is separate from logical usage observations. A new attempt cannot extend the original recovery deadline.
+- `heterogeneous_runs_yield_during_async_storage_and_sync_evidence_io`: six spawned Runs with heterogeneous tools, an actually-awaiting fake store, one Tokio worker and blocking validation/finalization. The heartbeat must advance while evidence I/O blocks.
+- `repair_checkpoint_reopens_with_independent_pool_and_runtime`: PostgreSQL checkpoint/candidate/diagnostics survive closing the first pool and Runtime; another pool and Runtime repair and revalidate the candidate.
+- `real_isolation_loop_output_fork_env_and_workspace_boundaries`: intentional capability clarification on macOS. Seatbelt continues to deny fork; requires_descendants requests must be rejected before acquisition. The old optional PID-file branch did not prove child execution on macOS and is replaced with an explicit unsupported-capability assertion. The Linux fork path requires a real PID file, valid numeric PID and descendant disappearance. No isolation rule is relaxed.
+- Linux fixtures require Memory to remain unreleased at Stopped and to be released only after unmount/cgroup deletion. `linux_concurrent_runs_reclaim_independently` adds eight concurrent Runs. Their execution remains a Linux acceptance step; native compilation of the fixtures is not Linux isolation evidence.
+- No inherited requirement assertion was weakened. JSON syntax repair and automatic orphan reclamation before cgroup/mount identity persistence remain explicitly unimplemented; see execution.md and api.md.

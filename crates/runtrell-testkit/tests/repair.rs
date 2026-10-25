@@ -50,8 +50,8 @@ fn runtime_with(
         tools: vec![],
         policy: FakePolicy::default(),
         clock: TestClock::default(),
-        validator,
-        finalizer: DecisionFinalizer,
+        validator: std::sync::Arc::new(validator),
+        finalizer: std::sync::Arc::new(DecisionFinalizer),
     }
 }
 #[test]
@@ -198,8 +198,8 @@ fn infrastructure_and_authority_errors_never_become_repair_feedback() {
                 tools: Vec::<BusinessTool>::new(),
                 policy: FakePolicy::default(),
                 clock: TestClock::default(),
-                validator: BrokenValidator(error.clone()),
-                finalizer: DecisionFinalizer,
+                validator: std::sync::Arc::new(BrokenValidator(error.clone())),
+                finalizer: std::sync::Arc::new(DecisionFinalizer),
             };
             let result = rt.drive(&claim).await;
             if error == Error::PermissionDenied {
@@ -283,8 +283,8 @@ fn invalid_tool_input_returns_schema_pointers_without_invocation() {
             tools: vec![StrictTool(tool.clone())],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: chain(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(chain()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert_eq!(
             rt.drive(&claim).await.unwrap().state,

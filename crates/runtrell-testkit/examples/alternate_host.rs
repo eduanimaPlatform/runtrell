@@ -54,6 +54,7 @@ impl ModelPort for WarehouseModel {
         let mut usage = Usage::measured(2, 1, 0);
         usage.model = "warehouse".into();
         Ok(ExternalResult::Applied {
+            physical_evidence: None,
             output: serde_json::to_value(reply).unwrap(),
             usage,
             external_id: None,
@@ -89,6 +90,7 @@ impl Tool for StockTool {
     }
     async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
         Ok(ExternalResult::Applied {
+            physical_evidence: None,
             output: json!({"quantity":7}),
             usage: Usage::measured(0, 0, 0),
             external_id: None,
@@ -119,8 +121,8 @@ fn main() -> Result<()> {
             tools: vec![StockTool],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         let result = runtime.drive(&c).await?;
         assert_eq!(result.state, RunState::Terminal(Terminal::Succeeded));

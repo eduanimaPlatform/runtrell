@@ -32,12 +32,14 @@ impl ModelPort for RetryModel {
         usage.cached = Some(0);
         if n == 0 || !self.success {
             Ok(ExternalResult::Failed {
+ physical_evidence: None,
                 code: "TRANSIENT".into(),
                 usage,
                 retry_after: Some(1),
             })
         } else {
             Ok(ExternalResult::Applied {
+ physical_evidence: None,
                 output: serde_json::to_value(FakeModel::decision(json!({"decision":"answered"})))
                     .unwrap(),
                 usage,
@@ -70,8 +72,8 @@ fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
             tools: Vec::<BusinessTool>::new(),
             policy,
             clock: clock.clone(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert!(matches!(
             rt.drive(&c).await.unwrap().state,
@@ -118,8 +120,8 @@ fn retry_bound_and_authorization_are_rechecked_after_restart() {
                 tools: Vec::<BusinessTool>::new(),
                 policy: policy.clone(),
                 clock: clock.clone(),
-                validator: DecisionValidator::default(),
-                finalizer: DecisionFinalizer,
+                validator: std::sync::Arc::new(DecisionValidator::default()),
+                finalizer: std::sync::Arc::new(DecisionFinalizer),
             };
             rt.drive(&c).await.unwrap();
             if revoke {

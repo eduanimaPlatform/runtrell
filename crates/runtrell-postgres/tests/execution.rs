@@ -46,6 +46,7 @@ fn execution_sql_failure_rolls_back_and_two_clients_cas_once() {
     block_on(async {
         let h = PgHarness::open().await;
         let c = ToolContext {
+            recovery_proof: None,
             claim: Claim {
                 run: RunHandle {
                     tenant: "t".into(),

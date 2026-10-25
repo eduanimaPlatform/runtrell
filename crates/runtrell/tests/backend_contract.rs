@@ -93,6 +93,7 @@ async fn contract(open: impl Fn() -> DataStore) {
     };
     let descriptor = tool.descriptor();
     let context = ToolContext {
+        recovery_proof: None,
         claim,
         principal: run.spec.principal.clone(),
         operation: "read".into(),
@@ -167,10 +168,10 @@ async fn contract(open: impl Fn() -> DataStore) {
         s.artifact_status(&a, &blob).await.unwrap(),
         ArtifactStatus::Saved
     );
-    let validator = schema::SchemaValidator {
+    let validator = Arc::new(schema::SchemaValidator {
         key: ValidatorKey::new("schema", "1"),
         schema: json!({"type":"object"}),
-    };
+    });
     let target = Target::artifact(base.clone(), json!({}), 1, "config").with_artifact(blob.clone());
     let adapter = DataValidator {
         store: s.clone(),
@@ -183,7 +184,7 @@ async fn contract(open: impl Fn() -> DataStore) {
         artifacts: vec![blob.clone()],
     };
     let adapter_receipt = adapter.validate(&run, &json!({})).unwrap();
-    let evidence = s.validate(&a, &target, &validator).await.unwrap();
+    let evidence = s.validate(&a, &target, validator.clone()).await.unwrap();
     drop(s);
     let s = open();
     let mut forged = evidence.clone();
@@ -204,10 +205,10 @@ async fn contract(open: impl Fn() -> DataStore) {
         .validate(
             &a,
             &target,
-            &schema::SchemaValidator {
+            Arc::new(schema::SchemaValidator {
                 key: validator.key(),
                 schema: json!(false),
-            },
+            }),
         )
         .await
         .unwrap();
@@ -323,10 +324,10 @@ async fn external_partial_upload_and_response_loss_at_each_publication_boundary(
             let open = || DataStore::external(backend.clone(), StoragePolicy::default());
             let s = open();
             let a = access();
-            let validator = schema::SchemaValidator {
+            let validator = Arc::new(schema::SchemaValidator {
                 key: ValidatorKey::new("schema", "1"),
                 schema: json!(true),
-            };
+            });
             if boundary == 0 {
                 backend.failure.store(failure, Ordering::SeqCst);
                 assert!(s.stage(&a, b"blob", DataClass::Intermediate, 0).is_err());
@@ -349,9 +350,12 @@ async fn external_partial_upload_and_response_loss_at_each_publication_boundary(
             let target = Target::structured(json!({}), 1, "config").with_artifact(blob.clone());
             if boundary == 2 {
                 backend.failure.store(failure, Ordering::SeqCst);
-                assert!(s.validate(&a, &target, &validator).await.is_err());
+                assert!(s.validate(&a, &target, validator.clone()).await.is_err());
             }
-            let evidence = open().validate(&a, &target, &validator).await.unwrap();
+            let evidence = open()
+                .validate(&a, &target, validator.clone())
+                .await
+                .unwrap();
             if boundary == 3 {
                 backend.failure.store(failure, Ordering::SeqCst);
                 assert!(

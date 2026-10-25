@@ -46,8 +46,8 @@ fn standard_file_tools_use_dispatch_no_vm_and_current_policy() {
             tools: vec![tool.clone()],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert_eq!(
             rt.drive(&c).await.unwrap().state,
@@ -158,20 +158,20 @@ fn same_validator_finalizer_contract_for_artifact_and_structured_judgment() {
                 tools: Vec::<BusinessTool>::new(),
                 policy: FakePolicy::default(),
                 clock: TestClock::default(),
-                validator: DataValidator {
+                validator: std::sync::Arc::new(DataValidator {
                     store: data.clone(),
                     access: a.clone(),
                     validator: Rules,
                     workspace,
                     artifacts: artifacts.clone(),
-                },
-                finalizer: DataFinalizer {
+                }),
+                finalizer: std::sync::Arc::new(DataFinalizer {
                     store: data,
                     access: a,
                     required: vec![ValidatorKey::new("host", "1")],
                     workspace,
                     artifacts,
-                },
+                }),
             };
             assert_eq!(
                 rt.drive(&c).await.unwrap().state,
@@ -232,8 +232,8 @@ fn catalog_filters_authority_and_rejects_changed_descriptor() {
             tools: vec![dynamic],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert!(rt.drive(&c).await.is_err());
         assert_eq!(s.list_operations(&c.run).await.unwrap().len(), 1);
@@ -316,13 +316,13 @@ fn validator_tool_and_output_wrapper_use_common_dispatch() {
         });
         let rt = runtime(s.clone(), FakeModel::scripted(vec![]), vec![]);
         let tool = ValidationTool {
-            adapter: DataValidator {
+            adapter: Arc::new(DataValidator {
                 store: data.clone(),
                 access: a.clone(),
                 validator: Rules,
                 workspace: false,
                 artifacts: vec![],
-            },
+            }),
             run: s.get(&c.run).await.unwrap(),
         };
         let d = tool.descriptor();
@@ -413,8 +413,8 @@ fn lost_file_response_keeps_saved_content_and_does_not_replay() {
             tools: vec![tool.clone()],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         let invoke = &tool;
         let lookup = &tool;

@@ -20,11 +20,18 @@ pub struct Runtime<S, M, T, P, C, V, F> {
     pub tools: Vec<T>,
     pub policy: P,
     pub clock: C,
-    pub validator: V,
-    pub finalizer: F,
+    pub validator: Arc<V>,
+    pub finalizer: Arc<F>,
 }
-impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, F: Finalizer>
-    Runtime<S, M, T, P, C, V, F>
+impl<
+    S: ControlStore,
+    M: ModelPort,
+    T: Tool,
+    P: Policy,
+    C: Clock,
+    V: Validator + 'static,
+    F: Finalizer + 'static,
+> Runtime<S, M, T, P, C, V, F>
 {
     async fn persist_result(
         &self,
@@ -151,6 +158,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                         let child = self.store.get(&h).await?;
                         if matches!(child.state, RunState::Terminal(_)) {
                             Ok(Lookup::Found(ExternalResult::Applied {
+                                physical_evidence: None,
                                 output: serde_json::to_value(h).unwrap(),
                                 usage: Usage::measured(0, 0, 0),
                                 external_id: None,
@@ -224,6 +232,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     let child = self.store.get(&h).await?;
                     if matches!(child.state, RunState::Terminal(_)) {
                         Lookup::Found(ExternalResult::Applied {
+                            physical_evidence: None,
                             output: serde_json::to_value(h).unwrap(),
                             usage: Usage::measured(0, 0, 0),
                             external_id: None,
@@ -245,6 +254,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
     }
     fn context(&self, c: &Claim, r: &RunRecord, op: &Operation, permission: &str) -> ToolContext {
         ToolContext {
+            recovery_proof: op.request.recovery_proof.clone(),
             claim: c.clone(),
             principal: r.spec.principal.clone(),
             operation: op.id.clone(),
@@ -258,7 +268,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
     pub async fn dispatch<I, L, IF, LF>(
         &self,
         c: &Claim,
-        request: DispatchRequest,
+        mut request: DispatchRequest,
         permission: &str,
         invoke: I,
         lookup: L,
@@ -276,6 +286,15 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
             .filter(|op| op.request.attempt == request.attempt);
         let op = if let Some(op) = existing {
             // Stored request is authoritative, including exact output cap and price.
+            if request.recovery_proof.is_some()
+                && request.recovery_proof != op.request.recovery_proof
+            {
+                return Err(Error::Conflict);
+            }
+            if op.request.recovery_proof.is_some() {
+                request.recovery_proof = op.request.recovery_proof.clone();
+                request.recovery_until = op.request.recovery_until;
+            }
             if op.request != request {
                 return Err(Error::Conflict);
             }
@@ -283,7 +302,71 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
         } else {
             let r = self.store.check(c, self.clock.now(), true).await?;
             self.policy.authorize(&r, &request.target, permission)?;
-            self.store.begin(c, request, self.clock.now()).await?
+            if request.attempt > 1 {
+                let previous = self
+                    .store
+                    .operation(&c.run, &request.key)
+                    .await?
+                    .ok_or(Error::Conflict)?;
+                request.recovery_until =
+                    match (previous.request.recovery_until, request.recovery_until) {
+                        (Some(old), Some(new)) => Some(old.min(new)),
+                        (old, new) => old.or(new),
+                    };
+            }
+            let preparation = PreparationContext {
+                claim: c.clone(),
+                principal: r.spec.principal.clone(),
+                key: request.key.clone(),
+                attempt: request.attempt,
+                target: request.target.clone(),
+            };
+            let proof = if matches!(
+                request.kind,
+                OperationKind::Model | OperationKind::Compaction
+            ) && self.model.requires_recovery_preparation()
+            {
+                Some(
+                    self.model
+                        .prepare_recovery(&preparation, &request.input)
+                        .await?
+                        .ok_or(Error::Conflict)?,
+                )
+            } else if request.kind == OperationKind::Tool {
+                if let Some(tool) = self
+                    .tools
+                    .iter()
+                    .find(|t| t.descriptor().name == request.target)
+                    && tool.requires_recovery_preparation()
+                {
+                    Some(
+                        tool.prepare_recovery(&preparation, &request.input)
+                            .await?
+                            .ok_or(Error::Conflict)?,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(proof) = &proof {
+                proof.validate(self.clock.now())?;
+                request.recovery_until = Some(
+                    request
+                        .recovery_until
+                        .map_or(proof.expires_at, |old| old.min(proof.expires_at)),
+                );
+            }
+            request.recovery_proof = proof;
+            match self.store.begin(c, request, self.clock.now()).await {
+                Err(Error::ReservationDenied)
+                    if matches!(r.spec.budget, ReservationPolicy::Shrink { .. }) =>
+                {
+                    return Err(Error::Pending("budget requote".into()));
+                }
+                result => result?,
+            }
         };
         let r = self.store.check(c, self.clock.now(), false).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
@@ -622,6 +705,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     if descriptors.iter().any(|d| !catalog.contains(d)) {
                         return Err(Error::Conflict);
                     }
+                    let mut quoted_reserve = None;
                     let request = if let Some(op) = &existing {
                         serde_json::from_value::<ModelRequest>(op.request.input.clone())
                             .map_err(|e| Error::Invalid(e.to_string()))?
@@ -639,15 +723,15 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             metadata: Value::Null,
                         };
                         let input = self.model.input_upper_bound(&req)?;
-                        let (cap, _) = self.model_budget(c, input).await?;
+                        let (cap, reserve) = self.model_budget(c, input).await?;
+                        quoted_reserve = Some(reserve);
                         req.max_output = cap;
                         req
                     };
                     let mut dispatch = if let Some(op) = &existing {
                         self.next_attempt(c, op, self.model.retry_policy()).await?
                     } else {
-                        let input = self.model.input_upper_bound(&request)?;
-                        let (_, reserve) = self.model_budget(c, input).await?;
+                        let reserve = quoted_reserve.ok_or(Error::Conflict)?;
                         let mut d = DispatchRequest::new(
                             &key,
                             OperationKind::Model,
@@ -705,6 +789,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             |ctx| async move {
                                 let found = self.model.lookup(&ctx, lookup_request).await?;
                                 if let Lookup::NotFound { scope } = &found
+                                    && ctx.recovery_proof.is_none()
                                     && self.model.recovery().as_ref().map(|r| &r.0) != Some(scope)
                                 {
                                     return Ok(Lookup::Unknown);
@@ -905,7 +990,14 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     self.policy.authorize(&current, "finalize", "finalize")?;
                     // No call-count gate: only current budget, deadline and trusted receipts.
                     self.store.finalization_allowed(c, self.clock.now()).await?;
-                    let receipt = self.validator.validate(&current, &output)?;
+                    let validator = self.validator.clone();
+                    let validation_run = current.clone();
+                    let validation_output = output.clone();
+                    let receipt = tokio::task::spawn_blocking(move || {
+                        validator.validate(&validation_run, &validation_output)
+                    })
+                    .await
+                    .map_err(|_| Error::Storage)??;
                     if receipt.hash != digest(&output)
                         || receipt.basis_revision != current.spec.basis_revision
                         || receipt.config_version != current.spec.config_version
@@ -962,7 +1054,12 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             .await?;
                         return Err(Error::Pending("validation repair".into()));
                     }
-                    let completion = self.finalizer.finalize(&current, output, receipt)?;
+                    let finalizer = self.finalizer.clone();
+                    let completion = tokio::task::spawn_blocking(move || {
+                        finalizer.finalize(&current, output, receipt)
+                    })
+                    .await
+                    .map_err(|_| Error::Storage)??;
                     self.store.finalize(c, completion, self.clock.now()).await?;
                     return self.store.get(&c.run).await;
                 }
@@ -984,8 +1081,15 @@ fn completed(result: ExternalResult) -> Result<Value> {
     }
 }
 
-impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, F: Finalizer>
-    Runtime<S, M, T, P, C, V, F>
+impl<
+    S: ControlStore,
+    M: ModelPort,
+    T: Tool,
+    P: Policy,
+    C: Clock,
+    V: Validator + 'static,
+    F: Finalizer + 'static,
+> Runtime<S, M, T, P, C, V, F>
 {
     /// Our own summary request. All paid work goes through the ordinary dispatcher.
     pub async fn compact_context(

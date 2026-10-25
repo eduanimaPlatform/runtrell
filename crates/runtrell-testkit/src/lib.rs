@@ -124,6 +124,7 @@ impl ModelPort for FakeModel {
         usage.model = "fake".into();
         usage.cached = Some(0);
         let result = ExternalResult::Applied {
+            physical_evidence: None,
             output: serde_json::to_value(reply).unwrap(),
             usage,
             external_id: None,
@@ -219,6 +220,7 @@ impl Tool for BusinessTool {
             return Ok(ExternalResult::Accepted { external_id: key });
         }
         Ok(ExternalResult::Applied {
+            physical_evidence: None,
             output,
             usage: Usage::measured(0, 0, 0),
             external_id: Some(key),
@@ -235,6 +237,7 @@ impl Tool for BusinessTool {
         Ok(match self.effects.lock().unwrap().get(key) {
             Some((hash, output)) if hash == &digest(&input) => {
                 Lookup::Found(ExternalResult::Applied {
+                    physical_evidence: None,
                     output: output.clone(),
                     usage: Usage::measured(0, 0, 0),
                     external_id: Some(key.into()),
@@ -296,6 +299,19 @@ impl Finalizer for DecisionFinalizer {
 }
 /// Small executor for immediately-ready fake adapters. Real hosts supply an executor.
 pub fn block_on<F: Future>(f: F) -> F::Output {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    });
+    let _enter = if tokio::runtime::Handle::try_current().is_err() {
+        Some(rt.enter())
+    } else {
+        None
+    };
     let w = std::task::Waker::noop();
     let mut cx = std::task::Context::from_waker(w);
     let mut f = std::pin::pin!(f);
@@ -326,11 +342,12 @@ pub fn runtime(
         tools,
         policy: FakePolicy::default(),
         clock: TestClock::default(),
-        validator: DecisionValidator::default(),
-        finalizer: DecisionFinalizer,
+        validator: std::sync::Arc::new(DecisionValidator::default()),
+        finalizer: std::sync::Arc::new(DecisionFinalizer),
     }
 }
 pub mod execution;
 pub mod execution_contracts;
 pub use execution::{FakeExecutionBackend, FakeExecutionRegistry};
 pub mod budget_contracts;
+pub mod recovery_contracts;

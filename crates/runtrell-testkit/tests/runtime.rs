@@ -25,6 +25,7 @@ fn req(key: &str, tokens: u64, cost: u64) -> DispatchRequest {
 }
 fn applied(tokens: u64, cost: u64) -> ExternalResult {
     ExternalResult::Applied {
+        physical_evidence: None,
         output: json!({"ok":true}),
         usage: Usage::measured(tokens, 0, cost),
         external_id: None,
@@ -372,6 +373,7 @@ fn invalid_partial_usage_and_unknown_hold_reservation() {
                     &c,
                     &op.id,
                     ExternalResult::Applied {
+                        physical_evidence: None,
                         output: Value::Null,
                         usage,
                         external_id: None
@@ -784,8 +786,8 @@ fn durable_result_before_failed_checkpoint_recovers_without_resampling() {
             tools: Vec::<BusinessTool>::new(),
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: FailValidator(s.clone()),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(FailValidator(s.clone())),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert_eq!(rt.drive(&c).await, Err(Error::Storage));
         let next = s.claim(&h, "new", 101, 100).await.unwrap();
@@ -926,8 +928,8 @@ fn bounded_tool_timeout_keeps_unknown_cost_and_records_separate_stop() {
             tools: vec![Hang(clock.clone())],
             policy: FakePolicy::default(),
             clock,
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert!(matches!(
             rt.drive(&c).await.unwrap().state,

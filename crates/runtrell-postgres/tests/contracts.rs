@@ -46,8 +46,8 @@ mod postgres {
             tools,
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         }
     }
     suite!();
@@ -86,6 +86,26 @@ fn selectable_axes_and_ancestor_quantity_guarantees() {
 #[test]
 fn tokenless_paid_tool_reserves_host_quantity() {
     support::block_on(runtrell_testkit::budget_contracts::quantity_tool(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}
+#[test]
+fn model_quote_race() {
+    support::block_on(runtrell_testkit::budget_contracts::model_quote_race(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}
+#[test]
+fn preparation_and_physical_evidence() {
+    support::block_on(
+        runtrell_testkit::recovery_contracts::preparation_and_evidence(std::sync::Arc::new(
+            support::TestPg::default(),
+        )),
+    );
+}
+#[test]
+fn external_job_preparation() {
+    support::block_on(runtrell_testkit::recovery_contracts::job_preparation(
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }

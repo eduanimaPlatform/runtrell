@@ -68,3 +68,14 @@ but still holds its slot and prevents Run finalization until its receipt is
 confirmed. Missing measurements on a completed result return UsageUnknown after
 the incomplete result and usage observation are saved; malformed subsets return
 Invalid. Memory and Postgres implement this same contract.
+
+
+The driver computes the final model max_output and reservation once as one quote.
+A competing Run cannot replace just the reserved amount with a smaller quote.
+If atomic admission loses a race under Shrink, the driver returns Waiting("budget
+requote") without sending, releases its active Run slot, and recomputes both values
+on resume. No operation intent was admitted. Other denial policies retain their
+ordinary refusal/wait behavior. Input estimation is performed before this final
+quote and must bound the finalized request. The shared Memory/Postgres
+`model_quote_race` contract inserts a reservation by another Run between quoting
+and admission, then checks the resumed request and reservation together.

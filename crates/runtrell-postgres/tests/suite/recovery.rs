@@ -59,12 +59,14 @@ impl ModelPort for RestartModel {
         usage.cached = Some(0);
         if self.case == "failed" {
             Ok(ExternalResult::Failed {
+ physical_evidence: None,
                 code: "PROVIDER_REJECTED".into(),
                 usage,
                 retry_after: None,
             })
         } else {
             Ok(ExternalResult::Applied {
+ physical_evidence: None,
                 output: serde_json::to_value(FakeModel::decision(json!({"decision":"answered"})))
                     .unwrap(),
                 usage,
@@ -122,8 +124,8 @@ async fn restart_case(case: &'static str) {
         tools: Vec::<BusinessTool>::new(),
         policy: FakePolicy::default(),
         clock: clock.clone(),
-        validator: DecisionValidator::default(),
-        finalizer: DecisionFinalizer,
+        validator: std::sync::Arc::new(DecisionValidator::default()),
+        finalizer: std::sync::Arc::new(DecisionFinalizer),
     };
     let mut future = Box::pin(rt.drive(&first));
     let w = Waker::noop();

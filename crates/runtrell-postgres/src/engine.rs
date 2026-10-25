@@ -618,6 +618,7 @@ impl OperationStore for PgStore {
         result: ExternalResult,
         now: u64,
     ) -> Result<()> {
+        result.validate_evidence()?;
         let observation = result.clone();
         let status = self.tx(Scope::Attempt(&c.run, id, false), |s| {
             fence(s, c, now, false)?;
@@ -646,7 +647,7 @@ impl OperationStore for PgStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
-            if op.request.scope.as_deref() != Some(scope)
+            if op.request.replay_scope() != Some(scope)
                 || !op.request.recovery_until.is_some_and(|t| now < t)
             {
                 return Err(Error::UsageUnknown);
@@ -662,6 +663,16 @@ impl OperationStore for PgStore {
         .await
     }
     async fn begin(&self, c: &Claim, request: DispatchRequest, now: u64) -> Result<Operation> {
+        if let Some(proof) = &request.recovery_proof {
+            proof.validate(now)?;
+            if request
+                .recovery_until
+                .is_none_or(|until| until > proof.expires_at)
+            {
+                return Err(Error::Invalid("recovery deadline exceeds proof".into()));
+            }
+        }
+
         // Reservation denial exhausts the request account; atomic intent itself rolls back.
         let result = self
             .tx(Scope::Begin(&c.run, &request.clone()), |s| {
@@ -782,6 +793,11 @@ impl OperationStore for PgStore {
             if op.state != OperationState::Intent {
                 return Err(Error::Conflict);
             }
+            if op.request.recovery_proof.is_some()
+                && !op.request.recovery_until.is_some_and(|until| now < until)
+            {
+                return Err(Error::UsageUnknown);
+            }
             if op.send_count > 0 {
                 if op.replay_proof_generation != Some(c.generation) {
                     return Err(Error::OwnershipLost);
@@ -798,6 +814,7 @@ impl OperationStore for PgStore {
         .await
     }
     async fn record(&self, c: &Claim, id: &str, result: ExternalResult, now: u64) -> Result<()> {
+        result.validate_evidence()?;
         let observation = result.clone();
         let status = self
             .tx(Scope::Attempt(&c.run, id, true), |s| {

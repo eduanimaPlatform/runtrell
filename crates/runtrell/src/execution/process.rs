@@ -218,6 +218,11 @@ impl ExecutionBackend for ProcessBackend {
     }
     fn supports(&self, r: &ExecutionRequest) -> Result<()> {
         self.capabilities().check(r)?;
+        if cfg!(target_os = "macos") && r.requires_descendants {
+            return Err(Error::Unsupported(
+                "Seatbelt backend denies fork; descendant execution unavailable".into(),
+            ));
+        }
         let Program::Process { executable, args } = &r.program;
         if !self.executables.contains_key(executable) {
             return Err(Error::PermissionDenied);

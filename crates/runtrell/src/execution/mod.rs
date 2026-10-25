@@ -117,6 +117,8 @@ pub enum Program {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionRequest {
+    /// Require an isolation backend that can stop a process tree.
+    pub requires_descendants: bool,
     pub limits: ExecutionLimits,
     pub program: Program,
     /// Optional host-pinned executable SHA-256, checked again by OS backends.
@@ -132,6 +134,7 @@ pub struct ExecutionRequest {
 impl ExecutionRequest {
     pub fn process(executable: impl Into<String>, args: Vec<String>) -> Self {
         Self {
+            requires_descendants: false,
             limits: ExecutionLimits::default(),
             executable_hash: None,
             program: Program::Process {
@@ -234,16 +237,30 @@ pub trait ExecutionBackend: Send + Sync {
     fn supports(&self, request: &ExecutionRequest) -> Result<()> {
         self.capabilities().check(request)
     }
-    async fn acquire(
+    fn acquire(
         &self,
         context: &ToolContext,
         request: &ExecutionRequest,
-    ) -> Result<ExecutionRef>;
-    async fn start(&self, context: &ToolContext, execution: &ExecutionRef) -> Result<()>;
-    async fn lookup(&self, context: &ToolContext) -> Result<Option<Observation>>;
-    async fn cancel(&self, context: &ToolContext) -> Result<()>;
-    async fn stop(&self, context: &ToolContext) -> Result<Progress>;
-    async fn destroy(&self, context: &ToolContext) -> Result<Progress>;
+    ) -> impl std::future::Future<Output = Result<ExecutionRef>> + Send;
+    fn start(
+        &self,
+        context: &ToolContext,
+        execution: &ExecutionRef,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn lookup(
+        &self,
+        context: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Option<Observation>>> + Send;
+    fn cancel(&self, context: &ToolContext)
+    -> impl std::future::Future<Output = Result<()>> + Send;
+    fn stop(
+        &self,
+        context: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Progress>> + Send;
+    fn destroy(
+        &self,
+        context: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Progress>> + Send;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Resource {
@@ -413,10 +430,21 @@ impl ExecutionRecord {
 /// A durable host can implement this without changing any existing control-store trait.
 /// CAS must preserve cancel and receipts. Never delete unknown acquisitions.
 pub trait ExecutionLedger: Send + Sync {
-    async fn insert(&self, record: ExecutionRecord) -> Result<ExecutionRecord>;
-    async fn get(&self, owner: &RunHandle, operation: &str) -> Result<ExecutionRecord>;
-    async fn cas(&self, expected: u64, record: ExecutionRecord) -> Result<ExecutionRecord>;
-    async fn pending(&self) -> Result<Vec<ExecutionRecord>>;
+    fn insert(
+        &self,
+        record: ExecutionRecord,
+    ) -> impl std::future::Future<Output = Result<ExecutionRecord>> + Send;
+    fn get(
+        &self,
+        owner: &RunHandle,
+        operation: &str,
+    ) -> impl std::future::Future<Output = Result<ExecutionRecord>> + Send;
+    fn cas(
+        &self,
+        expected: u64,
+        record: ExecutionRecord,
+    ) -> impl std::future::Future<Output = Result<ExecutionRecord>> + Send;
+    fn pending(&self) -> impl std::future::Future<Output = Result<Vec<ExecutionRecord>>> + Send;
 }
 #[derive(Clone, Default)]
 pub struct MemoryExecutionLedger(Arc<Mutex<BTreeMap<String, ExecutionRecord>>>);

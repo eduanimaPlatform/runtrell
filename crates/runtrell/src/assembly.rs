@@ -5,15 +5,31 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 
-type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
+type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 trait ErasedTool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
+    fn requires_recovery_preparation(&self) -> bool;
+    fn prepare_recovery<'a>(
+        &'a self,
+        c: &'a PreparationContext,
+        v: &'a Value,
+    ) -> Call<'a, Option<RecoveryProof>>;
     fn invoke<'a>(&'a self, c: &'a ToolContext, v: Value) -> Call<'a, ExternalResult>;
     fn lookup<'a>(&'a self, c: &'a ToolContext, v: Value) -> Call<'a, Lookup>;
     fn cancel<'a>(&'a self, c: &'a ToolContext, v: Value) -> Call<'a, Progress>;
 }
 struct Erase<T>(T);
 impl<T: Tool> ErasedTool for Erase<T> {
+    fn requires_recovery_preparation(&self) -> bool {
+        self.0.requires_recovery_preparation()
+    }
+    fn prepare_recovery<'a>(
+        &'a self,
+        c: &'a PreparationContext,
+        v: &'a Value,
+    ) -> Call<'a, Option<RecoveryProof>> {
+        Box::pin(self.0.prepare_recovery(c, v))
+    }
     fn descriptor(&self) -> ToolDescriptor {
         self.0.descriptor()
     }
@@ -36,6 +52,16 @@ impl RegisteredTool {
     }
 }
 impl Tool for RegisteredTool {
+    fn requires_recovery_preparation(&self) -> bool {
+        self.0.requires_recovery_preparation()
+    }
+    async fn prepare_recovery(
+        &self,
+        c: &PreparationContext,
+        v: &Value,
+    ) -> Result<Option<RecoveryProof>> {
+        self.0.prepare_recovery(c, v).await
+    }
     fn descriptor(&self) -> ToolDescriptor {
         self.0.descriptor()
     }

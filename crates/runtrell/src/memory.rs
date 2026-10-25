@@ -109,7 +109,7 @@ impl MemoryStore {
             if op.run != claim.run {
                 return Err(Error::PermissionDenied);
             }
-            if op.request.scope.as_deref() != Some(scope)
+            if op.request.replay_scope() != Some(scope)
                 || !op.request.recovery_until.is_some_and(|t| now < t)
             {
                 return Err(Error::UsageUnknown);
@@ -707,6 +707,7 @@ impl OperationStore for MemoryStore {
         result: ExternalResult,
         now: u64,
     ) -> Result<()> {
+        result.validate_evidence()?;
         self.tx(|s| {
             fence(s, c, now, false)?;
             let op = s.operations.get_mut(id).ok_or(Error::NotFound)?;
@@ -727,6 +728,16 @@ impl OperationStore for MemoryStore {
         MemoryStore::proven_unsent(self, c, id, scope, now).await
     }
     async fn begin(&self, c: &Claim, request: DispatchRequest, now: u64) -> Result<Operation> {
+        if let Some(proof) = &request.recovery_proof {
+            proof.validate(now)?;
+            if request
+                .recovery_until
+                .is_none_or(|until| until > proof.expires_at)
+            {
+                return Err(Error::Invalid("recovery deadline exceeds proof".into()));
+            }
+        }
+
         // Reservation denial exhausts the request account; atomic intent itself rolls back.
         let result = self.tx(|s| {
             let r = fence(s, c, now, true)?;
@@ -844,6 +855,11 @@ impl OperationStore for MemoryStore {
             if op.state != OperationState::Intent {
                 return Err(Error::Conflict);
             }
+            if op.request.recovery_proof.is_some()
+                && !op.request.recovery_until.is_some_and(|until| now < until)
+            {
+                return Err(Error::UsageUnknown);
+            }
             if op.send_count > 0 {
                 if op.replay_proof_generation != Some(c.generation) {
                     return Err(Error::OwnershipLost);
@@ -859,6 +875,7 @@ impl OperationStore for MemoryStore {
         })
     }
     async fn record(&self, c: &Claim, id: &str, result: ExternalResult, now: u64) -> Result<()> {
+        result.validate_evidence()?;
         self.tx(|s| {
             let r = fence(s, c, now, false)?;
             let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;

@@ -75,20 +75,29 @@ async fn poll_backend<L: ExecutionLedger, B: ExecutionBackend, C: Clock>(
     let usage = Usage::measured(0, 0, o.cost_micro_usd.ok_or(Error::UsageUnknown)?);
     Ok(Lookup::Found(if let Some(code) = o.failure {
         ExternalResult::Failed {
+            physical_evidence: None,
             code,
             usage,
             retry_after: None,
         }
     } else {
         ExternalResult::Applied {
+            physical_evidence: None,
             output: o.result.unwrap_or(Value::Null),
             usage,
             external_id: Some(o.execution.id),
         }
     }))
 }
-impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, F: Finalizer>
-    Runtime<S, M, T, P, C, V, F>
+impl<
+    S: ControlStore,
+    M: ModelPort,
+    T: Tool,
+    P: Policy,
+    C: Clock,
+    V: Validator + 'static,
+    F: Finalizer + 'static,
+> Runtime<S, M, T, P, C, V, F>
 {
     /// Explicit code demand only. Search/normal drive never invokes this path.
     /// Repeating the exact request reconciles the original environment, never starts a replacement.
@@ -201,6 +210,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
         self.policy.authorize(&run, &op.request.target, "cancel")?;
         self.store.cancel(&c.run, "execution cancelled").await?;
         let ctx = ToolContext {
+            recovery_proof: None,
             claim: c.clone(),
             principal: run.spec.principal,
             operation: op.id.clone(),

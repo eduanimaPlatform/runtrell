@@ -215,6 +215,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
             > self.store.policy().max_edit_bytes
         {
             return Ok(ExternalResult::Failed {
+                physical_evidence: None,
                 code: "INPUT_LIMIT".into(),
                 usage: Usage::measured(0, 0, 0),
                 retry_after: None,
@@ -222,11 +223,13 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
         }
         Ok(match self.execute(input).await {
             Ok(output) => ExternalResult::Applied {
+                physical_evidence: None,
                 output,
                 usage: Usage::measured(0, 0, 0),
                 external_id: None,
             },
             Err(e) => ExternalResult::Failed {
+                physical_evidence: None,
                 code: e.to_string(),
                 usage: Usage::measured(0, 0, 0),
                 retry_after: None,
@@ -279,12 +282,14 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
         }
         Ok(match result {
             ExternalResult::Applied {
+                physical_evidence,
                 output,
                 usage,
                 external_id,
             } => {
                 validate_schema(&output, &self.inner.descriptor().output_schema)?;
                 ExternalResult::Applied {
+                    physical_evidence,
                     output: json!(
                         self.store
                             .store_output(
@@ -305,6 +310,17 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
     }
 }
 impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
+    fn requires_recovery_preparation(&self) -> bool {
+        self.inner.requires_recovery_preparation()
+    }
+    async fn prepare_recovery(
+        &self,
+        context: &PreparationContext,
+        input: &Value,
+    ) -> Result<Option<RecoveryProof>> {
+        self.inner.prepare_recovery(context, input).await
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         let mut d = self.inner.descriptor();
         d.version = format!("{}:stored-output-1:{}", d.version, self.inline_limit);
@@ -328,10 +344,12 @@ impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
 }
 /// Validation is available through the same ordinary Tool interface as files.
 pub struct ValidationTool<V, S = DataStore> {
-    pub adapter: DataValidator<V, S>,
+    pub adapter: std::sync::Arc<DataValidator<V, S>>,
     pub run: RunRecord,
 }
-impl<V: TargetValidator, S: EvidenceStore + StandardToolStore> Tool for ValidationTool<V, S> {
+impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'static> Tool
+    for ValidationTool<V, S>
+{
     fn descriptor(&self) -> ToolDescriptor {
         let key = self.adapter.validator.key();
         ToolDescriptor {
@@ -362,8 +380,13 @@ impl<V: TargetValidator, S: EvidenceStore + StandardToolStore> Tool for Validati
         {
             return Err(Error::PermissionDenied);
         }
-        let receipt = self.adapter.validate(&self.run, &input)?;
+        let adapter = self.adapter.clone();
+        let run = self.run.clone();
+        let receipt = tokio::task::spawn_blocking(move || adapter.validate(&run, &input))
+            .await
+            .map_err(|_| Error::Storage)??;
         Ok(ExternalResult::Applied {
+            physical_evidence: None,
             output: json!(receipt),
             usage: Usage::measured(0, 0, 0),
             external_id: None,

@@ -40,3 +40,23 @@ fn tokenless_paid_tool_reserves_host_quantity() {
         runtrell::memory::MemoryStore::default(),
     )));
 }
+#[test]
+fn model_quote_race() {
+    block_on(budget_contracts::model_quote_race(std::sync::Arc::new(
+        runtrell::memory::MemoryStore::default(),
+    )));
+}
+#[test]
+fn preparation_and_physical_evidence() {
+    block_on(
+        runtrell_testkit::recovery_contracts::preparation_and_evidence(std::sync::Arc::new(
+            runtrell::memory::MemoryStore::default(),
+        )),
+    );
+}
+#[test]
+fn external_job_preparation() {
+    block_on(runtrell_testkit::recovery_contracts::job_preparation(
+        std::sync::Arc::new(runtrell::memory::MemoryStore::default()),
+    ));
+}

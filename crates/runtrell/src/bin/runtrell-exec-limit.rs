@@ -79,6 +79,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(target_os = "linux"))]
         return Err("cgroups require Linux".into());
     }
+    #[cfg(target_os = "linux")]
+    rustix::thread::set_no_new_privs(true)?;
     Err(std::process::Command::new(binary).args(args).exec().into())
 }
 #[cfg(target_os = "linux")]

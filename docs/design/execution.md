@@ -32,7 +32,7 @@ wall timeoutをhost scheduler停止も含む厳密な実時間保証として扱
 
 ## 資源台帳と資格情報
 
-CPU・Memory・PIDは停止確認、Disk・Volumeは削除確認、ExternalCostは費用receiptが解放条件。Future drop、期限到達、Run取消だけでは解放しない。環境はRun間再割当しない。backend状態と台帳は別々に照会でき、cleanup途中停止後の再照合は冪等にする。
+CPU・PIDは停止確認、Memoryはbackendの実メモリ回収確認（Linux tmpfsではunmountとcgroup削除）、Disk・Volumeは削除確認、ExternalCostは費用receiptが解放条件。Future drop、期限到達、Run取消だけでは解放しない。環境はRun間再割当しない。backend状態と台帳は別々に照会でき、cleanup途中停止後の再照合は冪等にする。
 
 setup/依存取得/installerも通常実行と同じ要求・予約・期限・network条件に従う。初期backendはnetwork denyのみ、資格情報受渡しなし、stdin null、TTYなし。対話が必要という宣言を拒否し、入力を無視して待つprogramはwall timeoutで終了する。親envは全消去し、HOME/TMPDIR/PATHを専用値へ固定する。共有cacheは提供しない。全tenant secretや管理者secretを渡すAPIは設けない。
 
@@ -94,9 +94,9 @@ helper は親 PID の前後照合と parent-death SIGKILL を設定する。cgro
 
 開始前に Running を保存し、実行中は operation 単位の OS file lock を保持する。別 client は atomic record を照会し、耐久 cancel marker で取消できる。取得中に staging が operation lock を保持している場合も、停止側は識別済み group を kill できる。取得側の record 更新と競合させず Pending を返し、後続の停止確認で receipt を保存する。backend process が失われると OS が lock を解放する。Running を Ready に戻したり、同じ操作を再実行したりしない。scratch と cgroup の途中作成で識別証拠を保存できなかった窓は、安全を優先して Unknown として残る。
 
-管理 Worker は通常の owner/lease fence と管理権限を取得したうえで、`ExecutionLedger.pending()` と `inventory()` の owner/operation/runtime を照合し、`reconcile(&pending_record)` で固定 request 全体も一致させる。元の ToolContext の owner/operation で `stop` を繰り返し、`cgroup.kill` と `cgroup.events populated 0` の確認後だけ CPU/Memory/PID の receipt を得る。PID 単体を識別子にしない。復旧時の終了理由・stdout/stderr は再現できないため `RECOVERED_STOP_RESULT_UNKNOWN` とし、元 mount が一致する場合だけ bounded な file copy を保存する。これは正常終了の receipt ではない。
+管理 Worker は通常の owner/lease fence と管理権限を取得したうえで、`ExecutionLedger.pending()` と `inventory()` の owner/operation/runtime を照合し、`reconcile(&pending_record)` で固定 request 全体も一致させる。元の ToolContext の owner/operation で `stop` を繰り返し、`cgroup.kill` と `cgroup.events populated 0` の確認後だけ CPU/PID の receipt を得る。tmpfsは停止後もpageを保持するので、この時点ではMemoryを解放しない。PID 単体を識別子にしない。復旧時の終了理由・stdout/stderr は再現できないため `RECOVERED_STOP_RESULT_UNKNOWN` とし、元 mount が一致する場合だけ bounded な file copy を保存する。これは正常終了の receipt ではない。
 
-`destroy` は停止確認後に Reclaiming を耐久保存し、通常の unmount（lazy detach 不使用）・scratch directory 削除・cgroup 削除の確認後に Disk/Volume を解放する。途中停止後も再試行できる。Destroyed の管理記録は tombstone として保持し、同 operation の acquire は元 reference を返す。記録の削除／retention は、その operation を二度と再受付しない host 側方針と合わせて別途実施する。
+`destroy` は停止確認後に Reclaiming を耐久保存し、通常の unmount（lazy detach 不使用）・mount IDが消えたこと・scratch directory 削除・cgroup 削除の確認後に Memory/Disk/Volume を解放する。途中停止後も再試行できる。Destroyed の管理記録は tombstone として保持し、同 operation の acquire は元 reference を返す。記録の削除／retention は、その operation を二度と再受付しない host 側方針と合わせて別途実施する。
 
 記録の破損、別 runtime 版、request 不一致、cgroup inode／mount ID 不一致、対応記録のない directory/group は Unknown として隔離する。自動で削除・別 Run に再割当しない。`inventory().execution == None` は隔離対象。名前の一致だけで採用しない。ホスト再起動、管理 FS 喪失、mount namespace 変更は通常の backend process 再起動と異なり、存在／削除の receipt を再構築できない場合がある。ローカル record は ExecutionLedger の原子予約・owner fence・費用精算を置き換えない。ローカル実行の外部課金は0であり、host/cloud 利用料の課金 adapter を実装したという意味ではない。
 
@@ -116,14 +116,32 @@ host は固定絶対 path、正確な `major.minor.patch`、実行 file SHA-256 
 
 [公開CI](../../.github/workflows/ci.yml)は標準`ubuntu-24.04` VMの独立した実隔離jobを使う。通常の契約jobは使い捨てPostgreSQL 18 serviceを使い、Python feature有無でunit/integration/doctest・公開example・trace/hashを確認する。macOSは標準`macos-latest`上のSeatbelt実隔離jobを使う。Self-hosted、larger runner、有料cache拡張、private接続・秘密情報は使わない。
 
-Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り、親と専用subtreeの`cpu memory pids` controllerを有効化する。専用subtreeには管理processを置かず、backendがoperation単位の子groupへhelperを参加させる。管理supervisorとhelperにはhost mount namespaceのCAP_SYS_ADMINが必要で、backendが要求disk枠のtmpfsをmount/unmountする。Rustのbuildは通常userで行い、実試験の管理処理だけsudoで実行する。
+Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り、親と専用subtreeの`cpu memory pids` controllerを有効化する。専用subtreeには管理processを置かず、backendがoperation単位の子groupへhelperを参加させる。LinuxBackendを保持する管理supervisorにはhost mount namespaceのCAP_SYS_ADMINが必要で、backend自身が要求disk枠のtmpfsをmount/unmountする。runtrell-exec-limitはその子として起動し、cgroup参加・入力staging・rlimit・bubblewrapへのexecを担当する。Rustのbuildは通常userで行い、実試験の管理処理だけsudoで実行する。
 
-payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須とし、uid/gid 65534、`--cap-drop ALL`、追加userns禁止、read-only runtime、network分離を適用する。管理領域・資格情報・cgroup FSは公開しない。`linux_payload_has_no_privileges`はpayloadの実行、uid/gid、全5種のcapability集合が0、管理側と異なるuser namespaceを照合する。共有kernelの脆弱性に対するVM相当の防御を意味しない。
+payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須とし、uid/gid 65534、`--cap-drop ALL`、helperの`no_new_privs`、追加userns禁止、read-only runtime、network分離を適用する。管理領域・資格情報・cgroup FSは公開しない。`linux_payload_has_no_privileges`はpayloadの実行、uid/gid、全5種のcapability集合が0、NoNewPrivs=1、管理側と異なるuser namespaceを照合する。共有kernelの脆弱性に対するVM相当の防御を意味しない。
 
-`xtask isolation-tests linux default|python`が必須名の正本。現在default 6件、Python有効7件（既存の環境拒否・遅延helper拒否2件を含む）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
+`xtask isolation-tests linux default|python`が必須名の正本。現在default 7件、Python有効8件（既存の環境拒否・遅延helper拒否2件を含む）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
 
 既存のbaseline実行・CPU閾値・OOM・PID quota・ENOSPC・出力上限・network/書込み拒否・子孫停止・別process停止後の再発見・冪等回収・Python成果物保存のassertionは維持する。環境変数不足は成功returnせず失敗する。CIの結果照合だけでは将来追加される早期returnを検出できないため、payload実行と制限発動のassertionも必須条件である。
 
-この変更時点ではHosted runは未実行・未確認。固定commit、workflow run URL、runner image/version、feature別の実行名と結果をpush後に確認するまでHosted成功とは記録しない。本macOS sandboxでLinux実隔離は実行できず、Dockerも操作しない。Seatbeltは入れ子sandboxで適用拒否となる制約がある。実環境の不足が判明した場合は、該当test・必要controller/kernel機能・userns/AppArmor・mount権限と実際の失敗を記録し、その試験だけを同じ条件を満たす専用Linux VMで補完する案を検討する。Hosted全体をSelf-hostedへ戻さない。現時点でHosted上の具体的な失敗は未観測であり、代替試験が必要だとは断定しない。
+本改訂のHosted runは未実行・未確認。過去のHosted成功・失敗は対応する固定commitの証拠であり、この未commit差分の成功へ読み替えない。本macOS sandboxではLinux実隔離を実行せず、Docker操作もしない。Seatbeltは入れ子sandboxの適用拒否により実隔離をローカル検証できない。修正後はHostedの各必須名と結果を確認する。
 
 Hosted成功後も、本番構成のkernel・immutable runtime・委譲設定・tmpfs権限・耐久管理FS・mount namespace・別管理processからの回収、実provider usage/費用との整合は別途受入が必要。DB kill・電源断・failover・長時間負荷も未検証。公開CI成功は利用側の統合受入や有料操作の実行許可を意味しない。
+
+
+### Linux本番管理processと受入条件
+
+現実装の信頼境界はLinuxBackendを組み込んだ管理supervisorと、その子の`runtrell-exec-limit`・bubblewrapである。mountをhelperへRPC委譲する機構は実装していない。supervisorを非特権の通常アプリと同じprocessへ組み込んで、cgroup委譲だけで動くとは扱わない。hostが用意する管理binaryをsystemd unitのExecStartから起動し、cgroup root・state root・helper/launcherの固定path、認証済みhost要求とexecutable allowlist・上限値を与える。管理supervisorがhelperを子processとして起動し、payloadはhelperを管理口として起動しない。helperをsetuid化せず、payloadから管理サービス・helperの管理引数・record/cgroup rootへアクセスできない配置にする。
+
+本番ではsystemd等で専用サービスidentity、管理state directory（0700）、`Delegate=cpu memory pids`の専用cgroup subtreeを用意し、supervisorをoperation子groupへ入れない。管理サービスにはmount/unmountを行うnamespace内のCAP_SYS_ADMINと、選択したbubblewrap・uid/gid mapping・signal・ファイル所有権操作に必要な権限だけを与える。CapabilityBoundingSet等で上限を設け、秘密情報・ネットワーク・他サービスの管理権限を与えない。CAP_SYS_ADMINだけで全配布環境が成立することは未実証であり、サービスidentity・kernel・bubblewrap版に合わせて必要権限を検証する。`PrivateMounts`等でmount namespaceを分ける場合、復旧管理processも同じnamespaceへ接続しなければならない。state rootはbubblewrapが権限を落とした後も辿れる管理配置に置く。
+
+payloadにはuser namespaceを必須とし、uid/gid 65534、capability全集合0、no_new_privs、追加userns禁止、network分離とread-only runtimeを適用する。host mount管理権限はpayloadへ渡さない。privileged DockerやsudoのHosted VMで成功しても、最小権限の本番systemd構成が実証されたことにはならない。この変更のLinux実試験は未実行で、管理側の実行担当が次を確認する。
+
+- `cargo test -p runtrell --test linux_execution --no-run`（Python構成は`--features python`も付ける）。
+- cgroup v2・host mount権限・userns・immutable runtimeを備えた専用環境で、`RUNTRELL_LINUX_TEST=1`、`RUNTRELL_CGROUP_ROOT`、`RUNTRELL_LINUX_STATE_ROOT`を設定する。
+- `cargo run -p xtask -- isolation-tests linux default`（またはpython）が返す各試験を`--exact NAME --include-ignored --test-threads=1`で実行する。`stopped`はCPU/PID解放とMemory/Disk未解放を、`destroyed`はunmount・cgroup削除後のMemory/Disk解放を検査する。全回収まで待つcontroller契約は維持する。
+- `linux_concurrent_runs_reclaim_independently`で8 Runの並行実行・回収を確認する。cgroup/mount作成直後かつinode/mount ID保存前のcrashは、まだ自動再発見・回収を提供しない。該当実体はUnknownで隔離し、予約を保持する。REC-05/06・SBX-07の未完了受入項目であり、通常のrecord保存後のcrash試験で代用しない。
+
+### macOSの子孫実行能力
+
+Seatbeltのfork拒否は維持する。`ExecutionRequest.requires_descendants=true`を指定した要求は、macOS ProcessBackendで取得前にUnsupportedとなる。macOSの子process一括回収は提供しない。必須CI試験`real_isolation_loop_output_fork_env_and_workspace_boundaries`は、この明示拒否と環境未取得を確認し、子孫回収の成功を主張しない。同じ試験のLinux fork経路はchild.pidの存在・数値PID・停止を必須にする。要求を宣言しないpayloadがforkしてもSeatbeltが拒否する。`requires_descendants`は隔離を緩める設定ではない。

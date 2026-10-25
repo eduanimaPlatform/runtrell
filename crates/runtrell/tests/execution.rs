@@ -2,6 +2,7 @@
 use runtrell::{execution::*, *};
 fn context() -> ToolContext {
     ToolContext {
+        recovery_proof: None,
         claim: Claim {
             run: RunHandle {
                 tenant: "t".into(),
@@ -139,6 +140,18 @@ async fn real_isolation_loop_output_fork_env_and_workspace_boundaries() {
         } else {
             200
         };
+        if id == "fork" {
+            r.requires_descendants = true;
+            #[cfg(target_os = "macos")]
+            {
+                assert!(
+                    matches!(b.acquire(&c, &r).await, Err(Error::Unsupported(_))),
+                    "macOS must reject descendant execution before acquisition"
+                );
+                assert!(b.lookup(&c).await.unwrap().is_none());
+                continue;
+            }
+        }
         let e = b.acquire(&c, &r).await.unwrap();
         let started = std::time::Instant::now();
         b.start(&c, &e).await.unwrap();
@@ -156,11 +169,13 @@ async fn real_isolation_loop_output_fork_env_and_workspace_boundaries() {
                 .path()
                 .join(digest(&serde_json::json!([c.claim.run, c.operation])))
                 .join("child.pid");
-            #[cfg(target_os = "linux")]
             assert!(path.exists(), "fixture must actually create a child");
-            if let Ok(pid) = std::fs::read_to_string(path)
-                && let Ok(pid) = pid.parse::<i32>()
-                && let Some(pid) = rustix::process::Pid::from_raw(pid)
+            let pid = std::fs::read_to_string(path)
+                .expect("child PID file")
+                .parse::<i32>()
+                .expect("valid numeric PID");
+            assert!(pid > 1, "valid child PID");
+            let pid = rustix::process::Pid::from_raw(pid).expect("valid child PID");
             {
                 let until = std::time::Instant::now();
                 while rustix::process::test_kill_process(pid).is_ok()
@@ -199,21 +214,49 @@ async fn helper_applies_rlimits_and_cpu_stops_a_trusted_busy_fixture() {
         .env_clear()
         .current_dir(root.path());
     let out = limits.output().await.unwrap();
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "1\n4\n64\n");
     let mut busy = tokio::process::Command::new(env!("CARGO_BIN_EXE_runtrell-exec-limit"));
     busy.args(["1", "4096", "/bin/bash", "-c", "while :; do :; done"])
         .env_clear()
         .current_dir(root.path())
         .kill_on_drop(true);
+    busy.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let mut child = busy.spawn().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let capture = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        stdout.read_to_end(&mut out).await.unwrap();
+        stderr.read_to_end(&mut err).await.unwrap();
+        (out, err)
+    });
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
     if result.is_err() {
         child.kill().await.unwrap();
         child.wait().await.unwrap();
-        panic!("CPU probe did not stop within wall watchdog");
     }
-    assert!(!result.unwrap().unwrap().success());
+    let (out, err) = capture.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "CPU probe did not stop within wall watchdog; child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    );
+    assert!(
+        !result.unwrap().unwrap().success(),
+        "CPU probe unexpectedly succeeded; child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    );
 }
 
 #[test]
@@ -228,14 +271,16 @@ fn helper_closes_inherited_non_cloexec_descriptors() {
         "if [ -e /dev/fd/{} ]; then exit 7; fi",
         inherited.as_raw_fd()
     );
-    let status = std::process::Command::new(env!("CARGO_BIN_EXE_runtrell-exec-limit"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_runtrell-exec-limit"))
         .args(["1", "4096", "/bin/sh", "-c", &script])
         .env_clear()
-        .status()
+        .output()
         .unwrap();
     assert!(
-        status.success(),
-        "inherited FD must be closed before payload exec"
+        output.status.success(),
+        "inherited FD must be closed before payload exec; child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 #[test]

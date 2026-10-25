@@ -513,51 +513,71 @@ impl DataStore {
         write: bool,
         revision: u64,
     ) -> Result<Access> {
-        if a.actor != a.target
-            || child.spec.parent.as_ref() != Some(&a.target.owner)
-            || child.handle.tenant != a.target.owner.tenant
-            || child.spec.tenant != child.handle.tenant
-        {
-            return Err(Error::PermissionDenied);
-        }
-        let actor = Namespace {
-            owner: child.handle.clone(),
-            agent: agent.into(),
-        };
-        actor.key()?;
-        self.tx(a, true, |s| {
-            if revision != s.revision {
-                return Err(Error::Conflict);
+        let this = self.clone();
+        let a = a.to_owned();
+        let child = child.to_owned();
+        let agent = agent.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let child = &child;
+            let agent = &agent;
+            if a.actor != a.target
+                || child.spec.parent.as_ref() != Some(&a.target.owner)
+                || child.handle.tenant != a.target.owner.tenant
+                || child.spec.tenant != child.handle.tenant
+            {
+                return Err(Error::PermissionDenied);
             }
-            let id = uuid::Uuid::new_v4().to_string();
-            if s.grants.len() >= self.policy.max_entries {
-                return Err(invalid("GRANT_CAPACITY"));
-            }
-            s.grants.insert(
-                id.clone(),
-                Grant {
-                    actor: actor.clone(),
-                    revision,
-                    artifact_revision: s.artifact_revision,
-                    context_revision: s.context.revision,
-                    write,
-                },
-            );
-            Ok(Access {
-                actor,
-                target: a.target.clone(),
-                grant: Some(id),
+            let actor = Namespace {
+                owner: child.handle.clone(),
+                agent: agent.into(),
+            };
+            actor.key()?;
+            this.tx(a, true, |s| {
+                if revision != s.revision {
+                    return Err(Error::Conflict);
+                }
+                let id = uuid::Uuid::new_v4().to_string();
+                if s.grants.len() >= this.policy.max_entries {
+                    return Err(invalid("GRANT_CAPACITY"));
+                }
+                s.grants.insert(
+                    id.clone(),
+                    Grant {
+                        actor: actor.clone(),
+                        revision,
+                        artifact_revision: s.artifact_revision,
+                        context_revision: s.context.revision,
+                        write,
+                    },
+                );
+                Ok(Access {
+                    actor,
+                    target: a.target.clone(),
+                    grant: Some(id),
+                })
             })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     pub async fn revoke(&self, a: &Access) -> Result<()> {
-        if a.actor != a.target {
-            return Err(Error::PermissionDenied);
-        }
-        self.tx(a, true, |s| {
-            s.grants.clear();
-            Ok(())
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            if a.actor != a.target {
+                return Err(Error::PermissionDenied);
+            }
+            this.tx(a, true, |s| {
+                s.grants.clear();
+                Ok(())
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     fn apply(
         &self,
@@ -654,7 +674,15 @@ impl DataStore {
         expected: u64,
         changes: Vec<Change>,
     ) -> Result<WorkspaceSnapshot> {
-        self.tx(a, true, |s| self.apply(a, s, expected, changes))
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            this.tx(a, true, |s| this.apply(a, s, expected, changes))
+        })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     pub async fn exact_replace(
         &self,
@@ -662,68 +690,77 @@ impl DataStore {
         expected: u64,
         edits: Vec<ExactEdit>,
     ) -> Result<WorkspaceSnapshot> {
-        if edits.is_empty() || edits.len() > self.policy.max_edits {
-            return Err(invalid("EDIT_LIMIT"));
-        }
-        self.tx(a, true, |s| {
-            let mut total = 0usize;
-            let mut changes: BTreeMap<String, (u64, Vec<u8>)> = BTreeMap::new();
-            for e in edits {
-                logical_path(&e.path)?;
-                total = total
-                    .checked_add(e.old_text.len())
-                    .and_then(|n| n.checked_add(e.new_text.len()))
-                    .ok_or_else(|| invalid("EDIT_LIMIT"))?;
-                if total > self.policy.max_edit_bytes {
-                    return Err(invalid("EDIT_LIMIT"));
-                }
-                let file = s.files.get(&e.path).ok_or(Error::NotFound)?;
-                if file.version.hash != e.expected_digest {
-                    return Err(Error::Conflict);
-                }
-                let staged_bytes = changes
-                    .get(&e.path)
-                    .map(|(_, bytes)| bytes.as_slice())
-                    .unwrap_or(&file.bytes);
-                let text = std::str::from_utf8(staged_bytes).map_err(|_| invalid("NON_UTF8"))?;
-                if binary_text(text) {
-                    return Err(invalid("BINARY"));
-                }
-                if binary_text(&e.old_text) || binary_text(&e.new_text) {
-                    return Err(invalid("BINARY"));
-                }
-                if e.old_text.is_empty() {
-                    return Err(invalid("EMPTY_MATCH"));
-                }
-                // Overlapping occurrences count too, e.g. aa in aaa is ambiguous.
-                let count = text
-                    .char_indices()
-                    .filter(|(i, _)| text[*i..].starts_with(&e.old_text))
-                    .count();
-                if count != 1 {
-                    return Err(invalid(if count == 0 {
-                        "NO_MATCH"
-                    } else {
-                        "MULTIPLE_MATCHES"
-                    }));
-                }
-                let bytes = text.replacen(&e.old_text, &e.new_text, 1).into_bytes();
-                changes.insert(e.path, (file.version.revision, bytes));
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            if edits.is_empty() || edits.len() > this.policy.max_edits {
+                return Err(invalid("EDIT_LIMIT"));
             }
-            self.apply(
-                a,
-                s,
-                expected,
-                changes
-                    .into_iter()
-                    .map(|(path, (revision, bytes))| Change::Write {
-                        path,
-                        expected: Some(revision),
-                        bytes,
-                    })
-                    .collect(),
-            )
+            this.tx(a, true, |s| {
+                let mut total = 0usize;
+                let mut changes: BTreeMap<String, (u64, Vec<u8>)> = BTreeMap::new();
+                for e in edits {
+                    logical_path(&e.path)?;
+                    total = total
+                        .checked_add(e.old_text.len())
+                        .and_then(|n| n.checked_add(e.new_text.len()))
+                        .ok_or_else(|| invalid("EDIT_LIMIT"))?;
+                    if total > this.policy.max_edit_bytes {
+                        return Err(invalid("EDIT_LIMIT"));
+                    }
+                    let file = s.files.get(&e.path).ok_or(Error::NotFound)?;
+                    if file.version.hash != e.expected_digest {
+                        return Err(Error::Conflict);
+                    }
+                    let staged_bytes = changes
+                        .get(&e.path)
+                        .map(|(_, bytes)| bytes.as_slice())
+                        .unwrap_or(&file.bytes);
+                    let text =
+                        std::str::from_utf8(staged_bytes).map_err(|_| invalid("NON_UTF8"))?;
+                    if binary_text(text) {
+                        return Err(invalid("BINARY"));
+                    }
+                    if binary_text(&e.old_text) || binary_text(&e.new_text) {
+                        return Err(invalid("BINARY"));
+                    }
+                    if e.old_text.is_empty() {
+                        return Err(invalid("EMPTY_MATCH"));
+                    }
+                    // Overlapping occurrences count too, e.g. aa in aaa is ambiguous.
+                    let count = text
+                        .char_indices()
+                        .filter(|(i, _)| text[*i..].starts_with(&e.old_text))
+                        .count();
+                    if count != 1 {
+                        return Err(invalid(if count == 0 {
+                            "NO_MATCH"
+                        } else {
+                            "MULTIPLE_MATCHES"
+                        }));
+                    }
+                    let bytes = text.replacen(&e.old_text, &e.new_text, 1).into_bytes();
+                    changes.insert(e.path, (file.version.revision, bytes));
+                }
+                this.apply(
+                    a,
+                    s,
+                    expected,
+                    changes
+                        .into_iter()
+                        .map(|(path, (revision, bytes))| Change::Write {
+                            path,
+                            expected: Some(revision),
+                            bytes,
+                        })
+                        .collect(),
+                )
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     pub fn stage(&self, a: &Access, bytes: &[u8], class: DataClass, now: u64) -> Result<Staged> {
         self.stage_named(a, bytes, class, now, uuid::Uuid::new_v4().to_string())
@@ -795,66 +832,89 @@ impl DataStore {
         })
     }
     pub async fn save(&self, a: &Access, staged: Staged, now: u64) -> Result<ArtifactRef> {
-        if staged.owner != a.target {
-            return Err(Error::PermissionDenied);
-        }
-        self.tx(a, true, |s| {
-            if let Some(existing) = s.blobs.get(&staged.id) {
-                if existing.bytes != staged.bytes || existing.reference.class != staged.class {
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            if staged.owner != a.target {
+                return Err(Error::PermissionDenied);
+            }
+            this.tx(a, true, |s| {
+                if let Some(existing) = s.blobs.get(&staged.id) {
+                    if existing.bytes != staged.bytes || existing.reference.class != staged.class {
+                        return Err(Error::Conflict);
+                    }
+                    return Ok(existing.reference.clone());
+                }
+                if s.staged.get(&staged.id) != Some(&staged) {
                     return Err(Error::Conflict);
                 }
-                return Ok(existing.reference.clone());
-            }
-            if s.staged.get(&staged.id) != Some(&staged) {
-                return Err(Error::Conflict);
-            }
-            let policy = self.class(staged.class)?;
-            if s.blobs
-                .values()
-                .filter(|b| b.reference.class == staged.class)
-                .map(|b| b.bytes.len())
-                .sum::<usize>()
-                .saturating_add(staged.bytes.len())
-                > policy.max_bytes
-                || s.blobs.len() >= self.policy.max_entries
-            {
-                return Err(invalid("CAPACITY"));
-            }
-            s.artifact_revision = s.artifact_revision.checked_add(1).ok_or(Error::Conflict)?;
-            let r = ArtifactRef {
-                owner: a.target.clone(),
-                id: staged.id,
-                revision: s.artifact_revision,
-                hash: content_digest(&staged.bytes),
-                bytes: staged.bytes.len() as u64,
-                manifest: Self::snapshot_of(a, s).files,
-                retention_until: now.saturating_add(policy.retention),
-                class: staged.class,
-            };
-            s.staged.remove(&r.id);
-            s.blobs.insert(
-                r.id.clone(),
-                Blob {
-                    reference: r.clone(),
-                    bytes: staged.bytes,
-                    completion: None,
-                },
-            );
-            Ok(r)
+                let policy = this.class(staged.class)?;
+                if s.blobs
+                    .values()
+                    .filter(|b| b.reference.class == staged.class)
+                    .map(|b| b.bytes.len())
+                    .sum::<usize>()
+                    .saturating_add(staged.bytes.len())
+                    > policy.max_bytes
+                    || s.blobs.len() >= this.policy.max_entries
+                {
+                    return Err(invalid("CAPACITY"));
+                }
+                s.artifact_revision = s.artifact_revision.checked_add(1).ok_or(Error::Conflict)?;
+                let r = ArtifactRef {
+                    owner: a.target.clone(),
+                    id: staged.id,
+                    revision: s.artifact_revision,
+                    hash: content_digest(&staged.bytes),
+                    bytes: staged.bytes.len() as u64,
+                    manifest: Self::snapshot_of(a, s).files,
+                    retention_until: now.saturating_add(policy.retention),
+                    class: staged.class,
+                };
+                s.staged.remove(&r.id);
+                s.blobs.insert(
+                    r.id.clone(),
+                    Blob {
+                        reference: r.clone(),
+                        bytes: staged.bytes,
+                        completion: None,
+                    },
+                );
+                Ok(r)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     pub async fn artifact(&self, a: &Access, id: &str) -> Result<ArtifactRef> {
-        self.tx(a, false, |s| {
-            Ok(s.blobs.get(id).ok_or(Error::NotFound)?.reference.clone())
+        let this = self.clone();
+        let a = a.to_owned();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let id = &id;
+            this.tx(a, false, |s| {
+                Ok(s.blobs.get(id).ok_or(Error::NotFound)?.reference.clone())
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
-    pub async fn validate(
+    pub async fn validate<V: TargetValidator + 'static>(
         &self,
         a: &Access,
         target: &Target,
-        validator: &impl TargetValidator,
+        validator: Arc<V>,
     ) -> Result<Evidence> {
-        self.validate_sync(a, target, validator)
+        let store = self.clone();
+        let a = a.clone();
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || store.validate_sync(&a, &target, validator.as_ref()))
+            .await
+            .map_err(|_| Error::Storage)?
     }
     fn validate_sync(
         &self,
@@ -898,7 +958,21 @@ impl DataStore {
         evidence: &[Evidence],
         required: &[ValidatorKey],
     ) -> Result<String> {
-        self.finalize_sync(a, current, evidence, required)
+        let this = self.clone();
+        let a = a.to_owned();
+        let current = current.to_owned();
+        let evidence = evidence.to_owned();
+        let required = required.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let current = &current;
+            let evidence = &evidence;
+            let required = &required;
+            this.finalize_sync(a, current, evidence, required)
+        })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     fn finalize_sync(
         &self,
@@ -962,23 +1036,39 @@ impl DataStore {
         })
     }
     pub async fn context(&self, a: &Access) -> Result<ContextState> {
-        self.tx(a, false, |s| Ok(s.context.clone()))
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            this.tx(a, false, |s| Ok(s.context.clone()))
+        })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     pub async fn append_context(&self, a: &Access, item: ContextItem) -> Result<ContextState> {
-        self.tx(a, true, |s| {
-            let mut next = s.context.clone();
-            next.high_water += 1;
-            next.revision += 1;
-            next.facts.push(item.clone());
-            next.history.push(item);
-            if serde_json::to_vec(&next).map_err(|_| Error::Storage)?.len()
-                > self.class(DataClass::Checkpoint)?.max_bytes
-            {
-                return Err(invalid("CONTEXT_CAPACITY"));
-            }
-            s.context = next.clone();
-            Ok(next)
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            this.tx(a, true, |s| {
+                let mut next = s.context.clone();
+                next.high_water += 1;
+                next.revision += 1;
+                next.facts.push(item.clone());
+                next.history.push(item);
+                if serde_json::to_vec(&next).map_err(|_| Error::Storage)?.len()
+                    > this.class(DataClass::Checkpoint)?.max_bytes
+                {
+                    return Err(invalid("CONTEXT_CAPACITY"));
+                }
+                s.context = next.clone();
+                Ok(next)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     pub async fn commit_compaction(
         &self,
@@ -987,72 +1077,100 @@ impl DataStore {
         summary: &str,
         complete: bool,
     ) -> Result<ContextState> {
-        if !complete || summary.is_empty() {
-            return Err(invalid("PARTIAL_SUMMARY"));
-        }
-        self.tx(a, true, |s| {
-            if &s.context != base {
-                return Err(Error::Conflict);
+        let this = self.clone();
+        let a = a.to_owned();
+        let base = base.to_owned();
+        let summary = summary.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let base = &base;
+            let summary = &summary;
+            if !complete || summary.is_empty() {
+                return Err(invalid("PARTIAL_SUMMARY"));
             }
-            let mut next = base.clone();
-            next.revision += 1;
-            next.summary = Some(summary.into());
-            next.history = vec![ContextItem {
-                source: Source::Summary,
-                value: json!(summary),
-            }];
-            if serde_json::to_vec(&next).map_err(|_| Error::Storage)?.len()
-                > self.class(DataClass::Checkpoint)?.max_bytes
-            {
-                return Err(invalid("CONTEXT_CAPACITY"));
-            }
-            s.context = next.clone();
-            Ok(next)
+            this.tx(a, true, |s| {
+                if &s.context != base {
+                    return Err(Error::Conflict);
+                }
+                let mut next = base.clone();
+                next.revision += 1;
+                next.summary = Some(summary.into());
+                next.history = vec![ContextItem {
+                    source: Source::Summary,
+                    value: json!(summary),
+                }];
+                if serde_json::to_vec(&next).map_err(|_| Error::Storage)?.len()
+                    > this.class(DataClass::Checkpoint)?.max_bytes
+                {
+                    return Err(invalid("CONTEXT_CAPACITY"));
+                }
+                s.context = next.clone();
+                Ok(next)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
 }
 pub trait WorkspaceStore: Send + Sync {
-    async fn snapshot(&self, a: &Access) -> Result<WorkspaceSnapshot>;
-    async fn list(
+    fn snapshot(
+        &self,
+        a: &Access,
+    ) -> impl std::future::Future<Output = Result<WorkspaceSnapshot>> + Send;
+    fn list(
         &self,
         a: &Access,
         cursor: Option<String>,
         limit: usize,
-    ) -> Result<Page<FileVersion>>;
-    async fn read(
+    ) -> impl std::future::Future<Output = Result<Page<FileVersion>>> + Send;
+    fn read(
         &self,
         a: &Access,
         path: &str,
         revision: u64,
         offset: u64,
         length: usize,
-    ) -> Result<ByteRange>;
-    async fn write(
+    ) -> impl std::future::Future<Output = Result<ByteRange>> + Send;
+    fn write(
         &self,
         a: &Access,
         path: &str,
         expected: Option<u64>,
         bytes: &[u8],
-    ) -> Result<FileVersion>;
-    async fn delete(&self, a: &Access, path: &str, expected: u64) -> Result<()>;
-    async fn search(
+    ) -> impl std::future::Future<Output = Result<FileVersion>> + Send;
+    fn delete(
+        &self,
+        a: &Access,
+        path: &str,
+        expected: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn search(
         &self,
         a: &Access,
         query: &str,
         cursor: Option<String>,
         limit: usize,
         max_bytes: usize,
-    ) -> Result<Page<Match>>;
-    async fn merge(
+    ) -> impl std::future::Future<Output = Result<Page<Match>>> + Send;
+    fn merge(
         &self,
         a: &Access,
         base: &WorkspaceSnapshot,
         changes: Vec<Change>,
-    ) -> Result<WorkspaceSnapshot>;
+    ) -> impl std::future::Future<Output = Result<WorkspaceSnapshot>> + Send;
 }
 impl WorkspaceStore for DataStore {
     async fn snapshot(&self, a: &Access) -> Result<WorkspaceSnapshot> {
-        self.tx(a, false, |s| Ok(Self::snapshot_of(a, s)))
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            this.tx(a, false, |s| Ok(Self::snapshot_of(a, s)))
+        })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     async fn list(
         &self,
@@ -1060,29 +1178,37 @@ impl WorkspaceStore for DataStore {
         cursor: Option<String>,
         limit: usize,
     ) -> Result<Page<FileVersion>> {
-        if limit == 0 || limit > self.policy.max_entries {
-            return Err(invalid("PAGE_LIMIT"));
-        }
-        self.tx(a, false, |s| {
-            let start = decode_cursor(cursor, s.revision)?;
-            let entries = s
-                .files
-                .values()
-                .skip(start)
-                .take(limit)
-                .map(|f| f.version.clone())
-                .collect::<Vec<_>>();
-            let end = start + entries.len();
-            let truncated = end < s.files.len();
-            if start > s.files.len() {
-                return Err(invalid("CURSOR"));
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            if limit == 0 || limit > this.policy.max_entries {
+                return Err(invalid("PAGE_LIMIT"));
             }
-            Ok(Page {
-                entries,
-                next: truncated.then(|| format!("{}:{end}", s.revision)),
-                truncated,
+            this.tx(a, false, |s| {
+                let start = decode_cursor(cursor, s.revision)?;
+                let entries = s
+                    .files
+                    .values()
+                    .skip(start)
+                    .take(limit)
+                    .map(|f| f.version.clone())
+                    .collect::<Vec<_>>();
+                let end = start + entries.len();
+                let truncated = end < s.files.len();
+                if start > s.files.len() {
+                    return Err(invalid("CURSOR"));
+                }
+                Ok(Page {
+                    entries,
+                    next: truncated.then(|| format!("{}:{end}", s.revision)),
+                    truncated,
+                })
             })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     async fn read(
         &self,
@@ -1092,14 +1218,24 @@ impl WorkspaceStore for DataStore {
         offset: u64,
         length: usize,
     ) -> Result<ByteRange> {
-        logical_path(path)?;
-        self.tx(a, false, |s| {
-            let f = s.files.get(path).ok_or(Error::NotFound)?;
-            if f.version.revision != revision {
-                return Err(Error::Conflict);
-            }
-            range(&f.bytes, offset, length, self.policy.max_read)
+        let this = self.clone();
+        let a = a.to_owned();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let path = &path;
+            logical_path(path)?;
+            this.tx(a, false, |s| {
+                let f = s.files.get(path).ok_or(Error::NotFound)?;
+                if f.version.revision != revision {
+                    return Err(Error::Conflict);
+                }
+                range(&f.bytes, offset, length, this.policy.max_read)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     async fn write(
         &self,
@@ -1108,36 +1244,58 @@ impl WorkspaceStore for DataStore {
         expected: Option<u64>,
         bytes: &[u8],
     ) -> Result<FileVersion> {
-        self.tx(a, true, |s| {
-            let snap = self.apply(
-                a,
-                s,
-                s.revision,
-                vec![Change::Write {
-                    path: path.into(),
-                    expected,
-                    bytes: bytes.to_vec(),
-                }],
-            )?;
-            snap.files
-                .into_iter()
-                .find(|f| f.path == path)
-                .ok_or(Error::Storage)
+        let this = self.clone();
+        let a = a.to_owned();
+        let path = path.to_owned();
+        let bytes = bytes.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let path = &path;
+            let bytes = &bytes;
+            this.tx(a, true, |s| {
+                let snap = this.apply(
+                    a,
+                    s,
+                    s.revision,
+                    vec![Change::Write {
+                        path: path.into(),
+                        expected,
+                        bytes: bytes.to_vec(),
+                    }],
+                )?;
+                snap.files
+                    .into_iter()
+                    .find(|f| f.path == path.as_str())
+                    .ok_or(Error::Storage)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     async fn delete(&self, a: &Access, path: &str, expected: u64) -> Result<()> {
-        self.tx(a, true, |s| {
-            self.apply(
-                a,
-                s,
-                s.revision,
-                vec![Change::Delete {
-                    path: path.into(),
-                    expected,
-                }],
-            )?;
-            Ok(())
+        let this = self.clone();
+        let a = a.to_owned();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let path = &path;
+            this.tx(a, true, |s| {
+                this.apply(
+                    a,
+                    s,
+                    s.revision,
+                    vec![Change::Delete {
+                        path: path.into(),
+                        expected,
+                    }],
+                )?;
+                Ok(())
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     async fn search(
         &self,
@@ -1147,71 +1305,81 @@ impl WorkspaceStore for DataStore {
         limit: usize,
         max_bytes: usize,
     ) -> Result<Page<Match>> {
-        if query.is_empty()
-            || query.len() > 4096
-            || limit == 0
-            || limit > self.policy.max_entries
-            || max_bytes < 128
-            || max_bytes > self.policy.max_read
-        {
-            return Err(invalid("SEARCH_LIMIT"));
-        }
-        self.tx(a, false, |s| {
-            let start = decode_cursor(cursor, s.revision)?;
-            let mut index = 0;
-            let mut entries = Vec::new();
-            let mut truncated = false;
-            let mut next_index = start;
-            'files: for (path, file) in &s.files {
-                let Ok(text) = std::str::from_utf8(&file.bytes) else {
-                    continue;
-                };
-                if text.contains('\0') {
-                    continue;
-                }
-                for (line, text) in text.lines().enumerate() {
-                    if !text.contains(query) {
-                        continue;
-                    }
-                    if index < start {
-                        index += 1;
-                        continue;
-                    }
-                    let m = Match {
-                        path: path.clone(),
-                        line: line + 1,
-                        text: text.into(),
-                    };
-                    let mut trial = entries.clone();
-                    trial.push(m.clone());
-                    let trial_page = Page {
-                        entries: trial,
-                        next: Some(format!("{}:{}", s.revision, index + 1)),
-                        truncated: true,
-                    };
-                    if entries.len() == limit
-                        || serde_json::to_vec(&trial_page)
-                            .map_err(|_| Error::Storage)?
-                            .len()
-                            > max_bytes
-                    {
-                        if entries.is_empty() {
-                            return Err(invalid("SEARCH_MATCH_TOO_LARGE"));
-                        }
-                        truncated = true;
-                        break 'files;
-                    }
-                    entries.push(m);
-                    index += 1;
-                    next_index = index;
-                }
+        let this = self.clone();
+        let a = a.to_owned();
+        let query = query.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let query = &query;
+            if query.is_empty()
+                || query.len() > 4096
+                || limit == 0
+                || limit > this.policy.max_entries
+                || max_bytes < 128
+                || max_bytes > this.policy.max_read
+            {
+                return Err(invalid("SEARCH_LIMIT"));
             }
-            Ok(Page {
-                entries,
-                next: truncated.then(|| format!("{}:{next_index}", s.revision)),
-                truncated,
+            this.tx(a, false, |s| {
+                let start = decode_cursor(cursor, s.revision)?;
+                let mut index = 0;
+                let mut entries = Vec::new();
+                let mut truncated = false;
+                let mut next_index = start;
+                'files: for (path, file) in &s.files {
+                    let Ok(text) = std::str::from_utf8(&file.bytes) else {
+                        continue;
+                    };
+                    if text.contains('\0') {
+                        continue;
+                    }
+                    for (line, text) in text.lines().enumerate() {
+                        if !text.contains(query) {
+                            continue;
+                        }
+                        if index < start {
+                            index += 1;
+                            continue;
+                        }
+                        let m = Match {
+                            path: path.clone(),
+                            line: line + 1,
+                            text: text.into(),
+                        };
+                        let mut trial = entries.clone();
+                        trial.push(m.clone());
+                        let trial_page = Page {
+                            entries: trial,
+                            next: Some(format!("{}:{}", s.revision, index + 1)),
+                            truncated: true,
+                        };
+                        if entries.len() == limit
+                            || serde_json::to_vec(&trial_page)
+                                .map_err(|_| Error::Storage)?
+                                .len()
+                                > max_bytes
+                        {
+                            if entries.is_empty() {
+                                return Err(invalid("SEARCH_MATCH_TOO_LARGE"));
+                            }
+                            truncated = true;
+                            break 'files;
+                        }
+                        entries.push(m);
+                        index += 1;
+                        next_index = index;
+                    }
+                }
+                Ok(Page {
+                    entries,
+                    next: truncated.then(|| format!("{}:{next_index}", s.revision)),
+                    truncated,
+                })
             })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     async fn merge(
         &self,
@@ -1219,12 +1387,22 @@ impl WorkspaceStore for DataStore {
         base: &WorkspaceSnapshot,
         changes: Vec<Change>,
     ) -> Result<WorkspaceSnapshot> {
-        self.tx(a, true, |s| {
-            if *base != Self::snapshot_of(a, s) {
-                return Err(Error::Conflict);
-            }
-            self.apply(a, s, base.revision, changes)
+        let this = self.clone();
+        let a = a.to_owned();
+        let base = base.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let base = &base;
+            this.tx(a, true, |s| {
+                if *base != Self::snapshot_of(a, s) {
+                    return Err(Error::Conflict);
+                }
+                this.apply(a, s, base.revision, changes)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
 }
 fn decode_cursor(cursor: Option<String>, revision: u64) -> Result<usize> {
@@ -1240,26 +1418,26 @@ fn decode_cursor(cursor: Option<String>, revision: u64) -> Result<usize> {
     }
 }
 pub trait ArtifactStore: Send + Sync {
-    async fn put(
+    fn put(
         &self,
         a: &Access,
         bytes: &[u8],
         class: DataClass,
         now: u64,
-    ) -> Result<ArtifactRef>;
-    async fn read_artifact(
+    ) -> impl std::future::Future<Output = Result<ArtifactRef>> + Send;
+    fn read_artifact(
         &self,
         a: &Access,
         artifact: &ArtifactRef,
         offset: u64,
         length: usize,
-    ) -> Result<ByteRange>;
-    async fn delete_artifact(
+    ) -> impl std::future::Future<Output = Result<ByteRange>> + Send;
+    fn delete_artifact(
         &self,
         a: &Access,
         artifact: &ArtifactRef,
         now: u64,
-    ) -> Result<Progress>;
+    ) -> impl std::future::Future<Output = Result<Progress>> + Send;
 }
 impl ArtifactStore for DataStore {
     async fn put(
@@ -1269,8 +1447,14 @@ impl ArtifactStore for DataStore {
         class: DataClass,
         now: u64,
     ) -> Result<ArtifactRef> {
-        let staged = self.stage(a, bytes, class, now)?;
-        self.save(a, staged, now).await
+        let this = self.clone();
+        let a = a.to_owned();
+        let bytes = bytes.to_owned();
+        let access = a.clone();
+        let staged = tokio::task::spawn_blocking(move || this.stage(&access, &bytes, class, now))
+            .await
+            .map_err(|_| Error::Storage)??;
+        self.save(&a, staged, now).await
     }
     async fn read_artifact(
         &self,
@@ -1279,42 +1463,62 @@ impl ArtifactStore for DataStore {
         offset: u64,
         length: usize,
     ) -> Result<ByteRange> {
-        if r.owner != a.target {
-            return Err(Error::PermissionDenied);
-        }
-        self.tx(a, false, |s| {
-            let b = s.blobs.get(&r.id).ok_or(Error::NotFound)?;
-            if b.reference != *r || content_digest(&b.bytes) != r.hash {
-                return Err(Error::Conflict);
-            }
-            range(&b.bytes, offset, length, self.policy.max_read)
-        })
-    }
-    async fn delete_artifact(&self, a: &Access, r: &ArtifactRef, now: u64) -> Result<Progress> {
-        self.tx(a, true, |s| {
+        let this = self.clone();
+        let a = a.to_owned();
+        let r = r.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let r = &r;
             if r.owner != a.target {
                 return Err(Error::PermissionDenied);
             }
-            let p = self.class(r.class)?;
-            if !p.deletable || now < r.retention_until {
-                return Err(Error::PermissionDenied);
-            }
-            if let Some(b) = s.blobs.get(&r.id) {
-                if b.completion.is_some()
-                    && (!self.class(DataClass::Final)?.deletable
-                        || now
-                            < r.retention_until
-                                .saturating_add(self.class(DataClass::Final)?.retention))
-                {
-                    return Err(Error::PermissionDenied);
-                }
-                if b.reference != *r {
+            this.tx(a, false, |s| {
+                let b = s.blobs.get(&r.id).ok_or(Error::NotFound)?;
+                if b.reference != *r || content_digest(&b.bytes) != r.hash {
                     return Err(Error::Conflict);
                 }
-                s.blobs.remove(&r.id);
-            }
-            Ok(Progress::Confirmed)
+                range(&b.bytes, offset, length, this.policy.max_read)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
+    }
+    async fn delete_artifact(&self, a: &Access, r: &ArtifactRef, now: u64) -> Result<Progress> {
+        let this = self.clone();
+        let a = a.to_owned();
+        let r = r.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let r = &r;
+            this.tx(a, true, |s| {
+                if r.owner != a.target {
+                    return Err(Error::PermissionDenied);
+                }
+                let p = this.class(r.class)?;
+                if !p.deletable || now < r.retention_until {
+                    return Err(Error::PermissionDenied);
+                }
+                if let Some(b) = s.blobs.get(&r.id) {
+                    if b.completion.is_some()
+                        && (!this.class(DataClass::Final)?.deletable
+                            || now
+                                < r.retention_until
+                                    .saturating_add(this.class(DataClass::Final)?.retention))
+                    {
+                        return Err(Error::PermissionDenied);
+                    }
+                    if b.reference != *r {
+                        return Err(Error::Conflict);
+                    }
+                    s.blobs.remove(&r.id);
+                }
+                Ok(Progress::Confirmed)
+            })
+        })
+        .await
+        .map_err(|_| Error::Storage)?
     }
 }
 impl DataStore {
@@ -1328,38 +1532,54 @@ impl DataStore {
         unfinished: Vec<String>,
         artifacts: Vec<ArtifactRef>,
     ) -> Result<ContextState> {
-        self.tx(a, true, |s| {
-            if s.context.revision != expected {
-                return Err(Error::Conflict);
-            }
-            for r in &artifacts {
-                if r.owner != a.target || s.blobs.get(&r.id).map(|b| &b.reference) != Some(r) {
-                    return Err(Error::PermissionDenied);
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            this.tx(a, true, |s| {
+                if s.context.revision != expected {
+                    return Err(Error::Conflict);
                 }
-            }
-            let mut next = s.context.clone();
-            next.revision += 1;
-            next.purpose = purpose;
-            next.constraints = constraints;
-            next.unfinished = unfinished;
-            next.artifacts = artifacts;
-            if serde_json::to_vec(&next).map_err(|_| Error::Storage)?.len()
-                > self.class(DataClass::Checkpoint)?.max_bytes
-            {
-                return Err(invalid("CONTEXT_CAPACITY"));
-            }
-            s.context = next.clone();
-            Ok(next)
+                for r in &artifacts {
+                    if r.owner != a.target || s.blobs.get(&r.id).map(|b| &b.reference) != Some(r) {
+                        return Err(Error::PermissionDenied);
+                    }
+                }
+                let mut next = s.context.clone();
+                next.revision += 1;
+                next.purpose = purpose;
+                next.constraints = constraints;
+                next.unfinished = unfinished;
+                next.artifacts = artifacts;
+                if serde_json::to_vec(&next).map_err(|_| Error::Storage)?.len()
+                    > this.class(DataClass::Checkpoint)?.max_bytes
+                {
+                    return Err(invalid("CONTEXT_CAPACITY"));
+                }
+                s.context = next.clone();
+                Ok(next)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     /// Establish a monotonic retention boundary. Host supplies the trusted clock.
     pub async fn retain(&self, a: &Access, class: DataClass, now: u64) -> Result<u64> {
-        self.tx(a, true, |s| {
-            let until = now.saturating_add(self.class(class)?.retention);
-            let r = s.retention.entry(class).or_default();
-            *r = (*r).max(until);
-            Ok(*r)
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            this.tx(a, true, |s| {
+                let until = now.saturating_add(this.class(class)?.retention);
+                let r = s.retention.entry(class).or_default();
+                *r = (*r).max(until);
+                Ok(*r)
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
     /// Explicit cleanup, never an inference from Run termination or a timeout.
     pub async fn cleanup_class(
@@ -1369,47 +1589,56 @@ impl DataStore {
         expected: u64,
         now: u64,
     ) -> Result<Progress> {
-        if a.actor != a.target {
-            return Err(Error::PermissionDenied);
-        }
-        self.tx(a, true, |s| {
-            if s.revision != expected {
-                return Err(Error::Conflict);
-            }
-            if !self.class(class)?.deletable || s.retention.get(&class).is_none_or(|n| now < *n) {
+        let this = self.clone();
+        let a = a.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            if a.actor != a.target {
                 return Err(Error::PermissionDenied);
             }
-            match class {
-                DataClass::Workspace => {
-                    s.files.clear();
-                    s.grants.clear();
-                    s.revision += 1;
+            this.tx(a, true, |s| {
+                if s.revision != expected {
+                    return Err(Error::Conflict);
                 }
-                DataClass::Checkpoint => {
-                    s.context = ContextState {
-                        revision: s.context.revision + 1,
-                        ..ContextState::default()
-                    };
-                }
-                _ => {}
-            }
-            s.blobs.retain(|_, b| {
-                b.reference.class != class
-                    || now < b.reference.retention_until
-                    || b.completion.is_some()
-            });
-            s.staged
-                .retain(|_, staged| staged.class != class || now < staged.expires_at);
-            Ok(
-                if s.blobs.values().any(|b| b.reference.class == class)
-                    || s.staged.values().any(|staged| staged.class == class)
+                if !this.class(class)?.deletable || s.retention.get(&class).is_none_or(|n| now < *n)
                 {
-                    Progress::Pending
-                } else {
-                    Progress::Confirmed
-                },
-            )
+                    return Err(Error::PermissionDenied);
+                }
+                match class {
+                    DataClass::Workspace => {
+                        s.files.clear();
+                        s.grants.clear();
+                        s.revision += 1;
+                    }
+                    DataClass::Checkpoint => {
+                        s.context = ContextState {
+                            revision: s.context.revision + 1,
+                            ..ContextState::default()
+                        };
+                    }
+                    _ => {}
+                }
+                s.blobs.retain(|_, b| {
+                    b.reference.class != class
+                        || now < b.reference.retention_until
+                        || b.completion.is_some()
+                });
+                s.staged
+                    .retain(|_, staged| staged.class != class || now < staged.expires_at);
+                Ok(
+                    if s.blobs.values().any(|b| b.reference.class == class)
+                        || s.staged.values().any(|staged| staged.class == class)
+                    {
+                        Progress::Pending
+                    } else {
+                        Progress::Confirmed
+                    },
+                )
+            })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
 }
 /// Driver adapters use exactly the same evidence and finalization contract for
@@ -1507,21 +1736,31 @@ pub enum ArtifactStatus {
 }
 impl DataStore {
     pub async fn artifact_status(&self, a: &Access, r: &ArtifactRef) -> Result<ArtifactStatus> {
-        self.tx(a, false, |s| {
-            if r.owner != a.target {
-                return Err(Error::PermissionDenied);
-            }
-            let b = s.blobs.get(&r.id).ok_or(Error::NotFound)?;
-            if b.reference != *r {
-                return Err(Error::Conflict);
-            }
-            Ok(match &b.completion {
-                None => ArtifactStatus::Saved,
-                Some(id) => ArtifactStatus::Finalized {
-                    completion_id: id.clone(),
-                },
+        let this = self.clone();
+        let a = a.to_owned();
+        let r = r.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let r = &r;
+            this.tx(a, false, |s| {
+                if r.owner != a.target {
+                    return Err(Error::PermissionDenied);
+                }
+                let b = s.blobs.get(&r.id).ok_or(Error::NotFound)?;
+                if b.reference != *r {
+                    return Err(Error::Conflict);
+                }
+                Ok(match &b.completion {
+                    None => ArtifactStatus::Saved,
+                    Some(id) => ArtifactStatus::Finalized {
+                        completion_id: id.clone(),
+                    },
+                })
             })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1549,13 +1788,14 @@ impl DataStore {
         if bytes.len() <= inline_limit {
             return Ok(StoredOutput::Inline(value));
         }
-        let staged = self.stage_named(
-            a,
-            &bytes,
-            DataClass::Intermediate,
-            now,
-            digest(&json!([a.target, operation, "output"])),
-        )?;
+        let store = self.clone();
+        let access = a.clone();
+        let id = digest(&json!([a.target, operation, "output"]));
+        let staged = tokio::task::spawn_blocking(move || {
+            store.stage_named(&access, &bytes, DataClass::Intermediate, now, id)
+        })
+        .await
+        .map_err(|_| Error::Storage)??;
         let artifact = self.save(a, staged, now).await?;
         let preview = self.read_artifact(a, &artifact, 0, inline_limit).await?;
         Ok(StoredOutput::External { artifact, preview })
@@ -1571,42 +1811,53 @@ impl DataStore {
         write: bool,
         revision: u64,
     ) -> Result<Access> {
-        if a.actor != a.target || child_agent == a.target.agent {
-            return Err(Error::PermissionDenied);
-        }
-        let actor = Namespace {
-            owner: a.target.owner.clone(),
-            agent: child_agent.into(),
-        };
-        actor.key()?;
-        self.tx(a, true, |s| {
-            if s.revision != revision {
-                return Err(Error::Conflict);
+        let this = self.clone();
+        let a = a.to_owned();
+        let child_agent = child_agent.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let this = &this;
+            let a = &a;
+            let child_agent = &child_agent;
+            if a.actor != a.target || child_agent.as_str() == a.target.agent {
+                return Err(Error::PermissionDenied);
             }
-            let id = uuid::Uuid::new_v4().to_string();
-            if s.grants.len() >= self.policy.max_entries {
-                return Err(invalid("GRANT_CAPACITY"));
-            }
-            s.grants.insert(
-                id.clone(),
-                Grant {
-                    actor: actor.clone(),
-                    revision,
-                    artifact_revision: s.artifact_revision,
-                    context_revision: s.context.revision,
-                    write,
-                },
-            );
-            Ok(Access {
-                actor,
-                target: a.target.clone(),
-                grant: Some(id),
+            let actor = Namespace {
+                owner: a.target.owner.clone(),
+                agent: child_agent.into(),
+            };
+            actor.key()?;
+            this.tx(a, true, |s| {
+                if s.revision != revision {
+                    return Err(Error::Conflict);
+                }
+                let id = uuid::Uuid::new_v4().to_string();
+                if s.grants.len() >= this.policy.max_entries {
+                    return Err(invalid("GRANT_CAPACITY"));
+                }
+                s.grants.insert(
+                    id.clone(),
+                    Grant {
+                        actor: actor.clone(),
+                        revision,
+                        artifact_revision: s.artifact_revision,
+                        context_revision: s.context.revision,
+                        write,
+                    },
+                );
+                Ok(Access {
+                    actor,
+                    target: a.target.clone(),
+                    grant: Some(id),
+                })
             })
         })
+        .await
+        .map_err(|_| Error::Storage)?
     }
 }
 
-/// Synchronous evidence boundary used by the synchronous Validator/Finalizer API.
+/// Synchronous evidence boundary. Runtime and ValidationTool offload it via spawn_blocking.
+/// Direct callers must supply the same boundary for blocking/network implementations.
 /// Implementations must compare current target and persisted evidence atomically
 /// when publishing the completion marker.
 pub trait EvidenceStore: Send + Sync {
@@ -1675,20 +1926,20 @@ impl EvidenceStore for DataStore {
 /// or use DataStore with a NamespaceBackend to reuse the reference algorithms.
 pub trait StandardToolStore: WorkspaceStore + ArtifactStore {
     fn policy(&self) -> &StoragePolicy;
-    async fn exact_replace(
+    fn exact_replace(
         &self,
         a: &Access,
         expected: u64,
         edits: Vec<ExactEdit>,
-    ) -> Result<WorkspaceSnapshot>;
-    async fn store_output(
+    ) -> impl std::future::Future<Output = Result<WorkspaceSnapshot>> + Send;
+    fn store_output(
         &self,
         a: &Access,
         operation: &str,
         value: Value,
         inline_limit: usize,
         now: u64,
-    ) -> Result<StoredOutput>;
+    ) -> impl std::future::Future<Output = Result<StoredOutput>> + Send;
 }
 impl StandardToolStore for DataStore {
     fn policy(&self) -> &StoragePolicy {
@@ -1716,15 +1967,22 @@ impl StandardToolStore for DataStore {
 
 /// Context is a separate CAS boundary from workspace and artifact publication.
 pub trait ContextStore: Send + Sync {
-    async fn context(&self, access: &Access) -> Result<ContextState>;
-    async fn append_context(&self, access: &Access, item: ContextItem) -> Result<ContextState>;
-    async fn commit_compaction(
+    fn context(
+        &self,
+        access: &Access,
+    ) -> impl std::future::Future<Output = Result<ContextState>> + Send;
+    fn append_context(
+        &self,
+        access: &Access,
+        item: ContextItem,
+    ) -> impl std::future::Future<Output = Result<ContextState>> + Send;
+    fn commit_compaction(
         &self,
         access: &Access,
         base: &ContextState,
         summary: &str,
         complete: bool,
-    ) -> Result<ContextState>;
+    ) -> impl std::future::Future<Output = Result<ContextState>> + Send;
 }
 impl ContextStore for DataStore {
     async fn context(&self, access: &Access) -> Result<ContextState> {

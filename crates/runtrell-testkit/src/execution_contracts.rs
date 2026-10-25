@@ -26,6 +26,7 @@ impl LedgerHarness for MemoryLedgerHarness {
 }
 fn context() -> ToolContext {
     ToolContext {
+        recovery_proof: None,
         claim: Claim {
             run: RunHandle {
                 tenant: "t".into(),

@@ -32,6 +32,7 @@ fn request() -> DispatchRequest {
 }
 fn applied() -> ExternalResult {
     ExternalResult::Applied {
+        physical_evidence: None,
         output: json!({"ok":true}),
         usage: Usage::measured(1, 0, 1),
         external_id: None,
@@ -210,8 +211,8 @@ fn result_save_failure_after_external_effect_recovers_by_lookup() {
             }],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert_eq!(rt.drive(&c).await, Err(Error::Storage));
         let next = s.claim(&c.run, "restart", 101, 100).await.unwrap();
@@ -264,8 +265,8 @@ fn cancellation_between_validation_and_finalize_wins() {
             tools: Vec::<BusinessTool>::new(),
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: CancelValidator(s.clone()),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(CancelValidator(s.clone())),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         let r = rt.drive(&c).await.unwrap();
         assert!(matches!(
@@ -305,8 +306,8 @@ fn price_not_configured_never_calls_model() {
             tools: Vec::<BusinessTool>::new(),
             policy: FakePolicy::default(),
             clock: TestClock::default(),
-            validator: DecisionValidator::default(),
-            finalizer: DecisionFinalizer,
+            validator: std::sync::Arc::new(DecisionValidator::default()),
+            finalizer: std::sync::Arc::new(DecisionFinalizer),
         };
         assert!(
             matches!(rt.drive(&c).await.unwrap().state,RunState::Terminal(Terminal::BudgetReached(ref reason)) if reason.contains("price"))
@@ -389,6 +390,7 @@ fn partial_usage_keeps_result_evidence_and_resolves_only_by_lookup() {
         let (s, c, a) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
         let partial = ExternalResult::Applied {
+            physical_evidence: None,
             output: json!({"receipt":"applied-but-unmetered"}),
             usage: Usage::default(),
             external_id: Some("external".into()),

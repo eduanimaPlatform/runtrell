@@ -467,8 +467,73 @@ pub enum OperationKind {
     Retry,
     Sandbox,
 }
+/// Opaque adapter proof, pinned atomically with the operation intent and reservation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryProof {
+    pub bytes: Vec<u8>,
+    pub generation: String,
+    /// Absolute Clock timestamp. A later preparation must never extend an old reservation.
+    pub expires_at: u64,
+}
+impl RecoveryProof {
+    pub fn validate(&self, now: u64) -> Result<()> {
+        if self.bytes.is_empty()
+            || self.bytes.len() > 65_536
+            || self.generation.is_empty()
+            || self.generation.len() > 256
+            || self.expires_at <= now
+        {
+            return Err(Error::Invalid("recovery proof bounds/expiry".into()));
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug)]
+pub struct PreparationContext {
+    pub claim: Claim,
+    pub principal: String,
+    pub key: String,
+    pub attempt: u32,
+    pub target: String,
+}
+/// Physical sends reported by an adapter; distinct from logical usage_observations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalSendObservation {
+    pub sequence: u32,
+    pub bytes: Vec<u8>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvidenceCompleteness {
+    Complete,
+    Truncated,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalSendEvidence {
+    pub observations: Vec<PhysicalSendObservation>,
+    pub completeness: EvidenceCompleteness,
+}
+impl PhysicalSendEvidence {
+    pub fn validate(&self) -> Result<()> {
+        if self.observations.len() > 256
+            || self
+                .observations
+                .iter()
+                .map(|o| o.bytes.len())
+                .sum::<usize>()
+                > 65_536
+            || self
+                .observations
+                .windows(2)
+                .any(|p| p[0].sequence >= p[1].sequence)
+        {
+            return Err(Error::Invalid("physical send evidence bounds/order".into()));
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DispatchRequest {
+    pub recovery_proof: Option<RecoveryProof>,
     pub key: String,
     pub kind: OperationKind,
     pub target: String,
@@ -484,6 +549,14 @@ pub struct DispatchRequest {
     pub timeout: Option<u64>,
 }
 impl DispatchRequest {
+    /// Prepared operations replay against the pinned proof generation. Tool scope
+    /// remains the independently pinned descriptor digest.
+    pub fn replay_scope(&self) -> Option<&str> {
+        self.recovery_proof
+            .as_ref()
+            .map(|proof| proof.generation.as_str())
+            .or(self.scope.as_deref())
+    }
     pub fn new(
         key: &str,
         kind: OperationKind,
@@ -492,6 +565,7 @@ impl DispatchRequest {
         reserve: Amount,
     ) -> Self {
         Self {
+            recovery_proof: None,
             key: key.into(),
             kind,
             target: target.into(),
@@ -520,6 +594,7 @@ pub enum OperationState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ExternalResult {
     Applied {
+        physical_evidence: Option<PhysicalSendEvidence>,
         output: Value,
         usage: Usage,
         external_id: Option<String>,
@@ -528,11 +603,27 @@ pub enum ExternalResult {
         external_id: String,
     },
     Failed {
+        physical_evidence: Option<PhysicalSendEvidence>,
         code: String,
         usage: Usage,
         retry_after: Option<u64>,
     },
     Unknown,
+}
+impl ExternalResult {
+    pub fn validate_evidence(&self) -> Result<()> {
+        match self {
+            Self::Applied {
+                physical_evidence: Some(e),
+                ..
+            }
+            | Self::Failed {
+                physical_evidence: Some(e),
+                ..
+            } => e.validate(),
+            _ => Ok(()),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Operation {
@@ -585,6 +676,7 @@ pub struct RetryPolicy {
 }
 #[derive(Clone, Debug)]
 pub struct ToolContext {
+    pub recovery_proof: Option<RecoveryProof>,
     pub claim: Claim,
     pub principal: String,
     pub operation: String,
@@ -658,14 +750,29 @@ pub struct Warning {
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> u64;
-    async fn wait_until(&self, deadline: u64);
+    fn wait_until(&self, deadline: u64) -> impl std::future::Future<Output = ()> + Send;
 }
 pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
-    async fn cancel(&self, _context: &ToolContext) -> Result<Progress> {
-        Ok(Progress::Unknown)
+    /// Only declared adapters are prepared; ordinary local tools need no proof.
+    fn requires_recovery_preparation(&self) -> bool {
+        false
+    }
+    fn prepare_recovery(
+        &self,
+        _context: &PreparationContext,
+        _input: &Value,
+    ) -> impl std::future::Future<Output = Result<Option<RecoveryProof>>> + Send {
+        async move { Ok(None) }
+    }
+
+    fn cancel(
+        &self,
+        _context: &ToolContext,
+    ) -> impl std::future::Future<Output = Result<Progress>> + Send {
+        async move { Ok(Progress::Unknown) }
     }
     fn retry_policy(&self) -> RetryPolicy {
         RetryPolicy {
@@ -676,17 +783,51 @@ pub trait ModelPort: Send + Sync {
     }
     fn limits(&self) -> ModelLimits;
     fn input_upper_bound(&self, request: &ModelRequest) -> Result<u64>;
-    fn recovery(&self) -> Option<(String, u64)>;
-    async fn invoke(&self, context: &ToolContext, request: ModelRequest) -> Result<ExternalResult>;
-    async fn lookup(&self, context: &ToolContext, request: ModelRequest) -> Result<Lookup>;
+    fn recovery(&self) -> Option<(String, u64)> {
+        None
+    }
+    fn invoke(
+        &self,
+        context: &ToolContext,
+        request: ModelRequest,
+    ) -> impl std::future::Future<Output = Result<ExternalResult>> + Send;
+    fn lookup(
+        &self,
+        context: &ToolContext,
+        request: ModelRequest,
+    ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
-    async fn cancel(&self, _context: &ToolContext, _input: Value) -> Result<Progress> {
-        Ok(Progress::Unknown)
+    /// Only declared adapters are prepared; ordinary local tools need no proof.
+    fn requires_recovery_preparation(&self) -> bool {
+        false
+    }
+    fn prepare_recovery(
+        &self,
+        _context: &PreparationContext,
+        _input: &Value,
+    ) -> impl std::future::Future<Output = Result<Option<RecoveryProof>>> + Send {
+        async move { Ok(None) }
+    }
+
+    fn cancel(
+        &self,
+        _context: &ToolContext,
+        _input: Value,
+    ) -> impl std::future::Future<Output = Result<Progress>> + Send {
+        async move { Ok(Progress::Unknown) }
     }
     fn descriptor(&self) -> ToolDescriptor;
-    async fn invoke(&self, context: &ToolContext, input: Value) -> Result<ExternalResult>;
-    async fn lookup(&self, context: &ToolContext, input: Value) -> Result<Lookup>;
+    fn invoke(
+        &self,
+        context: &ToolContext,
+        input: Value,
+    ) -> impl std::future::Future<Output = Result<ExternalResult>> + Send;
+    fn lookup(
+        &self,
+        context: &ToolContext,
+        input: Value,
+    ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 /// Host supplies limits and business-specific diagnostic classification.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -714,13 +855,13 @@ pub trait Finalizer: Send + Sync {
         receipt: ValidationReceipt,
     ) -> Result<Completion>;
 }
-pub trait SecretProvider {
-    async fn with_secret<R>(
+pub trait SecretProvider: Send + Sync {
+    fn with_secret<R: Send>(
         &self,
         context: &ToolContext,
         target: &str,
         use_secret: impl FnOnce(&[u8]) -> Result<R> + Send,
-    ) -> Result<R>;
+    ) -> impl std::future::Future<Output = Result<R>> + Send;
 }
 pub trait Observer {
     fn observe(&self, event: &Event);
@@ -734,70 +875,152 @@ pub struct Event {
 }
 
 pub trait RunStore: Send + Sync {
-    async fn renew(&self, claim: &Claim, now: u64, lease: u64) -> Result<Claim>;
-    async fn find_request(&self, spec: &RunSpec) -> Result<Option<RunHandle>>;
-    async fn start(&self, spec: RunSpec) -> Result<RunHandle>;
-    async fn get(&self, run: &RunHandle) -> Result<RunRecord>;
-    async fn claim(&self, run: &RunHandle, worker: &str, now: u64, lease: u64) -> Result<Claim>;
-    async fn check(&self, claim: &Claim, now: u64, new_work: bool) -> Result<RunRecord>;
-    async fn checkpoint(
+    fn renew(
+        &self,
+        claim: &Claim,
+        now: u64,
+        lease: u64,
+    ) -> impl std::future::Future<Output = Result<Claim>> + Send;
+    fn find_request(
+        &self,
+        spec: &RunSpec,
+    ) -> impl std::future::Future<Output = Result<Option<RunHandle>>> + Send;
+    fn start(&self, spec: RunSpec) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
+    fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
+    fn claim(
+        &self,
+        run: &RunHandle,
+        worker: &str,
+        now: u64,
+        lease: u64,
+    ) -> impl std::future::Future<Output = Result<Claim>> + Send;
+    fn check(
+        &self,
+        claim: &Claim,
+        now: u64,
+        new_work: bool,
+    ) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
+    fn checkpoint(
         &self,
         claim: &Claim,
         expected: u64,
         checkpoint: Checkpoint,
         now: u64,
-    ) -> Result<()>;
-    async fn cancel(&self, run: &RunHandle, reason: &str) -> Result<()>;
-    async fn terminate(&self, claim: &Claim, terminal: Terminal, now: u64) -> Result<()>;
-    async fn finalize(&self, claim: &Claim, completion: Completion, now: u64) -> Result<()>;
-    async fn wait(&self, claim: &Claim, reason: &str, now: u64) -> Result<()>;
-    async fn cleanup(
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn cancel(
+        &self,
+        run: &RunHandle,
+        reason: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn terminate(
+        &self,
+        claim: &Claim,
+        terminal: Terminal,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn finalize(
+        &self,
+        claim: &Claim,
+        completion: Completion,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn wait(
+        &self,
+        claim: &Claim,
+        reason: &str,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn cleanup(
         &self,
         claim: &Claim,
         stop: Progress,
         cleanup: Progress,
         now: u64,
-    ) -> Result<()>;
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 pub trait BudgetAuthority: Send + Sync {
-    async fn create_account_with_policy(
+    fn create_account_with_policy(
         &self,
         tenant: &str,
         limit: Amount,
         parent: Option<String>,
         policy: AccountPolicy,
-    ) -> Result<String>;
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
     /// Fenced, zero-charge finalization admission; does not authorize new I/O.
-    async fn finalization_allowed(&self, claim: &Claim, now: u64) -> Result<()>;
-    async fn exhaust(&self, claim: &Claim, now: u64) -> Result<()>;
-    async fn create_account(
+    fn finalization_allowed(
+        &self,
+        claim: &Claim,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn exhaust(
+        &self,
+        claim: &Claim,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn create_account(
         &self,
         tenant: &str,
         limit: Amount,
         parent: Option<String>,
-    ) -> Result<String>;
-    async fn account(&self, id: &str) -> Result<Account>;
-    async fn remaining(&self, claim: &Claim, now: u64) -> Result<Amount>;
-    async fn warnings(&self, claim: &Claim, now: u64) -> Result<Vec<Warning>>;
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
+    fn account(&self, id: &str) -> impl std::future::Future<Output = Result<Account>> + Send;
+    fn remaining(
+        &self,
+        claim: &Claim,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<Amount>> + Send;
+    fn warnings(
+        &self,
+        claim: &Claim,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<Vec<Warning>>> + Send;
 }
 pub trait OperationStore: Send + Sync {
-    async fn observe_result(
+    fn observe_result(
         &self,
         claim: &Claim,
         id: &str,
         result: ExternalResult,
         now: u64,
-    ) -> Result<()>;
-    async fn proven_unsent(&self, claim: &Claim, id: &str, scope: &str, now: u64) -> Result<()>;
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn proven_unsent(
+        &self,
+        claim: &Claim,
+        id: &str,
+        scope: &str,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
     /// Atomic reservation across all ancestors plus intent; no I/O before success.
-    async fn begin(&self, claim: &Claim, request: DispatchRequest, now: u64) -> Result<Operation>;
-    async fn list_operations(&self, run: &RunHandle) -> Result<Vec<Operation>>;
-    async fn operation(&self, run: &RunHandle, key: &str) -> Result<Option<Operation>>;
+    fn begin(
+        &self,
+        claim: &Claim,
+        request: DispatchRequest,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<Operation>> + Send;
+    fn list_operations(
+        &self,
+        run: &RunHandle,
+    ) -> impl std::future::Future<Output = Result<Vec<Operation>>> + Send;
+    fn operation(
+        &self,
+        run: &RunHandle,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Option<Operation>>> + Send;
     /// Every send, including a proven-not-sent replay, requires a fresh fence.
-    async fn mark_sent(&self, claim: &Claim, id: &str, now: u64) -> Result<()>;
+    fn mark_sent(
+        &self,
+        claim: &Claim,
+        id: &str,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
-    async fn record(&self, claim: &Claim, id: &str, result: ExternalResult, now: u64)
-    -> Result<()>;
+    fn record(
+        &self,
+        claim: &Claim,
+        id: &str,
+        result: ExternalResult,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlotRequest {
@@ -842,10 +1065,14 @@ impl Default for Capacity {
     }
 }
 pub trait Scheduler: Send + Sync {
-    async fn acquire(&self, request: SlotRequest) -> Result<()>;
-    async fn release_slot(&self, key: &str) -> Result<()>;
-    async fn enqueue(&self, entry: QueueEntry) -> Result<()>;
-    async fn dequeue(&self, now: u64) -> Result<Option<QueueEntry>>;
+    fn acquire(&self, request: SlotRequest)
+    -> impl std::future::Future<Output = Result<()>> + Send;
+    fn release_slot(&self, key: &str) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn enqueue(&self, entry: QueueEntry) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn dequeue(
+        &self,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<Option<QueueEntry>>> + Send;
 }
 pub trait ControlStore: RunStore + BudgetAuthority + OperationStore + Scheduler {}
 impl<T: RunStore + BudgetAuthority + OperationStore + Scheduler> ControlStore for T {}

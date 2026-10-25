@@ -447,7 +447,9 @@ impl LinuxBackend {
         r.usage = Some(read_usage(&self.group(id))?);
         r.observation.state = ExecutionState::Stopped;
         r.observation.failure = Some("RECOVERED_STOP_RESULT_UNKNOWN".into());
-        r.observation.local_stop();
+        r.observation
+            .released_resources
+            .extend([Resource::Cpu, Resource::Pid]);
         if r.scratch_mount_id.is_some()
             && mount_identity(&self.dir(id).join("scratch"))? == r.scratch_mount_id
         {
@@ -540,7 +542,9 @@ impl LinuxBackend {
         }
         r.usage = Some(read_usage(&self.group(id))?);
         r.observation.state = ExecutionState::Collecting;
-        r.observation.local_stop();
+        r.observation
+            .released_resources
+            .extend([Resource::Cpu, Resource::Pid]);
         self.save(id, r)?;
         let mut value = value;
         if r.observation.failure.is_none() {
@@ -830,6 +834,9 @@ impl ExecutionBackend for LinuxBackend {
                 return Err(Error::Conflict);
             }
             unmount_scratch(&scratch)?;
+            if mount_identity(&scratch)?.is_some() {
+                return Err(Error::Conflict);
+            }
             match fs::remove_dir(&scratch) {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -842,6 +849,7 @@ impl ExecutionBackend for LinuxBackend {
             }
             r.observation.state = ExecutionState::Destroyed;
             r.observation.local_destroy();
+            r.observation.released_resources.insert(Resource::Memory);
             backend.save(&id, &r)?;
             Ok(Progress::Confirmed)
         })
@@ -1046,6 +1054,7 @@ mod tests {
         let groups = tempfile::tempdir().unwrap();
         let b = fixture(root.path(), groups.path());
         let c = ToolContext {
+            recovery_proof: None,
             claim: Claim {
                 run: RunHandle {
                     tenant: "t".into(),

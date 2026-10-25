@@ -40,7 +40,7 @@ stopping, reclamation and settlement remain distinct records.
 
 公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。
 
-試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 6件／python 7件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。現時点ではHosted実行未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
+試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 7件／python 8件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
 <!-- /requirement-summary -->
 
 ## Local validation
@@ -59,7 +59,7 @@ cargo run -p runtrell-testkit --example support_decision
 cargo run -p runtrell-testkit --example alternate_host
 cargo run -p xtask -- trace
 cargo run -p xtask -- hashes
-cargo package --workspace --list --allow-dirty
+cargo package --workspace --list --allow-dirty # パッケージ内容の一覧確認
 ```
 
 PostgreSQL tests require `RUNTRELL_TEST_DATABASE_URL`; they fail rather than skip
@@ -76,10 +76,16 @@ does not imply that a process backend can rediscover an execution after registry
 Environment and validation limits:
 
 - Linux cgroup v2/bubblewrap isolation is implemented as an optional backend.
-  Real Linux execution and hosted CI results have not yet been verified.
+  The modified Linux tests have not yet been executed in this revision.
+  Production requires both cgroup v2 delegation and a trusted management process
+  with tmpfs mount/unmount authority in the recovery mount namespace; see the
+  [production conditions](docs/design/execution.md#linux本番管理processと受入条件).
+  Payloads require a user namespace, uid/gid 65534, no capabilities and no_new_privs.
 - macOS Seatbelt isolation depends on the host. It has only been reported successful
   in explicit runs outside an enclosing sandbox; the real-isolation test remains
   ignored in the normal suite. The profile permits listing the root directory.
+  Descendant execution is unsupported: requests setting requires_descendants are
+  rejected before acquisition; Seatbelt continues to deny fork.
 - Actual database-kill, power-loss and failover tests have not been performed.
 - Performance and sustained load have not been measured as benchmarks. The small
   concurrency-test timings in the design notes are not performance validation.
