@@ -320,3 +320,25 @@ async fn changed_runtime_is_rejected_and_its_unused_environment_is_reclaimable()
     );
     assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
 }
+
+#[tokio::test]
+async fn request_runtime_hash_is_not_replaced_by_a_new_backend_allowlist() {
+    let root = private_root();
+    let runtime = root.path().join("pinned-runtime");
+    std::fs::write(&runtime, b"expected").unwrap();
+    let mut request = ExecutionRequest::process(runtime.to_str().unwrap(), vec![]);
+    request.executable_hash = Some(runtrell::data::content_digest(b"expected"));
+    std::fs::write(&runtime, b"replacement").unwrap();
+    let backend = ProcessBackend::new(
+        root.path().canonicalize().unwrap(),
+        env!("CARGO_BIN_EXE_runtrell-exec-limit"),
+        "/usr/bin/false",
+        &[runtime.to_str().unwrap()],
+    )
+    .unwrap();
+    let c = context();
+    let e = backend.acquire(&c, &request).await.unwrap();
+    assert_eq!(backend.start(&c, &e).await.unwrap_err(), Error::Conflict);
+    assert_eq!(backend.stop(&c).await.unwrap(), Progress::Confirmed);
+    assert_eq!(backend.destroy(&c).await.unwrap(), Progress::Confirmed);
+}

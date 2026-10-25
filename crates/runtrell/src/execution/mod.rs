@@ -8,7 +8,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod controller;
+mod linux;
 mod process;
+pub use linux::{LinuxBackend, LinuxCpuBandwidth, LinuxInventory, LinuxUsage};
+#[cfg(feature = "python")]
+pub mod python;
 pub use controller::{freeze_workspace, merge_copy, merge_process_copy, request_cancel};
 pub use process::ProcessBackend;
 
@@ -115,6 +119,8 @@ pub enum Program {
 pub struct ExecutionRequest {
     pub limits: ExecutionLimits,
     pub program: Program,
+    /// Optional host-pinned executable SHA-256, checked again by OS backends.
+    pub executable_hash: Option<String>,
     pub input: Option<WorkspaceSnapshot>,
     pub input_files: BTreeMap<String, Vec<u8>>,
     pub output_paths: Vec<String>,
@@ -127,6 +133,7 @@ impl ExecutionRequest {
     pub fn process(executable: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             limits: ExecutionLimits::default(),
+            executable_hash: None,
             program: Program::Process {
                 executable: executable.into(),
                 args,

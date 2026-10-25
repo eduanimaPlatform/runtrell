@@ -12,11 +12,11 @@ use tokio::{
     sync::watch,
 };
 #[derive(Clone)]
-struct Entry {
-    request: ExecutionRequest,
-    observation: Observation,
-    scratch: PathBuf,
-    cancel: watch::Sender<bool>,
+pub(super) struct Entry {
+    pub(super) request: ExecutionRequest,
+    pub(super) observation: Observation,
+    pub(super) scratch: PathBuf,
+    pub(super) cancel: watch::Sender<bool>,
 }
 #[derive(Clone)]
 pub struct ProcessBackend {
@@ -101,7 +101,13 @@ impl ProcessBackend {
             .executables
             .get(executable)
             .ok_or(Error::PermissionDenied)?;
-        if crate::data::content_digest(&std::fs::read(executable).map_err(io)?) != *expected_hash {
+        if e.request
+            .executable_hash
+            .as_ref()
+            .is_some_and(|h| h != expected_hash)
+            || crate::data::content_digest(&std::fs::read(executable).map_err(io)?)
+                != *expected_hash
+        {
             return Err(Error::Conflict);
         }
         let mut command = Command::new(&self.helper);
@@ -496,7 +502,10 @@ impl ExecutionBackend for ProcessBackend {
         .map_err(|_| Error::Storage)?
     }
 }
-async fn bounded(mut stream: impl AsyncRead + Unpin, limit: usize) -> std::io::Result<Vec<u8>> {
+pub(super) async fn bounded(
+    mut stream: impl AsyncRead + Unpin,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -550,7 +559,7 @@ async fn supervise(mut command: Command, job: &Entry) -> (Option<Value>, Option<
     }
 }
 
-fn collect_files(job: &Entry) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
+pub(super) fn collect_files(job: &Entry) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
     use rustix::fs::{Mode, OFlags, open, openat};
     use std::{
         collections::BTreeSet,

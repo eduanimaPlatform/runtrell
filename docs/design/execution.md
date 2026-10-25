@@ -16,7 +16,7 @@ Run受付・検索だけでは環境を作らない。コード要求は既存di
 
 ## 強制能力（約束する単位）
 
-| 制限 | macOS process | Linux process |
+| 制限 | macOS ProcessBackend | Linux ProcessBackend（従来の限定構成） |
 |---|---|---|
 | 隔離 | Seatbelt deny-default。dyld起動に必要な `(literal "/")` の読取りを許可し、rootディレクトリ一覧が読める。子pathへの再帰読取り許可ではない | bubblewrap namespace。利用不能なら拒否 |
 | CPU | helperのRLIMIT_CPU、fork拒否時のみ | aggregate CPU非対応、要求時拒否 |
@@ -74,3 +74,90 @@ copy・hash検査・出力file回収・物理directory削除はTokioのblocking 
 `Observation.released_resources`は資源ごとの確認receiptである。`Destroyed`だけではdisk/永続volumeを解放しない。外部backendが環境nodeを削除してもvolumeが残る場合は、Volumeのreceiptを欠いたまま保持し、同じdestroy/lookupを再試行できる。初期local backendは永続volumeを割り当てず、scratch削除時にDiskとVolumeの確認を明示する。未確認volumeと未確定費用を、環境状態enumから一括解放しない試験を追加した。
 
 出力fileのpath/manifest費用もbyte枠へ含め、変更のない入力fileはstream比較して出力から省く。stdout/stderr/fileを合わせた最終JSON envelopeにもoutput_bytes上限を適用する。runtime hash不一致等の開始前拒否は未使用環境をStoppedとして記録し、後続cleanupで回収できる。
+
+## rt-3b: Linux の主力構成（実装済み・Linux 実行未検証）
+
+公開の任意 backend `LinuxBackend` は既存の ExecutionBackend / ExecutionLedger / lazy dispatch を利用する。既存 `ProcessBackend` と macOS 経路は残す。上表の Linux process の非対応欄は従来の ProcessBackend の能力であり、LinuxBackend の制約は以下が正本となる。全 Run への起動や採用を強制しない。ホストは具体的な資源値と実行許可を供給する。
+
+- Linux cgroup v2、`cpu memory pids` が有効な専用委譲 subtree、書込み権限、`cgroup.kill`、`memory.peak`、bubblewrap の user/mount/PID/network/IPC/UTS namespace、host mount namespace の CAP_SYS_ADMIN を必要とする。いずれかを利用できなければ拒否し、host 実行への fallback はない。実行要求には CPU・RAM・PID・disk の全上限を必須とする。能力不足が取得途中で判明した場合も Unknown の資源予約を残す。
+- host が constructor の `LinuxCpuBandwidth { quota_usec, period_usec }` で供給する値を `cpu.max` に設定する。試験構成は `10000 10000` で group 全体の帯域を 1 CPU に制限する。`cpu_millis` は `cpu.stat usage_usec` の累積監視閾値で、10ms ごとの supervisor が超過時に停止する。**累積 CPU の厳密な無超過保証ではない**。帯域制限は kernel が強制するが、累積閾値と wall watchdog には supervisor の scheduling 遅延による超過がある。厳密な累積 CPU 上限が必要な host はこの backend を選択しない。CPU 使用量には入力 staging・launcher・全子孫を含む。
+- `memory.max`、`memory.swap.max=0`、`memory.oom.group=1`、`pids.max` を設定し、値を再読取りする。`memory.peak`、`memory.events oom_kill`、`pids.events max` を観測し、停止後も管理記録に残す。kernel の memory accounting 単位・一時的な reclaim の遅延があり、RSS の単純な総和とは異なる。kernel memory と tmpfs の計上は cgroup の仕様に従う。
+- scratch は host が `size=disk_bytes,nr_inodes=4096,mode=0700,nodev,nosuid` で mount した tmpfs。入力の書込みも group に入った Rust helper で行い、tmpfs page と staging を資源管理対象にする。`/workspace` のみ書込み可能、`/tmp` はその symlink。namespace root と runtime は read-only、`/dev` は必要な device の個別 bind のみ。追加の書込み可能 tmpfs や host `/etc`・home・cgroup・管理領域を渡さない。disk 上限は **scratch の page 割当**の上限であり、metadata、管理記録、保存先 Workspace、stdout/stderr の host メモリを含む全ホスト disk quota ではない。`disk_bytes` は host の page size の整数倍だけを受理し、丸上げで要求を超えない。小さな書込みは page 単位、inode 数も有限、RAM と disk の双方で拒否され得る。管理記録・入力／出力 envelope の host 側余裕は別途確保する（入力16MiB、出力16MiB以下の既存契約）。
+- `--unshare-all --disable-userns --cap-drop ALL` により追加 user namespace で read-only mount を作り直す経路も閉じる。外部 network と資格情報は渡さない。`/usr`・`/bin`・`/lib`・`/lib64` は host が用意した immutable runtime tree として read-only 公開する。この tree に秘密情報を置かない。allowlist にない executable を host で起動しないが、sandbox 内の runtime tree の実行 file を不信コードが呼ぶことは可能であり、制限は tree 全体に適用される。
+- `file_bytes` は helper の RLIMIT_FSIZE、stdout/stderr と成果物は既存の byte 枠、NOFOLLOW・regular file・nlink 検査を再利用する。helper/launcher/実行 file の hash を開始時に再検査する。任意の `ExecutionRequest.executable_hash` も backend の固定 hash と照合する。host は実行中の runtime tree を不変に保つ。共有 kernel の脆弱性に対する VM 相当の境界ではない。
+
+### registry に依存しない再発見と回収
+
+`root/<SHA256(owner,operation)>/` に scratch・cancel・lock・`record.json`、委譲先に `rt-<同ID>` を作る。root は canonical・所有者一致・0700 のローカル耐久 FS、同じ mount namespace から再接続できることが前提。record は固定 request、owner/operation/runtime 版、cgroup inode、scratch mount ID、状態、結果、使用量、receipt を持ち、temp file→fsync→rename→directory fsync で保存する。管理記録は sandbox に見せない。
+
+helper は親 PID の前後照合と parent-death SIGKILL を設定する。cgroup 参加時には専用 join lock を取り、耐久 cancel marker があれば参加を拒否する。停止側も marker を保存して同じ barrier を通過してから kill／空判定するため、再起動後の遅延 helper が停止確認後に参加する経路を閉じる。参加前の信頼済み helper 起動分は host の管理余裕であり、不信 payload は参加完了まで実行しない。
+
+開始前に Running を保存し、実行中は operation 単位の OS file lock を保持する。別 client は atomic record を照会し、耐久 cancel marker で取消できる。取得中に staging が operation lock を保持している場合も、停止側は識別済み group を kill できる。取得側の record 更新と競合させず Pending を返し、後続の停止確認で receipt を保存する。backend process が失われると OS が lock を解放する。Running を Ready に戻したり、同じ操作を再実行したりしない。scratch と cgroup の途中作成で識別証拠を保存できなかった窓は、安全を優先して Unknown として残る。
+
+管理 Worker は通常の owner/lease fence と管理権限を取得したうえで、`ExecutionLedger.pending()` と `inventory()` の owner/operation/runtime を照合し、`reconcile(&pending_record)` で固定 request 全体も一致させる。元の ToolContext の owner/operation で `stop` を繰り返し、`cgroup.kill` と `cgroup.events populated 0` の確認後だけ CPU/Memory/PID の receipt を得る。PID 単体を識別子にしない。復旧時の終了理由・stdout/stderr は再現できないため `RECOVERED_STOP_RESULT_UNKNOWN` とし、元 mount が一致する場合だけ bounded な file copy を保存する。これは正常終了の receipt ではない。
+
+`destroy` は停止確認後に Reclaiming を耐久保存し、通常の unmount（lazy detach 不使用）・scratch directory 削除・cgroup 削除の確認後に Disk/Volume を解放する。途中停止後も再試行できる。Destroyed の管理記録は tombstone として保持し、同 operation の acquire は元 reference を返す。記録の削除／retention は、その operation を二度と再受付しない host 側方針と合わせて別途実施する。
+
+記録の破損、別 runtime 版、request 不一致、cgroup inode／mount ID 不一致、対応記録のない directory/group は Unknown として隔離する。自動で削除・別 Run に再割当しない。`inventory().execution == None` は隔離対象。名前の一致だけで採用しない。ホスト再起動、管理 FS 喪失、mount namespace 変更は通常の backend process 再起動と異なり、存在／削除の receipt を再構築できない場合がある。ローカル record は ExecutionLedger の原子予約・owner fence・費用精算を置き換えない。ローカル実行の外部課金は0であり、host/cloud 利用料の課金 adapter を実装したという意味ではない。
+
+### 任意の Python 実行（既定無効）
+
+`runtrell` の `python` feature は request builder `execution::python::{PythonRuntime,DependencyPolicy}` を公開する。管理基盤は Rust、実行する Python は host 提供の別 process である。Python interpreter の install や全 Run への Python 起動を行わない。
+
+host は固定絶対 path、正確な `major.minor.patch`、実行 file SHA-256 を供給する。builder と backend の双方で hash を検査し、sandbox 内で版を照合してから `-I -B` で script を実行する。初期構成では host が `/usr` の read-only runtime tree に interpreter・標準 library・必要 package を事前準備する。tree 外の単体実行 file も read-only bind できるが、任意の venv／外部 library tree の自動検出・取得・mount は行わない。
+
+`freeze_workspace` で固定した `input` と `input_files` を `PythonRuntime.request((snapshot, files), script, output_paths, limits, PreparedOnly)` へ渡し、通常の `Runtime.execute_backend` を呼ぶ。`merge_process_copy` が元 snapshot の CAS で保存を行う。Python 成功、成果物回収、Workspace 保存完了、停止、削除は別 receipt である。保存競合を成功にせず、出力 copy は管理 record に保持する。
+
+`PreparedOnly` が既定で network deny、資格情報なし、事前に用意した package／環境だけを使う。wheel の取得・pip install は実装しない。`Fetch { network_allow, credential_scopes, budget_micro_usd, deadline_ms }` は将来の方針型であり、現実装は必ず `PYTHON_DEPENDENCY_FETCH` で拒否する。後続実装にも通常の予約・network・資格情報・資源・期限・費用管理を適用する。
+
+### Claude が行う Linux 実試験
+
+本 macOS sandbox では Linux／Docker を実行していない。Linux 専用 integration は `cfg(target_os="linux")` と `#[ignore]` を併用し、環境変数がない場合に成功扱いで return しない。明示実行時に条件不足なら失敗する。通常の macOS 試験を削除／弱体化していない。
+
+必要 OS は cgroup v2 の `cgroup.kill`・`memory.peak` を備える Linux（推奨 kernel 6.1 以上）、bubblewrap は `--disable-userns` 対応版。例は Ubuntu 24.04。最初に `bwrap --help` と cgroup control file の存在を確認する。Docker は Claude が次の条件で起動する（公開 checkout の root で実行）。Docker Desktop の Linux VM 側に cgroup v2 と書込み可能な委譲元が必要で、満たさなければ当該環境は試験不適合と記録する。
+
+```sh
+docker run --rm -it --privileged --cgroupns=host \
+  --security-opt apparmor=unconfined \
+  --mount type=bind,src="$(pwd)",dst=/work \
+  --workdir /work ubuntu:24.04 bash
+```
+
+`--privileged --cgroupns=host` で container に提供される `/sys/fs/cgroup` が cgroup v2・書込み可能であることを確認する。Docker Desktop の VM 設定によって読取り専用や controller 不足なら、その構成での実試験は未実行として記録する。Linux host では必要に応じ `--mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup` を追加できる。macOS 側の同 path を bind しない。既存 mount を上書きせず、cgroup v1 や無制限実行へ fallback しない。
+
+container 内で（これらは手順であり Codex は未実行）：
+
+```sh
+apt-get update
+apt-get install -y --no-install-recommends bubblewrap python3 build-essential pkg-config libssl-dev ca-certificates curl ripgrep
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.98.0
+. "$HOME/.cargo/env"
+export CARGO_TARGET_DIR=/tmp/runtrell-linux-target
+```
+
+container と GitHub-hosted Linux runner の双方で、以下を専用 root 権限 shell から実行する。runner は checkout・Rust 1.98.0・上記 apt package を準備し、`sudo env PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" bash` などで同じ toolchain を使う。既存 application の cgroup を試験用として使わない。
+
+```sh
+set -eu
+bwrap --help | rg -- --disable-userns
+test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+# 専用 test host/VM で、親の controller を有効化できること。
+printf '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control
+export RUNTRELL_CGROUP_ROOT="/sys/fs/cgroup/runtrell-rt3b-$$"
+mkdir "$RUNTRELL_CGROUP_ROOT"
+printf '+cpu +memory +pids' > "$RUNTRELL_CGROUP_ROOT/cgroup.subtree_control"
+export RUNTRELL_LINUX_TEST=1
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/runtrell-linux-target}"
+export RUNTRELL_LINUX_STATE_ROOT="$(mktemp -d /tmp/runtrell-state.XXXXXX)"
+chmod 700 "$RUNTRELL_LINUX_STATE_ROOT"
+export RUNTRELL_PYTHON_VERSION="$(/usr/bin/python3 -c 'import platform; print(platform.python_version())')"
+cargo build --workspace --locked
+cargo test -p runtrell --features python --test linux_execution -- --include-ignored --test-threads=1
+# 失敗時は state root・cgroup subtree を証拠ごと保持して調査する。
+# 成功時も管理 record は残す。全 child cgroup が削除済みなら専用 subtree のみ削除可。
+rmdir "$RUNTRELL_CGROUP_ROOT"
+```
+
+指定テスト DB は Docker 内 localhost と host の localhost が異なるため、この専用 Linux suite は DB を使用しない。全 workspace の Pg 契約検証は、別途使い捨て DB に到達する `RUNTRELL_TEST_DATABASE_URL` を設定して行う。
+
+実試験は正常実行 baseline、CPU 閾値停止、cgroup OOM、PID quota 到達、disk ENOSPC、大量出力、越境書込み、network deny、取消・子孫停止、別 client／別 process 終了後の pending 照合・停止・冪等回収、Python→Workspace 保存を含む。単に payload が全部起動失敗する状態を合格にしない。CPU/RAM/PID の kernel 使用量・イベントも照合する。Docker と GitHub-hosted runner のそれぞれの結果を記録するまでは、Linux 主力構成の実証済み／本番受入完了とはしない。
