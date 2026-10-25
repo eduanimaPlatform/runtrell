@@ -16,6 +16,11 @@ pub fn names(suite: &str, feature: &str) -> Result<Vec<&'static str>, Box<dyn Er
             "linux_concurrent_runs_reclaim_independently",
             "linux_stop_unconfirmed_is_durable_and_recoverable",
         ],
+        "linux-acquisition" => vec![
+            "execution::linux::tests::linux_acquisition_crash_after_cgroup",
+            "execution::linux::tests::linux_acquisition_crash_after_mount",
+            "execution::linux::tests::linux_acquisition_crash_before_identity_record",
+        ],
         "macos" if feature == "default" => {
             vec!["real_isolation_loop_output_fork_env_and_workspace_boundaries"]
         }
@@ -125,6 +130,8 @@ mod tests {
                     .contains(&"linux_stop_unconfirmed_is_durable_and_recoverable")
             );
         }
+        assert_eq!(names("linux-acquisition", "default").unwrap().len(), 3);
+        assert_eq!(names("linux-acquisition", "python").unwrap().len(), 3);
         assert_eq!(names("macos", "default").unwrap().len(), 1);
         assert!(names("linux", "unknown").is_err());
     }

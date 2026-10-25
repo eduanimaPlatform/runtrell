@@ -14,7 +14,7 @@
 ## rt-3h：Linuxの停止未確認と並行実行
 
 - `stop_timeout_is_durable_and_later_recovery_confirms_only_cpu_pid`：通常fileでcgroupを模擬し、30msの停止期限超過、Unknown/STOP_UNCONFIRMEDの耐久保存、解放receiptなし、別clientでの再読取り、I/Oエラーの保存、後の空判定によるCPU/PIDだけの解放を検証する。修正前は固定1秒待機で失敗。macOSでも実行する。
-- `linux_stop_unconfirmed_is_durable_and_recoverable`（ignore）：payload参加後にjoin barrierの競合を注入し、supervisorの停止確認失敗がUnknownとして保存され、別clientのstopとdestroyで回収できることを要求する。Linux実環境での実行待ち。xtaskの必須一覧にも登録し、default 8件／Python 9件を照合する。
+- `linux_stop_unconfirmed_is_durable_and_recoverable`（ignore）：payload参加後にjoin barrierの競合を注入し、supervisorの停止確認失敗がUnknownとして保存され、別clientのstopとdestroyで回収できることを要求する。Linux実環境での実行待ち。xtaskの必須一覧にも登録し、integration default 8件／Python 9件を照合する（rt-4bの取得crash unit 3件は別suiteで追加必須）。
 - `linux_concurrent_runs_reclaim_independently`：8環境の並行数・payload・10秒の停止bound・全解放assertionを維持。各環境のacquire/start/stop/destroyの所要時間を出力する。共通のstopped/destroyed helperはtimeout時に最後のstate・failure・released_resourcesを表示する。
 - 意図した状態記録の修正は、停止未確認をRunningのまま放置せずUnknownにすること。停止・回収条件、controllerの予約保持、owner fence、原子精算の要件と既存assertionは弱めない。Linuxでの間欠失敗解消と所要時間改善は実行証拠を別途必要とする。
 
@@ -503,3 +503,28 @@ Crash子processと遅延helperの起動を`status()`から`output()`へ変更し
 - 新規`stable_raw_bytes_checks_tokens_and_metadata_before_publication`は保存前後のbytes/media type/owner偽造、空/制御文字入りmetadataを拒否する。容量超過の異bytesでも既存IDとのConflictを優先する。既存publication/GC/共有/証跡試験のassertionは維持。
 - 意図した変更：media typeをStaged/ArtifactRefへ必須保存しdata schemaを2から3へ更新。旧形式の暗黙移行はしない。ランダムstage/putはapplication/octet-stream、JSON store_outputはapplication/json。stable stageはowner専用。`random_artifact_stage_preserves_explicit_write_sharing_contract`で従来のランダムstage/saveの明示write共有を維持する。同IDでmetadataが異なる場合もConflictとする。既存の保存完了・明示共有のread・予算/所有者fence契約は弱めない。
 - PostgreSQLは制御台帳のためArtifact suite対象外。追加`local_stable_raw_bytes_survive_process_exit_at_stage_and_save`はstage/save応答直後の子process終了（デストラクタなし）から別processで復元する。SIGKILL・電源断・実object storeの耐久性/性能は主張しない。
+
+## rt-4a：JSON構文エラーの自律修正
+
+- 意図した変更：最終候補のparse失敗を即時Invalid終了から、`JSON_SYNTAX`診断と生文字列候補を保持するrt-3cの修正経路へ変更。既存assertionの削除・弱体化はない。
+- `runtrell/tests/schema.rs::json_syntax_positions_cover_multibyte_eof_and_trailing_input`：行・byte列・byte offset、複数行・UTF-8・EOF・空入力・後続文字と正常なJSON文字列/null。
+- `testkit/tests/repair.rs::json_syntax_candidate_survives_worker_loss_and_revalidation`：候補・構造化diagnostic・原因のcheckpoint、worker交代、新Runtimeで修正・再検証・確定、2操作の通常予約と精算合計8 token、モデル2呼出し。
+- `testkit/tests/repair.rs::json_syntax_host_limits_stop_without_extra_calls`：修正不能、host回数/時間、待機中の時間/期限到達、残予算による追加予約拒否。候補・diagnostic保持、追加モデル呼出しなし。
+- `postgres/tests/postgres.rs::json_syntax_repair_reopens_with_independent_pool_and_runtime`：最初のpoolとTokio Runtimeを終了し、別pool/Runtime・新PgStoreから同一checkpointと使用量4 tokenを確認。修正後は操作2件・予約あり・精算済み、合計8 token、再開側モデル呼出し1回。
+- `testkit/tests/repair.rs`および`postgres/tests/contracts.rs`の`json_artifact_syntax_repairs_with_new_runtime`：共通contractで実保存した不正/正常JSON成果物を検証。Artifact ID付き構文診断・候補参照をcheckpointへ保存し、新Runtimeで正常成果物を選び再検証。byte/hash不一致はConflictで修正扱いにしない。成果物保存はMemory DataStore、制御台帳はMemory/Pg。外部保存adapter・本番Providerの実証ではない。
+- Red：新しいMemoryの構文修正試験が`Terminal(Failed("invalid input: expected value at line 2 column 13"))`で失敗し、期待するWaitingとの差を確認した。
+
+- `testkit/tests/repair.rs::repeated_json_syntax_failure_stops_at_host_repair_count`：1回修正後も不正JSONなら`VALIDATION_REPAIR_LIMIT`で終了、最後の候補と診断を保持し3回目の呼出しを行わない。
+- `runtrell/tests/schema.rs::checkpoint_json_hash_ignores_object_key_order`：JSONBで変わり得る再帰objectキー順は同じhash、array順は異なるhash。Redでhash不一致を確認後、構造化値のdigestを再帰整列へ変更。成果物bytesのhashと参照の完全性照合は変更しない。複数キーのArtifactRefを候補にしたMemory/Pgの修正試験も維持する。
+
+- 最終ローカル検証（2026-10-26、基準HEAD d43cb384ce99e35df50ab75cd1095f29c995d007の未commit作業ツリー）：指定の使い捨てPostgres接続で`cargo test --workspace`はdoctest込み703成功・0失敗・10 ignored。ignoredはLinux/実隔離環境を要する試験で、rt-4a追加8ケースは全て成功。`cargo build --workspace --locked`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --check`、`cargo run -p xtask -- trace`、`cargo run -p xtask -- hashes`、`cargo run -p xtask -- api-doc`、`git diff --check`も成功。hashesは74件の帰属/headerとMIT licenseを確認し、RIG_SNAPSHOT未指定のため元snapshotのsource hash照合は0件。Hosted・本番Provider・外部保存adapterは未実行。
+
+## rt-4b：cgroup/mount取得途中の孤立回収
+
+- `execution::linux::tests::precreation_intent_is_discoverable_without_resource_identities`：既存inventoryが所有なしUnknownになるRedを確認し、事前intent付きAcquiringとして発見するGreenを確認。
+- `precreation_recovery_confirms_absence_and_reclaims_idempotently`：作成前crash相当から停止とMemory/Disk/Volume回収を分離し、二重destroyと所有不明cgroupの非削除を確認。
+- `mount_provenance_rejects_foreign_source_type_and_stacked_mounts`：予定pathだけでなくtmpfs source・種別・重複mountも照合。外国由来のmountは拒否。
+- `linux_acquisition_crash_after_cgroup` / `linux_acquisition_crash_after_mount` / `linux_acquisition_crash_before_identity_record`：`cfg(test)`の子process exitで各境界を固定。新backendが事前intentから識別を補完し、ledger照合・stop・unmount・cgroup削除・資源receipt・冪等回収を検査。所有不明の実cgroup/mountは保持し別Runへ採用しない。テスト自身のfixtureだけを最後に明示撤去する。
+- 実行位置は`--lib`（本番binaryにfault injectionを入れないため）。CIの`xtask isolation-tests linux-acquisition default|python`に3件を登録し、両featureで各親試験の名前付きokと非skipを必須にする。従来のintegration 8/9件は維持。
+- 意図した変更：Linux recordにResourcePlanと取得段階を必須化しruntime版を更新。旧形式の互換・移行は追加しない。既存の予約・精算・停止・子孫回収・隔離assertionは削除も弱体化もしない。
+- macOS単体成功とfixtureコンパイルはLinux実行証拠ではない。実装済み・Linux未実行の受入を維持する。

@@ -31,16 +31,16 @@ stopping, reclamation and settlement remain distinct records.
 <!-- requirement-summary -->
 分類は責任の配置、状態は要件全体の到達点であり独立した軸。公開ソースに存在することや試験件数は、134要件の全達成を意味しない。利用側の責任のfake接続試験は、実hostでの業務受入の証明ではない。
 
-| 分類 | 検証済み | 設計済み | 未着手 | 合計 |
-|---|---:|---:|---:|---:|
-| 共通基盤 | 43 | 66 | 0 | 109 |
-| 公開の任意機能 | 1 | 12 | 0 | 13 |
-| 利用側の責任 | 0 | 10 | 2 | 12 |
-| 全体 | 44 | 88 | 2 | 134 |
+| 分類 | 検証済み | 実装済み・Linux未実行 | 設計済み | 未着手 | 合計 |
+|---|---:|---:|---:|---:|---:|
+| 共通基盤 | 44 | 2 | 63 | 0 | 109 |
+| 公開の任意機能 | 1 | 1 | 11 | 0 | 13 |
+| 利用側の責任 | 0 | 0 | 10 | 2 | 12 |
+| 全体 | 45 | 3 | 84 | 2 | 134 |
 
 公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。
 
-試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 8件／python 9件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
+試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はintegration default 8件／python 9件と、test-only取得crash unit 3件（両feature）を必須とし、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
 <!-- /requirement-summary -->
 
 ## Local validation

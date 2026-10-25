@@ -118,6 +118,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "ModelRequest",
                 "ModelReply",
                 "ValidationReceipt",
+                "Diagnostic",
+                "JsonPosition",
             ] {
                 let start = source
                     .find(&format!("pub struct {name} {{"))
@@ -145,14 +147,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "FORK-06", "FORK-07", "FORK-08", "FORK-09", "F01", "F02", "F04", "F05", "A01",
                 "U01", "U02", "U03", "U04", "U06", "U09", "DATA-01", "DATA-02", "DATA-03",
                 "DATA-04", "DATA-05", "DATA-07", "DATA-08", "TOOL-07", "TOOL-08", "VAL-01",
-                "VAL-02", "VAL-04", "VAL-05", "A12", "A19", "A21", "A22", "SBX-01", "A04",
+                "VAL-02", "VAL-04", "VAL-05", "VAL-06", "A12", "A19", "A21", "A22", "SBX-01", "A04",
                 "SBX-08",
             ];
             let unstarted = ["OPS-05", "F06"];
             let mut counts = BTreeMap::new();
             let mut classified = BTreeMap::new();
             let mut out = String::from(
-                "# 要件追跡（134件）\n\n[要件正本](../requirements/catalog.json)の基本要件81件、FORK 10件、受入シナリオA 28件、採用条件F 6件、利用シナリオU 9件。状態は**要件全体**の最も保守的な到達点。設計済みの行にも部分実装/試験があるが、未検証の全件達成を意味しない。検証済みはfake/in-memory・local FS・指定テストDBの契約試験の範囲。分類と責任範囲はcatalogの正本から表示する。共通機構を利用側へ移す分類ではない。実サービス・Linux実Sandbox・電源断の耐久保証ではない。未着手行にも次段階のtrait設計がある。\n\n生成: `cargo run -p xtask -- trace`。同一仕様を複製する目的ではなく、repo内の要件正本の全IDを欠落なく追跡する。\n\n| ID | 要件/受入条件 | 分類 | 責任範囲 | 設計箇所 | 実装 | テスト/残課題 | 状態 |\n|---|---|---|---|---|---|---|---|\n",
+                "# 要件追跡（134件）\n\n[要件正本](../requirements/catalog.json)の基本要件81件、FORK 10件、受入シナリオA 28件、採用条件F 6件、利用シナリオU 9件。状態は**要件全体**の最も保守的な到達点。設計済みの行にも部分実装/試験があるが、未検証の全件達成を意味しない。実装済み・Linux未実行は関連Linux受入が未完了であり、本番運用の受入済みを意味しない。検証済みはfake/in-memory・local FS・指定テストDBの契約試験の範囲。分類と責任範囲はcatalogの正本から表示する。共通機構を利用側へ移す分類ではない。実サービス・Linux実Sandbox・電源断の耐久保証ではない。未着手行にも次段階のtrait設計がある。\n\n生成: `cargo run -p xtask -- trace`。同一仕様を複製する目的ではなく、repo内の要件正本の全IDを欠落なく追跡する。\n\n| ID | 要件/受入条件 | 分類 | 責任範囲 | 設計箇所 | 実装 | テスト/残課題 | 状態 |\n|---|---|---|---|---|---|---|---|\n",
             );
             for (id, requirement) in rows {
                 let text = requirement.text;
@@ -161,6 +163,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let status =
                     if verified.contains(&id.as_str()) && requirement.classification != "host" {
                         "検証済み"
+                    } else if ["REC-05", "REC-06", "SBX-07"].contains(&id.as_str()) {
+                        "実装済み・Linux未実行"
                     } else if unstarted.contains(&id.as_str()) {
                         "未着手"
                     } else {
@@ -202,6 +206,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let (implementation, tests) = if status == "未着手" {
                     ("利用側の配布・適合確認", "公開build/package手段を利用した実利用先への反映・業務適合は未検証")
+                } else if ["REC-05", "REC-06", "SBX-07"].contains(&id.as_str()) {
+                    (
+                        "execution/{controller,linux}.rs; postgres/src/execution.rs; runtrell-exec-limit",
+                        "事前ResourcePlan・専用subtree・tmpfs source・boot/mount namespace・inode照合。precreation_intent_is_discoverable_without_resource_identities、precreation_recovery_confirms_absence_and_reclaims_idempotently、mount_provenance_rejects_foreign_source_type_and_stacked_mountsはmacOS成功。linux_acquisition_crash_after_cgroup / after_mount / before_identity_recordはCI必須・Linux未実行。Memory/Pg台帳と予約/精算の既存契約を維持。末尾rt-4b参照",
+                    )
+                } else if ["RUN-07", "VAL-06"].contains(&id.as_str()) {
+                    (
+                        "driver.rs / schema.rs / api.rs / Memory・Pg checkpoint",
+                        "testkit/tests/repair.rs::json_syntax_candidate_survives_worker_loss_and_revalidation、json_syntax_host_limits_stop_without_extra_calls。Pg::json_syntax_repair_reopens_with_independent_pool_and_runtime、Memory/Pg::json_artifact_syntax_repairs_with_new_runtime。位置・原因・候補保存、別Runtime/別Pg pool再開、追加予約・一度だけ精算。実行証拠は末尾rt-4a参照",
+                    )
                 } else if budget_scope {
                     (
                         "budget.rs / driver.rs / memory.rs / postgres engine・persistence",
@@ -264,23 +278,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
             let mut summary = String::from(
-                "分類は責任の配置、状態は要件全体の到達点であり独立した軸。公開ソースに存在することや試験件数は、134要件の全達成を意味しない。利用側の責任のfake接続試験は、実hostでの業務受入の証明ではない。\n\n| 分類 | 検証済み | 設計済み | 未着手 | 合計 |\n|---|---:|---:|---:|---:|\n",
+                "分類は責任の配置、状態は要件全体の到達点であり独立した軸。公開ソースに存在することや試験件数は、134要件の全達成を意味しない。利用側の責任のfake接続試験は、実hostでの業務受入の証明ではない。\n\n| 分類 | 検証済み | 実装済み・Linux未実行 | 設計済み | 未着手 | 合計 |\n|---|---:|---:|---:|---:|---:|\n",
             );
             for class in ["共通基盤", "公開の任意機能", "利用側の責任"] {
-                let values: Vec<usize> = ["検証済み", "設計済み", "未着手"]
+                let values: Vec<usize> = ["検証済み", "実装済み・Linux未実行", "設計済み", "未着手"]
                     .iter()
                     .map(|status| *classified.get(&(class, *status)).unwrap_or(&0))
                     .collect();
                 summary.push_str(&format!(
-                    "| {class} | {} | {} | {} | {} |\n",
+                    "| {class} | {} | {} | {} | {} | {} |\n",
                     values[0],
                     values[1],
                     values[2],
+                    values[3],
                     values.iter().sum::<usize>()
                 ));
             }
-            summary.push_str(&format!("| 全体 | {} | {} | {} | 134 |\n", counts["検証済み"], counts["設計済み"], counts["未着手"]));
-            summary.push_str("\n公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。\n\n試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 8件／python 9件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。\n");
+            summary.push_str(&format!("| 全体 | {} | {} | {} | {} | 134 |\n", counts["検証済み"], counts["実装済み・Linux未実行"], counts["設計済み"], counts["未着手"]));
+            summary.push_str("\n公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。\n\n試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はintegration default 8件／python 9件と、test-only取得crash unit 3件（両feature）を必須とし、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。\n");
             out.push_str("\n## 分類と受入範囲の集計\n\n");
             out.push_str(&summary);
             let readme_path = root.join("README.md");
@@ -301,7 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (status, count) in counts {
                 out.push_str(&format!("- {status}: {count}\n"));
             }
-            out.push_str("- 実装済み（未検証のみ）: 0\n\n次段階: LinuxBackendの実隔離・耐久的な実体再識別と回収のHosted実証、実プロセス障害・stream/隔離試験、保存運用・業務owner接続・配布適合。Workspaceの提供範囲と制約はworkspace.md参照。2aのin-memory試験を耐久DBの検証済みへ読み替えない。\n");
+            out.push_str("\n次段階: LinuxBackendの実隔離・耐久的な実体再識別と回収のHosted実証、実プロセス障害・stream/隔離試験、保存運用・業務owner接続・配布適合。Workspaceの提供範囲と制約はworkspace.md参照。2aのin-memory試験を耐久DBの検証済みへ読み替えない。\n");
             let path = root.join("docs/design/requirements-trace.md");
             // Keep independently maintained evidence beyond the generated table.
             if let Ok(previous) = fs::read_to_string(&path)

@@ -154,6 +154,33 @@ jobs:
       - name: Require every named result to be ok, none skipped
         if: always()
         run: target/debug/xtask isolation-results linux '${{ matrix.feature }}' "$RUNNER_TEMP/isolation-results"
+      - name: Build and list acquisition crash tests (test-only fault injection)
+        run: |
+          cargo test -p runtrell --locked ${{ matrix.args }} --lib --no-run
+          mkdir -p "$RUNNER_TEMP/acquisition-results"
+          cargo test -p runtrell --locked ${{ matrix.args }} --lib -- execution::linux::tests::linux_acquisition_crash_ --list --color never > "$RUNNER_TEMP/acquisition-results/list.txt"
+      - name: Crash acquisition at each kernel resource boundary
+        env:
+          RUNTRELL_LINUX_TEST: '1'
+        run: |
+          mapfile -t required < <(target/debug/xtask isolation-tests linux-acquisition '${{ matrix.feature }}')
+          test "${#required[@]}" -eq 3
+          failed=0
+          for test_name in "${required[@]}"; do
+            sudo env \
+              PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+              CARGO_TARGET_DIR="$PWD/target" CARGO_TERM_COLOR=never \
+              RUNTRELL_LINUX_TEST="$RUNTRELL_LINUX_TEST" \
+              RUNTRELL_CGROUP_ROOT="$RUNTRELL_CGROUP_ROOT" \
+              RUNTRELL_LINUX_STATE_ROOT="$RUNTRELL_LINUX_STATE_ROOT" \
+              cargo test -p runtrell --locked ${{ matrix.args }} --lib -- \
+                --exact "$test_name" --include-ignored --test-threads=1 --color never \
+              2>&1 | tee "$RUNNER_TEMP/acquisition-results/$test_name.log" || failed=1
+          done
+          exit "$failed"
+      - name: Require every acquisition crash result, none skipped
+        if: always()
+        run: target/debug/xtask isolation-results linux-acquisition '${{ matrix.feature }}' "$RUNNER_TEMP/acquisition-results"
       - name: Confirm all execution groups were reclaimed
         run: sudo rmdir "$RUNTRELL_CGROUP_ROOT"
 

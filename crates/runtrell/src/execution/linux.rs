@@ -54,11 +54,47 @@ pub struct LinuxInventory {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Record {
+    plan: ResourcePlan,
+    /// True until all acquisition identities and staging have been saved.
+    preparing: bool,
     request: ExecutionRequest,
     observation: Observation,
     usage: Option<LinuxUsage>,
     group_inode: Option<u64>,
     scratch_mount_id: Option<u64>,
+}
+/// Persisted before any kernel resource is created. The delegated subtree is
+/// exclusively managed by this backend; payloads cannot write either namespace.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ResourcePlan {
+    control_inode: u64,
+    host_epoch: Option<(String, u64)>,
+    cgroup: PathBuf,
+    scratch: PathBuf,
+    resources: std::collections::BTreeSet<Resource>,
+}
+// Persist the boot and mount-namespace generation, so absence after a host reboot
+// or namespace change cannot be misreported as a precreation cleanup receipt.
+#[cfg(target_os = "linux")]
+fn host_epoch() -> Result<Option<(String, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(Some((
+        fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(io)?
+            .trim()
+            .into(),
+        fs::metadata("/proc/self/ns/mnt").map_err(io)?.ino(),
+    )))
+}
+#[cfg(not(target_os = "linux"))]
+fn host_epoch() -> Result<Option<(String, u64)>> {
+    Ok(None)
+}
+#[cfg(test)]
+fn acquisition_boundary(name: &str) {
+    if std::env::var("RUNTRELL_ACQUISITION_CRASH").as_deref() == Ok(name) {
+        std::process::exit(73);
+    }
 }
 fn io(e: std::io::Error) -> Error {
     Error::Invalid(format!("LINUX_IO: {e}"))
@@ -116,7 +152,7 @@ impl LinuxBackend {
             allowed.insert((*executable).into(), (path, digest));
         }
         let version = format!(
-            "runtrell-linux-1:{}",
+            "runtrell-linux-2:{}",
             digest(&json!([
                 helper_hash,
                 launcher_hash,
@@ -147,6 +183,70 @@ impl LinuxBackend {
     fn group(&self, id: &str) -> PathBuf {
         self.cgroups.join(format!("rt-{id}"))
     }
+    fn plan(&self, id: &str) -> Result<ResourcePlan> {
+        use std::os::unix::fs::MetadataExt;
+        let control = fs::symlink_metadata(self.dir(id)).map_err(io)?;
+        if !control.is_dir() {
+            return Err(Error::PermissionDenied);
+        }
+        Ok(ResourcePlan {
+            control_inode: control.ino(),
+            host_epoch: host_epoch()?,
+            cgroup: self.group(id),
+            scratch: self.dir(id).join("scratch"),
+            resources: [
+                Resource::Cpu,
+                Resource::Pid,
+                Resource::Memory,
+                Resource::Disk,
+                Resource::Volume,
+            ]
+            .into(),
+        })
+    }
+    fn scratch_identity(&self, id: &str) -> Result<Option<u64>> {
+        let path = self.dir(id).join("scratch");
+        if !path.try_exists().map_err(io)? {
+            return Ok(None);
+        }
+        if !fs::symlink_metadata(&path).map_err(io)?.is_dir() {
+            return Err(Error::Conflict);
+        }
+        owned_mount_identity(&path, &format!("rt-{id}"))
+    }
+    /// Read-only ownership check also used by inventory. Missing identities can
+    /// only be reconstructed for an acquisition intent in our exclusive subtree.
+    fn identities(&self, id: &str, r: &Record) -> Result<(Option<u64>, Option<u64>)> {
+        use std::os::unix::fs::MetadataExt;
+        let reclaiming = matches!(
+            r.observation.state,
+            ExecutionState::Reclaiming | ExecutionState::Destroyed
+        );
+        let group = match fs::symlink_metadata(self.group(id)) {
+            Ok(m) if m.is_dir() => Some(m.ino()),
+            Ok(_) => return Err(Error::Conflict),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io(e)),
+        };
+        if group.is_none() && !r.preparing && !reclaiming {
+            return Err(Error::Conflict);
+        }
+        let mount = self.scratch_identity(id)?;
+        let acquiring = r.preparing
+            && matches!(
+                r.observation.state,
+                ExecutionState::Acquiring | ExecutionState::Unknown
+            );
+        for (actual, expected) in [(group, r.group_inode), (mount, r.scratch_mount_id)] {
+            if actual != expected
+                && !(reclaiming && actual.is_none())
+                && !(acquiring && expected.is_none())
+            {
+                return Err(Error::Conflict);
+            }
+        }
+        Ok((group, mount))
+    }
     fn lock(&self, id: &str) -> Result<Option<File>> {
         let f = OpenOptions::new()
             .read(true)
@@ -170,6 +270,7 @@ impl LinuxBackend {
                 .map_err(|_| Error::Storage)?;
         if key(&r.observation.execution.owner, &r.observation.execution.id) != id
             || r.observation.execution.runtime_version != self.version
+            || r.plan != self.plan(id)?
         {
             return Err(Error::Conflict);
         }
@@ -202,15 +303,10 @@ impl LinuxBackend {
         Ok(ids
             .into_iter()
             .map(|id| {
-                let r = self.load(&id).ok().filter(|r| {
-                    r.observation.state == ExecutionState::Destroyed
-                        || (r.observation.state == ExecutionState::Reclaiming
-                            && !self.group(&id).exists())
-                        || (self.verify_group(&id).is_ok()
-                            && r.scratch_mount_id.is_some()
-                            && mount_identity(&self.dir(&id).join("scratch"))
-                                .is_ok_and(|m| m == r.scratch_mount_id))
-                });
+                let r = self
+                    .load(&id)
+                    .ok()
+                    .filter(|r| self.identities(&id, r).is_ok());
                 LinuxInventory {
                     stable_id: id,
                     execution: r.as_ref().map(|r| r.observation.execution.clone()),
@@ -258,6 +354,8 @@ impl LinuxBackend {
         let r = row.request.clone();
         let g = self.group(id);
         fs::create_dir(&g).map_err(io)?;
+        #[cfg(test)]
+        acquisition_boundary("after-cgroup");
         row.group_inode = Some(fs::metadata(&g).map_err(io)?.ino());
         self.save(id, row)?;
         // Host-selected aggregate bandwidth; cpu.stat is separately monitored for
@@ -295,11 +393,19 @@ impl LinuxBackend {
         }
         let scratch = self.dir(id).join("scratch");
         fs::create_dir(&scratch).map_err(io)?;
-        mount_scratch(&scratch, r.limits.disk_bytes.ok_or(Error::Conflict)?)?;
-        row.scratch_mount_id = mount_identity(&scratch)?;
+        mount_scratch(
+            &scratch,
+            r.limits.disk_bytes.ok_or(Error::Conflict)?,
+            &format!("rt-{id}"),
+        )?;
+        #[cfg(test)]
+        acquisition_boundary("after-mount");
+        row.scratch_mount_id = self.scratch_identity(id)?;
         if row.scratch_mount_id.is_none() {
             return Err(Error::Storage);
         }
+        #[cfg(test)]
+        acquisition_boundary("before-identity-record");
         self.save(id, row)?;
         // Populate scratch from a helper already in the group, so input tmpfs
         // pages, staging CPU and parsing allocations are included in group usage.
@@ -407,7 +513,7 @@ impl LinuxBackend {
             .kill_on_drop(true);
         Ok(cmd)
     }
-    fn kill(&self, id: &str, r: &Record) -> Result<()> {
+    fn seal_join(&self, id: &str) -> Result<File> {
         let cancel = File::create(self.dir(id).join("cancel")).map_err(io)?;
         cancel.sync_all().map_err(io)?;
         File::open(self.dir(id))
@@ -422,6 +528,10 @@ impl LinuxBackend {
             .open(self.dir(id).join("join.lock"))
             .map_err(io)?;
         barrier.try_lock().map_err(|_| Error::Conflict)?;
+        Ok(barrier)
+    }
+    fn kill(&self, id: &str, r: &Record) -> Result<()> {
+        let _barrier = self.seal_join(id)?;
         self.check_inode(id, r.group_inode)?;
         fs::write(self.group(id).join("cgroup.kill"), "1").map_err(io)
     }
@@ -439,19 +549,32 @@ impl LinuxBackend {
         ) {
             return Ok(Progress::Confirmed);
         }
-        // A missing group during partial acquisition is not a no-resource receipt.
-        self.kill(id, r)?;
-        if !self.empty(id, r)? {
-            return Ok(Progress::Pending);
+        let (group, mount) = self.identities(id, r)?;
+        // Save reconstructed identities before issuing any destructive syscall.
+        if r.preparing {
+            r.group_inode = group;
+            r.scratch_mount_id = mount;
+            self.save(id, r)?;
         }
-        r.usage = Some(read_usage(&self.group(id))?);
+        if group.is_some() {
+            self.kill(id, r)?;
+            if !self.empty(id, r)? {
+                return Ok(Progress::Pending);
+            }
+            r.usage = Some(read_usage(&self.group(id))?);
+        } else {
+            // Only a precreation intent with no saved group identity reaches here.
+            // Seal late joins even when acquisition stopped before mkdir.
+            let _barrier = self.seal_join(id)?;
+        }
         r.observation.state = ExecutionState::Stopped;
         r.observation.failure = Some("RECOVERED_STOP_RESULT_UNKNOWN".into());
         r.observation
             .released_resources
             .extend([Resource::Cpu, Resource::Pid]);
-        if r.scratch_mount_id.is_some()
-            && mount_identity(&self.dir(id).join("scratch"))? == r.scratch_mount_id
+        if !r.preparing
+            && r.scratch_mount_id.is_some()
+            && self.scratch_identity(id)? == r.scratch_mount_id
         {
             let job = Entry {
                 request: r.request.clone(),
@@ -736,6 +859,8 @@ impl ExecutionBackend for LinuxBackend {
                 runtime_version: b.version.clone(),
             };
             let mut row = Record {
+                plan: b.plan(&id)?,
+                preparing: true,
                 request: r.clone(),
                 observation: Observation {
                     execution: execution.clone(),
@@ -756,6 +881,7 @@ impl ExecutionBackend for LinuxBackend {
                 b.save(&id, &row)?;
                 return Err(e);
             }
+            row.preparing = false;
             row.observation.state = ExecutionState::Ready;
             b.save(&id, &row)?;
             Ok(execution)
@@ -785,8 +911,7 @@ impl ExecutionBackend for LinuxBackend {
             }
             let effective = with_deadline(r.request.clone(), &c)?;
             backend.verify_group(&id)?;
-            if r.scratch_mount_id.is_none()
-                || mount_identity(&backend.dir(&id).join("scratch"))? != r.scratch_mount_id
+            if r.scratch_mount_id.is_none() || backend.scratch_identity(&id)? != r.scratch_mount_id
             {
                 return Err(Error::Conflict);
             }
@@ -894,29 +1019,19 @@ impl ExecutionBackend for LinuxBackend {
             ) {
                 return Ok(Progress::Unknown);
             }
-            if backend.group(&id).exists() && !backend.empty(&id, &r)? {
+            let (group, mounted) = backend.identities(&id, &r)?;
+            if group.is_some() && !backend.empty(&id, &r)? {
                 return Ok(Progress::Unknown);
             }
             if r.observation.state == ExecutionState::Stopped {
-                if !backend.group(&id).exists()
-                    || mount_identity(&backend.dir(&id).join("scratch"))? != r.scratch_mount_id
-                    || r.scratch_mount_id.is_none()
-                {
-                    return Ok(Progress::Unknown);
-                }
                 r.observation.state = ExecutionState::Reclaiming;
                 backend.save(&id, &r)?;
             }
             let scratch = backend.dir(&id).join("scratch");
-            let mounted = mount_identity(&scratch)?;
-            if mounted.is_some() && mounted != r.scratch_mount_id {
-                return Err(Error::Conflict);
+            if mounted.is_some() {
+                unmount_scratch(&scratch)?;
             }
-            if r.scratch_mount_id.is_none() {
-                return Err(Error::Conflict);
-            }
-            unmount_scratch(&scratch)?;
-            if mount_identity(&scratch)?.is_some() {
+            if backend.scratch_identity(&id)?.is_some() {
                 return Err(Error::Conflict);
             }
             match fs::remove_dir(&scratch) {
@@ -982,12 +1097,12 @@ fn verify_cgroup_fs(_: &Path) -> Result<()> {
     Err(Error::Unsupported("LINUX_ONLY".into()))
 }
 #[cfg(target_os = "linux")]
-fn mount_scratch(path: &Path, bytes: u64) -> Result<()> {
+fn mount_scratch(path: &Path, bytes: u64, source: &str) -> Result<()> {
     use rustix::mount::{MountFlags, mount};
     let options = std::ffi::CString::new(format!("size={bytes},nr_inodes=4096,mode=0700"))
         .map_err(|_| Error::Storage)?;
     mount(
-        "tmpfs",
+        source,
         path,
         "tmpfs",
         MountFlags::NODEV | MountFlags::NOSUID,
@@ -996,7 +1111,7 @@ fn mount_scratch(path: &Path, bytes: u64) -> Result<()> {
     .map_err(|e| io(e.into()))
 }
 #[cfg(not(target_os = "linux"))]
-fn mount_scratch(_: &Path, _: u64) -> Result<()> {
+fn mount_scratch(_: &Path, _: u64, _: &str) -> Result<()> {
     Err(Error::Unsupported("LINUX_ONLY".into()))
 }
 #[cfg(target_os = "linux")]
@@ -1013,14 +1128,14 @@ fn unmount_scratch(_: &Path) -> Result<()> {
     Err(Error::Unsupported("LINUX_ONLY".into()))
 }
 
-#[cfg(target_os = "linux")]
-fn mount_identity(path: &Path) -> Result<Option<u64>> {
-    for line in fs::read_to_string("/proc/self/mountinfo")
-        .map_err(io)?
-        .lines()
-    {
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 6 {
+#[cfg(any(target_os = "linux", test))]
+fn parse_owned_mount(info: &str, path: &Path, source: &str) -> Result<Option<u64>> {
+    let mut found = None;
+    for line in info.lines() {
+        let (before, after) = line.split_once(" - ").ok_or(Error::Storage)?;
+        let fields = before.split_whitespace().collect::<Vec<_>>();
+        let filesystem = after.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 6 || filesystem.len() < 3 {
             return Err(Error::Storage);
         }
         let target = fields[4]
@@ -1029,13 +1144,24 @@ fn mount_identity(path: &Path) -> Result<Option<u64>> {
             .replace("\\012", "\n")
             .replace("\\134", "\\");
         if Path::new(&target) == path {
-            return Ok(Some(fields[0].parse().map_err(|_| Error::Storage)?));
+            if filesystem[0] != "tmpfs" || filesystem[1] != source || found.is_some() {
+                return Err(Error::Conflict);
+            }
+            found = Some(fields[0].parse().map_err(|_| Error::Storage)?);
         }
     }
-    Ok(None)
+    Ok(found)
+}
+#[cfg(target_os = "linux")]
+fn owned_mount_identity(path: &Path, source: &str) -> Result<Option<u64>> {
+    parse_owned_mount(
+        &fs::read_to_string("/proc/self/mountinfo").map_err(io)?,
+        path,
+        source,
+    )
 }
 #[cfg(not(target_os = "linux"))]
-fn mount_identity(_: &Path) -> Result<Option<u64>> {
+fn owned_mount_identity(_: &Path, _: &str) -> Result<Option<u64>> {
     Err(Error::Unsupported("LINUX_ONLY".into()))
 }
 
@@ -1073,6 +1199,8 @@ mod tests {
         assert!(b.lock(&id).unwrap().is_none());
         let request = ExecutionRequest::process("/bin/sh", vec![]);
         let row = Record {
+            plan: b.plan(&id).unwrap(),
+            preparing: false,
             request: request.clone(),
             observation: Observation {
                 execution: ExecutionRef {
@@ -1131,6 +1259,319 @@ mod tests {
         assert!(b.reconcile(&pending).is_err());
         assert!(groups.path().join("rt-orphan").exists());
     }
+    #[test]
+    fn precreation_intent_is_discoverable_without_resource_identities() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let owner = RunHandle {
+            tenant: "t".into(),
+            id: "r".into(),
+        };
+        let id = key(&owner, "precreation");
+        fs::create_dir(b.dir(&id)).unwrap();
+        let row = Record {
+            plan: b.plan(&id).unwrap(),
+            preparing: true,
+            request: ExecutionRequest::process("/bin/sh", vec![]),
+            observation: Observation {
+                execution: ExecutionRef {
+                    owner,
+                    id: "precreation".into(),
+                    runtime_version: b.version.clone(),
+                },
+                state: ExecutionState::Acquiring,
+                result: None,
+                failure: None,
+                cost_micro_usd: Some(0),
+                released_resources: Default::default(),
+            },
+            usage: None,
+            group_inode: None,
+            scratch_mount_id: None,
+        };
+        b.save(&id, &row).unwrap();
+        let inventory = b.inventory().unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].execution, Some(row.observation.execution));
+        assert_eq!(inventory[0].state, ExecutionState::Acquiring);
+        let mut tampered = b.load(&id).unwrap();
+        tampered.plan.cgroup = groups.path().join("foreign");
+        b.save(&id, &tampered).unwrap();
+        assert!(b.load(&id).is_err());
+        assert!(b.inventory().unwrap()[0].execution.is_none());
+        tampered.plan = b.plan(&id).unwrap();
+        tampered.plan.host_epoch = Some(("another-boot".into(), 0));
+        b.save(&id, &tampered).unwrap();
+        assert!(b.load(&id).is_err());
+        tampered.plan = b.plan(&id).unwrap();
+        b.save(&id, &tampered).unwrap();
+        fs::create_dir(b.group(&id)).unwrap();
+        assert!(b.identities(&id, &tampered).unwrap().0.is_some());
+        tampered.observation.state = ExecutionState::Stopped;
+        assert!(
+            b.identities(&id, &tampered).is_err(),
+            "never adopt a new identity after stop"
+        );
+        tampered.observation.state = ExecutionState::Acquiring;
+        tampered.group_inode = Some(0);
+        assert!(
+            b.identities(&id, &tampered).is_err(),
+            "never replace a saved inode"
+        );
+    }
+    #[tokio::test]
+    async fn precreation_recovery_confirms_absence_and_reclaims_idempotently() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        fs::create_dir(b.dir(&id)).unwrap();
+        let row = Record {
+            plan: b.plan(&id).unwrap(),
+            preparing: true,
+            request: ExecutionRequest::process("/bin/sh", vec![]),
+            observation: Observation {
+                execution: ExecutionRef {
+                    owner: c.claim.run.clone(),
+                    id: c.operation.clone(),
+                    runtime_version: b.version.clone(),
+                },
+                state: ExecutionState::Acquiring,
+                result: None,
+                failure: None,
+                cost_micro_usd: Some(0),
+                released_resources: Default::default(),
+            },
+            usage: None,
+            group_inode: None,
+            scratch_mount_id: None,
+        };
+        b.save(&id, &row).unwrap();
+        assert_eq!(b.stop(&c).await.unwrap(), Progress::Confirmed);
+        let stopped = b.lookup(&c).await.unwrap().unwrap();
+        assert_eq!(
+            stopped.released_resources,
+            [Resource::Cpu, Resource::Pid].into()
+        );
+        assert!(
+            b.usage(&c).is_err(),
+            "no invented usage for a group never created"
+        );
+        assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+        assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+        assert_eq!(
+            b.lookup(&c).await.unwrap().unwrap().released_resources,
+            row.plan.resources
+        );
+        // A group without intent is reported, never stopped or deleted.
+        let orphan = key(&c.claim.run, "orphan");
+        fs::create_dir(b.group(&orphan)).unwrap();
+        assert!(
+            b.inventory()
+                .unwrap()
+                .iter()
+                .any(|i| i.stable_id == orphan && i.execution.is_none())
+        );
+        let mut other = c.clone();
+        other.operation = "orphan".into();
+        assert_eq!(b.stop(&other).await.unwrap(), Progress::Unknown);
+        assert_eq!(b.destroy(&other).await.unwrap(), Progress::Unknown);
+        assert!(b.group(&orphan).exists());
+    }
+    #[test]
+    fn mount_provenance_rejects_foreign_source_type_and_stacked_mounts() {
+        let path = Path::new("/state/with space/scratch");
+        let line = "42 1 0:3 / /state/with\\040space/scratch rw - tmpfs rt-operation rw\n";
+        assert_eq!(
+            parse_owned_mount(line, path, "rt-operation").unwrap(),
+            Some(42)
+        );
+        assert!(parse_owned_mount(line, path, "rt-other").is_err());
+        assert!(parse_owned_mount(&line.replace("tmpfs", "ext4"), path, "rt-operation").is_err());
+        assert!(parse_owned_mount(&format!("{line}{line}"), path, "rt-operation").is_err());
+        assert_eq!(
+            parse_owned_mount(line, Path::new("/other"), "rt-operation").unwrap(),
+            None
+        );
+    }
+    fn crash_context() -> ToolContext {
+        ToolContext {
+            recovery_proof: None,
+            claim: Claim {
+                run: RunHandle {
+                    tenant: "crash-test".into(),
+                    id: "run".into(),
+                },
+                worker: "worker".into(),
+                generation: 1,
+                lease_until: u64::MAX,
+            },
+            principal: "host".into(),
+            operation: "acquisition-crash".into(),
+            attempt: 1,
+            deadline: None,
+            permission: "execute".into(),
+            account_binding: "test".into(),
+        }
+    }
+    fn privileged_backend(root: &Path) -> LinuxBackend {
+        assert_eq!(std::env::var("RUNTRELL_LINUX_TEST").as_deref(), Ok("1"));
+        LinuxBackend::new(
+            root,
+            std::env::var("RUNTRELL_CGROUP_ROOT").unwrap(),
+            "/usr/bin/true",
+            "/usr/bin/bwrap",
+            &["/bin/sh"],
+            LinuxCpuBandwidth {
+                quota_usec: 10000,
+                period_usec: 10000,
+            },
+        )
+        .unwrap()
+    }
+    async fn acquisition_crash(boundary: &str, name: &str) {
+        let c = crash_context();
+        let mut request = ExecutionRequest::process("/bin/sh", vec![]);
+        request.limits.cpu_millis = Some(1000);
+        request.limits.ram_bytes = Some(128 * 1024 * 1024);
+        request.limits.pids = Some(32);
+        request.limits.disk_bytes = Some(4 * 1024 * 1024);
+        if let Ok(root) = std::env::var("RUNTRELL_ACQUISITION_CHILD_ROOT") {
+            privileged_backend(Path::new(&root))
+                .acquire(&c, &request)
+                .await
+                .unwrap();
+            panic!("crash boundary was not reached");
+        }
+        let root = tempfile::Builder::new()
+            .prefix("acquisition-")
+            .tempdir_in(std::env::var("RUNTRELL_LINUX_STATE_ROOT").unwrap())
+            .unwrap()
+            .keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The backend accepts only a private (0700) state root.
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // The parent ledger survives the backend child process. Pg ledger durability
+        // is covered by the independent shared Memory/Pg contract suite.
+        let ledger = MemoryExecutionLedger::default();
+        let pending = ExecutionRecord::intent(&c, request.clone());
+        ledger.insert(pending.clone()).await.unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                &format!("execution::linux::tests::{name}"),
+            ])
+            .env("RUNTRELL_ACQUISITION_CHILD_ROOT", &root)
+            .env("RUNTRELL_ACQUISITION_CRASH", boundary)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(73), "{output:?}");
+        let b = privileged_backend(&root);
+        let id = LinuxBackend::id(&c);
+        let before = b.load(&id).unwrap();
+        assert!(before.preparing);
+        assert_eq!(before.observation.state, ExecutionState::Acquiring);
+        assert!(before.observation.released_resources.is_empty());
+        assert!(b.group(&id).exists(), "must really create the cgroup");
+        if boundary == "after-cgroup" {
+            assert_eq!(before.group_inode, None);
+            assert!(!b.dir(&id).join("scratch").exists());
+        } else {
+            assert!(before.group_inode.is_some());
+            assert_eq!(before.scratch_mount_id, None);
+            assert!(
+                b.scratch_identity(&id).unwrap().is_some(),
+                "must really mount scratch"
+            );
+        }
+        assert!(
+            b.inventory()
+                .unwrap()
+                .iter()
+                .any(|i| i.stable_id == id && i.execution.is_some())
+        );
+        assert_eq!(
+            b.reconcile(&ledger.pending().await.unwrap()[0])
+                .unwrap()
+                .execution
+                .id,
+            c.operation
+        );
+        let mut wrong = pending;
+        wrong.owner.id = "other-run".into();
+        assert!(b.reconcile(&wrong).is_err());
+        assert_eq!(b.stop(&c).await.unwrap(), Progress::Confirmed);
+        let stopped = b.lookup(&c).await.unwrap().unwrap();
+        assert_eq!(
+            stopped.released_resources,
+            [Resource::Cpu, Resource::Pid].into()
+        );
+        drop(b);
+        let b = privileged_backend(&root);
+        assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+        assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+        assert_eq!(b.stop(&c).await.unwrap(), Progress::Confirmed);
+        assert!(!b.group(&id).exists());
+        assert!(!b.dir(&id).join("scratch").exists());
+        assert_eq!(b.scratch_identity(&id).unwrap(), None);
+        assert_eq!(
+            b.lookup(&c).await.unwrap().unwrap().released_resources,
+            before.plan.resources
+        );
+        assert_eq!(
+            b.acquire(&c, &request).await.unwrap(),
+            before.observation.execution
+        );
+        // No intent: leave an actual unknown cgroup quarantined; never attach it
+        // to another Run. Remove only the empty fixture group after assertions.
+        let orphan = key(&c.claim.run, "unowned");
+        fs::create_dir(b.group(&orphan)).unwrap();
+        fs::create_dir(b.dir(&orphan)).unwrap();
+        let foreign_scratch = b.dir(&orphan).join("scratch");
+        fs::create_dir(&foreign_scratch).unwrap();
+        mount_scratch(&foreign_scratch, 4 * 1024 * 1024, "unowned-fixture").unwrap();
+        assert!(b.inventory().unwrap().iter().any(|i| i.stable_id == orphan
+            && i.execution.is_none()
+            && i.state == ExecutionState::Unknown));
+        let mut other = c.clone();
+        other.operation = "unowned".into();
+        assert!(b.acquire(&other, &request).await.is_err());
+        assert!(b.stop(&other).await.is_err());
+        assert!(b.destroy(&other).await.is_err());
+        assert!(b.group(&orphan).exists());
+        assert!(
+            owned_mount_identity(&foreign_scratch, "unowned-fixture")
+                .unwrap()
+                .is_some()
+        );
+        unmount_scratch(&foreign_scratch).unwrap();
+        fs::remove_dir(b.group(&orphan)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    #[ignore = "requires privileged Linux cgroup v2 and mount namespace; crashes child process"]
+    async fn linux_acquisition_crash_after_cgroup() {
+        acquisition_crash("after-cgroup", "linux_acquisition_crash_after_cgroup").await;
+    }
+    #[tokio::test]
+    #[ignore = "requires privileged Linux cgroup v2 and mount namespace; crashes child process"]
+    async fn linux_acquisition_crash_after_mount() {
+        acquisition_crash("after-mount", "linux_acquisition_crash_after_mount").await;
+    }
+    #[tokio::test]
+    #[ignore = "requires privileged Linux cgroup v2 and mount namespace; crashes child process"]
+    async fn linux_acquisition_crash_before_identity_record() {
+        acquisition_crash(
+            "before-identity-record",
+            "linux_acquisition_crash_before_identity_record",
+        )
+        .await;
+    }
     #[tokio::test]
     async fn stop_timeout_is_durable_and_later_recovery_confirms_only_cpu_pid() {
         use std::os::unix::fs::MetadataExt;
@@ -1148,6 +1589,8 @@ mod tests {
         let mut request = ExecutionRequest::process("/bin/sh", vec![]);
         request.limits.stop_ms = 30;
         let mut row = Record {
+            plan: b.plan(&id).unwrap(),
+            preparing: false,
             request,
             observation: Observation {
                 execution: ExecutionRef {
@@ -1258,6 +1701,8 @@ mod tests {
         fs::create_dir(b.group(&id)).unwrap();
         fs::write(b.group(&id).join("cgroup.kill"), b"untouched").unwrap();
         let row = Record {
+            plan: b.plan(&id).unwrap(),
+            preparing: true,
             request: ExecutionRequest::process("/bin/sh", vec![]),
             observation: Observation {
                 execution: ExecutionRef {

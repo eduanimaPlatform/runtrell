@@ -113,7 +113,7 @@ helper は親 PID の前後照合と parent-death SIGKILL を設定する。cgro
 
 `destroy` は停止確認後に Reclaiming を耐久保存し、通常の unmount（lazy detach 不使用）・mount IDが消えたこと・scratch directory 削除・cgroup 削除の確認後に Memory/Disk/Volume を解放する。途中停止後も再試行できる。Destroyed の管理記録は tombstone として保持し、同 operation の acquire は元 reference を返す。記録の削除／retention は、その operation を二度と再受付しない host 側方針と合わせて別途実施する。
 
-記録の破損、別 runtime 版、request 不一致、cgroup inode／mount ID 不一致、対応記録のない directory/group は Unknown として隔離する。自動で削除・別 Run に再割当しない。`inventory().execution == None` は隔離対象。名前の一致だけで採用しない。ホスト再起動、管理 FS 喪失、mount namespace 変更は通常の backend process 再起動と異なり、存在／削除の receipt を再構築できない場合がある。ローカル record は ExecutionLedger の原子予約・owner fence・費用精算を置き換えない。ローカル実行の外部課金は0であり、host/cloud 利用料の課金 adapter を実装したという意味ではない。
+記録の破損、別 runtime 版、request 不一致、cgroup inode／mount ID 不一致、対応記録のない directory/group は Unknown として隔離する。自動で削除・別 Run に再割当しない。`inventory().execution == None` は隔離対象。事前intent・専用管理領域の所有契約・取得途中の段階を満たさない名前の一致だけでは採用しない。ホスト再起動、管理 FS 喪失、mount namespace 変更は通常の backend process 再起動と異なり、存在／削除の receipt を再構築できない場合がある。ローカル record は ExecutionLedger の原子予約・owner fence・費用精算を置き換えない。ローカル実行の外部課金は0であり、host/cloud 利用料の課金 adapter を実装したという意味ではない。
 
 ### 任意の Python 実行（既定無効）
 
@@ -135,7 +135,7 @@ Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り�
 
 payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須とし、uid/gid 65534、`--cap-drop ALL`、helperの`no_new_privs`、追加userns禁止、read-only runtime、network分離を適用する。管理領域・資格情報・cgroup FSは公開しない。`linux_payload_has_no_privileges`はpayloadの実行、uid/gid、全5種のcapability集合が0、NoNewPrivs=1、管理側と異なるuser namespaceを照合する。共有kernelの脆弱性に対するVM相当の防御を意味しない。
 
-`xtask isolation-tests linux default|python`が必須名の正本。現在default 8件、Python有効9件（既存の環境拒否・遅延helper拒否2件を含む）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
+`xtask isolation-tests linux default|python`が必須名の正本。integrationはdefault 8件、Python有効9件（既存の環境拒否・遅延helper拒否2件を含む）。`xtask isolation-tests linux-acquisition default|python`のtest-only取得crash unit 3件も、各featureで必須とする（合計default 11件／Python 12件）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
 
 既存のbaseline実行・CPU閾値・OOM・PID quota・ENOSPC・出力上限・network/書込み拒否・子孫停止・別process停止後の再発見・冪等回収・Python成果物保存のassertionは維持する。環境変数不足は成功returnせず失敗する。CIの結果照合だけでは将来追加される早期returnを検出できないため、payload実行と制限発動のassertionも必須条件である。
 
@@ -155,7 +155,17 @@ payloadにはuser namespaceを必須とし、uid/gid 65534、capability全集合
 - `cargo test -p runtrell --test linux_execution --no-run`（Python構成は`--features python`も付ける）。
 - cgroup v2・host mount権限・userns・immutable runtimeを備えた専用環境で、`RUNTRELL_LINUX_TEST=1`、`RUNTRELL_CGROUP_ROOT`、`RUNTRELL_LINUX_STATE_ROOT`を設定する。
 - `cargo run -p xtask -- isolation-tests linux default`（またはpython）が返す各試験を`--exact NAME --include-ignored --test-threads=1`で実行する。`stopped`はCPU/PID解放とMemory/Disk未解放を、`destroyed`はunmount・cgroup削除後のMemory/Disk解放を検査する。全回収まで待つcontroller契約は維持する。
-- `linux_concurrent_runs_reclaim_independently`で8 Runの並行実行・回収を確認する。cgroup/mount作成直後かつinode/mount ID保存前のcrashは、まだ自動再発見・回収を提供しない。該当実体はUnknownで隔離し、予約を保持する。REC-05/06・SBX-07の未完了受入項目であり、通常のrecord保存後のcrash試験で代用しない。
+- `linux_concurrent_runs_reclaim_independently`で8 Runの並行実行・回収を確認する。
+
+### 取得途中の孤立実体回収（REC-05/06・SBX-07）
+
+ExecutionLedgerのintent保存完了後、backendは実体作成前に所有Run・operation・固定request・予定cgroup名・scratch path・資源集合を含む事前recordをfsync/rename/directory fsyncで保存する。state rootの新規子directoryも親をfsyncする。安定IDはRunとoperationから決め、同じoperationを再取得しても新しい実体を作らない。
+
+hostはstate rootと委譲cgroup subtreeをこのbackend専用に管理し、第三者の作成・置換・同じ領域を異なるstate rootから利用することを禁止する。同じboot・mount namespaceで再起動する。事前recordにboot IDとmount namespace inodeを保存し、変更時は隔離する。これがinode保存前のcgroupを予定名と事前intentから照合する信頼境界であり、名前だけで任意のhost cgroupを採用する契約ではない。scratchは予定pathに加え、operation由来のtmpfs sourceとfilesystem種別を照合する。保存済みinode/mount IDがある場合は一致を必須とし、異なる世代を採用しない。
+
+inventoryは取得途中のintent付き実体（実体未作成も含む）と、intentなし・破損・識別不一致のUnknown隔離を区別する。管理Workerは現行owner fenceを得てExecutionLedger.pendingのRun・operation・requestとreconcileし、operation lockの下で不足する識別情報を保存してからstop/destroyする。取得途中の記録は実行再開せず回収専用とし、未完了stagingのscratchを保存済み成果物として回収しない。実体なしを確認できる取得途中だけCPU/PIDの停止receiptを出せる。Memory/Disk/Volumeはunmount・scratch削除・cgroup削除の確認後に解放する。途中再起動と重複回収に耐える。所有不明は削除・別Run再割当せずUnknown報告と予約保持を続ける。
+
+`linux_acquisition_crash_after_cgroup`、`linux_acquisition_crash_after_mount`、`linux_acquisition_crash_before_identity_record`は子processを境界でexitさせ、新backendによる再発見・ledger照合・停止・unmount・削除・資源receipt・重複回収を検査する。テスト専用の故障注入であり、本番binaryに環境変数によるexit経路を入れない。実装済み・Linux未実行。Linuxの実行証拠を取得してこの受入を完了するまでは、このbackendの無人本番運用を有効化しない。コード実行を使わないモデル生成・通常tool処理は別の有効化条件として扱う。
 
 ### macOSの子孫実行能力
 
