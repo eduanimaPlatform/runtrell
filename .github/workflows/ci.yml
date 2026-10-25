@@ -118,9 +118,11 @@ jobs:
             mkdir /sys/fs/cgroup/runtrell-ci
             printf "+cpu +memory +pids" > /sys/fs/cgroup/runtrell-ci/cgroup.subtree_control
           '
-          sudo install -d -m 0700 "$RUNNER_TEMP/runtrell-state"
+          # Inside the payload user namespace the administrator loses DAC override, so the
+          # state root must not sit under the runner home (mode 0750, owned by runner).
+          sudo install -d -o root -g root -m 0700 /var/lib/runtrell-ci-state
           echo "RUNTRELL_CGROUP_ROOT=/sys/fs/cgroup/runtrell-ci" >> "$GITHUB_ENV"
-          echo "RUNTRELL_LINUX_STATE_ROOT=$RUNNER_TEMP/runtrell-state" >> "$GITHUB_ENV"
+          echo "RUNTRELL_LINUX_STATE_ROOT=/var/lib/runtrell-ci-state" >> "$GITHUB_ENV"
           echo "RUNTRELL_PYTHON_VERSION=$(/usr/bin/python3 -c 'import platform; print(platform.python_version())')" >> "$GITHUB_ENV"
       - name: Build unprivileged and list required tests
         run: |
