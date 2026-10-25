@@ -618,7 +618,10 @@ pub struct ModelReply {
 pub struct Diagnostic {
     pub code: String,
     pub severity: String,
+    /// Instance JSON Pointer (or business diagnostic location).
     pub path: String,
+    /// Schema JSON Pointer for schema diagnostics.
+    pub schema_path: Option<String>,
     pub artifact: Option<String>,
     pub file: Option<String>,
     pub field: Option<String>,
@@ -685,7 +688,22 @@ pub trait Tool: Send + Sync {
     async fn invoke(&self, context: &ToolContext, input: Value) -> Result<ExternalResult>;
     async fn lookup(&self, context: &ToolContext, input: Value) -> Result<Lookup>;
 }
+/// Host supplies limits and business-specific diagnostic classification.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RepairPolicy {
+    pub max_repairs: Option<u64>,
+    pub max_elapsed: Option<u64>,
+}
 pub trait Validator: Send + Sync {
+    fn repair_policy(&self) -> RepairPolicy {
+        RepairPolicy::default()
+    }
+    fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
+        !diagnostics.is_empty()
+            && diagnostics
+                .iter()
+                .all(|d| d.severity == "error" && d.code == "SCHEMA_VALIDATION")
+    }
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt>;
 }
 pub trait Finalizer: Send + Sync {

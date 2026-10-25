@@ -13,12 +13,12 @@ pub enum FileAction {
     ArtifactRead,
 }
 #[derive(Clone)]
-pub struct FileTool {
-    pub store: DataStore,
+pub struct FileTool<S = DataStore> {
+    pub store: S,
     pub access: Access,
     pub action: FileAction,
 }
-impl FileTool {
+impl<S: StandardToolStore> FileTool<S> {
     fn name(&self) -> &'static str {
         match self.action {
             FileAction::List => "files.list",
@@ -165,7 +165,7 @@ impl FileTool {
         }
     }
 }
-impl Tool for FileTool {
+impl<S: StandardToolStore> Tool for FileTool<S> {
     fn descriptor(&self) -> ToolDescriptor {
         let write = matches!(
             self.action,
@@ -252,6 +252,8 @@ pub fn pin_catalog<T: Tool>(
     let mut result = Vec::new();
     for tool in tools {
         let d = tool.descriptor();
+        crate::schema::compile_schema(&d.input_schema)?;
+        crate::schema::compile_schema(&d.output_schema)?;
         if !names.insert(d.name.clone()) {
             return Err(Error::Conflict);
         }
@@ -263,14 +265,14 @@ pub fn pin_catalog<T: Tool>(
 }
 /// Opt-in envelope for tools producing large output. The model receives only the
 /// bounded preview plus an owned Artifact reference; fetching uses ArtifactRead.
-pub struct StoredOutputTool<T> {
+pub struct StoredOutputTool<T, S = DataStore> {
     pub inner: T,
-    pub store: DataStore,
+    pub store: S,
     pub access: Access,
     pub inline_limit: usize,
     pub now: u64,
 }
-impl<T: Tool> StoredOutputTool<T> {
+impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
     async fn wrap(&self, context: &ToolContext, result: ExternalResult) -> Result<ExternalResult> {
         if context.claim.run != self.access.actor().owner {
             return Err(Error::PermissionDenied);
@@ -302,7 +304,7 @@ impl<T: Tool> StoredOutputTool<T> {
         })
     }
 }
-impl<T: Tool> Tool for StoredOutputTool<T> {
+impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
     fn descriptor(&self) -> ToolDescriptor {
         let mut d = self.inner.descriptor();
         d.version = format!("{}:stored-output-1:{}", d.version, self.inline_limit);
@@ -325,11 +327,11 @@ impl<T: Tool> Tool for StoredOutputTool<T> {
     }
 }
 /// Validation is available through the same ordinary Tool interface as files.
-pub struct ValidationTool<V> {
-    pub adapter: DataValidator<V>,
+pub struct ValidationTool<V, S = DataStore> {
+    pub adapter: DataValidator<V, S>,
     pub run: RunRecord,
 }
-impl<V: TargetValidator> Tool for ValidationTool<V> {
+impl<V: TargetValidator, S: EvidenceStore + StandardToolStore> Tool for ValidationTool<V, S> {
     fn descriptor(&self) -> ToolDescriptor {
         let key = self.adapter.validator.key();
         ToolDescriptor {

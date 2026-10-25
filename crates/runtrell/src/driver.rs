@@ -7,7 +7,7 @@ use runtrell_protocol::{
         AgentRun, AgentRunStep, ModelTurn, PendingToolCall, prepare::prepare_request,
         spec::RunSpec as ProtocolSpec,
     },
-    tool::{ToolOutput, ToolResult},
+    tool::{ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult},
 };
 use serde_json::Value;
 use std::{future::Future, sync::Arc};
@@ -350,6 +350,22 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        let repair_deadline = r
+            .checkpoint
+            .as_ref()
+            .and_then(|cp| cp.payload["repair"]["started"].as_u64())
+            .and_then(|started| {
+                self.validator
+                    .repair_policy()
+                    .max_elapsed
+                    .map(|elapsed| started.saturating_add(elapsed))
+            });
+        let deadline = match (deadline, repair_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let mut ctx = ctx;
+        ctx.deadline = deadline;
         let result = self
             .bounded(invoke(ctx), deadline)
             .await
@@ -366,8 +382,12 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
         catalog: &[ToolDescriptor],
     ) -> Result<()> {
         let r = self.store.check(c, self.clock.now(), true).await?;
-        let payload =
-            serde_json::json!({"protocol":run,"catalog":catalog,"model":self.model.limits()});
+        let repair = r
+            .checkpoint
+            .as_ref()
+            .map(|cp| cp.payload["repair"].clone())
+            .unwrap_or(Value::Null);
+        let payload = serde_json::json!({"protocol":run,"catalog":catalog,"model":self.model.limits(),"repair":repair});
         self.store
             .checkpoint(
                 c,
@@ -382,6 +402,22 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                 self.clock.now(),
             )
             .await
+    }
+    async fn validation_failure(
+        &self,
+        c: &Claim,
+        current: &RunRecord,
+        candidate: Value,
+        receipt: ValidationReceipt,
+        reason: &str,
+    ) -> Result<RunRecord> {
+        let mut checkpoint = current.checkpoint.clone().ok_or(Error::Conflict)?;
+        checkpoint.payload["last_validation"] =
+            serde_json::json!({"candidate":candidate,"receipt":receipt});
+        self.store
+            .checkpoint(c, current.revision, checkpoint, self.clock.now())
+            .await?;
+        Err(Error::Invalid(reason.into()))
     }
     async fn next_attempt(
         &self,
@@ -499,6 +535,27 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
         }
         let catalog = self.tools.iter().map(Tool::descriptor).collect::<Vec<_>>();
         file_tools::pin_catalog(&r, &self.policy, &self.tools)?;
+        if let Some(repair) = r.checkpoint.as_ref().map(|cp| &cp.payload["repair"])
+            && !repair.is_null()
+        {
+            if repair["schema"] != 1
+                || repair["count"].as_u64().is_none()
+                || repair["started"].as_u64().is_none()
+            {
+                return Err(Error::Unsupported("repair checkpoint schema".into()));
+            }
+            let receipt: ValidationReceipt =
+                serde_json::from_value(repair["receipt"].clone()).map_err(|_| Error::Conflict)?;
+            assembly::verify_receipt(
+                &r,
+                &repair["candidate"],
+                &receipt,
+                &data::ValidatorKey::new(&r.spec.validator, &r.spec.validator_version),
+            )?;
+            if receipt.passed {
+                return Err(Error::Conflict);
+            }
+        }
         let protocol_spec = ProtocolSpec::new();
         let mut run = if let Some(cp) = &r.checkpoint {
             if cp.schema != 1 {
@@ -529,14 +586,36 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
             .unwrap_or_else(|| vec![Message::text("user", r.spec.input.clone())]);
         let mut cursor = r.checkpoint.as_ref().map_or(0, |cp| cp.cursor);
         loop {
-            self.store.check(c, self.clock.now(), true).await?;
+            let current = self.store.check(c, self.clock.now(), true).await?;
+            if let Some(started) = current
+                .checkpoint
+                .as_ref()
+                .and_then(|cp| cp.payload["repair"]["started"].as_u64())
+                && self
+                    .validator
+                    .repair_policy()
+                    .max_elapsed
+                    .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
+            {
+                return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
+            }
             let step = run.next_step().map_err(|e| Error::Invalid(e.to_string()))?;
             // Pending protocol state is recoverable before any external work.
             self.save(c, &run, messages.clone(), cursor, &catalog)
                 .await?;
             match step {
                 AgentRunStep::CallModel { history, turn, .. } => {
-                    let key = format!("model:{turn}");
+                    let current = self.store.get(&c.run).await?;
+                    let repairs = current
+                        .checkpoint
+                        .as_ref()
+                        .and_then(|cp| cp.payload["repair"]["count"].as_u64())
+                        .unwrap_or(0);
+                    let key = if repairs == 0 {
+                        format!("model:{turn}")
+                    } else {
+                        format!("repair:{repairs}:model:{turn}")
+                    };
                     let existing = self.store.operation(&c.run, &key).await?;
                     let current = self.store.get(&c.run).await?;
                     let descriptors = file_tools::pin_catalog(&current, &self.policy, &self.tools)?;
@@ -577,7 +656,20 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             reserve,
                         );
                         d.price = self.model.limits().price;
-                        d.timeout = Some(self.model.limits().timeout);
+                        let repair_remaining = current
+                            .checkpoint
+                            .as_ref()
+                            .and_then(|cp| cp.payload["repair"]["started"].as_u64())
+                            .and_then(|started| {
+                                self.validator.repair_policy().max_elapsed.map(|max| {
+                                    started.saturating_add(max).saturating_sub(self.clock.now())
+                                })
+                            });
+                        d.timeout = Some(
+                            repair_remaining.map_or(self.model.limits().timeout, |left| {
+                                left.min(self.model.limits().timeout)
+                            }),
+                        );
                         if let Some((scope, retention)) = self.model.recovery() {
                             d.scope = Some(scope);
                             d.recovery_until = Some(
@@ -702,7 +794,23 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             .find(|t| t.descriptor().name == name)
                             .ok_or_else(|| Error::Unsupported(name.clone()))?;
                         let descriptor = tool.descriptor();
-                        let model_key = format!("model:{}", run.turn());
+                        let current = self.store.check(c, self.clock.now(), true).await?;
+                        self.policy.authorize(
+                            &current,
+                            &descriptor.name,
+                            &descriptor.permission,
+                        )?;
+                        let repairs = current
+                            .checkpoint
+                            .as_ref()
+                            .and_then(|cp| cp.payload["repair"]["count"].as_u64())
+                            .unwrap_or(0);
+                        let prefix = if repairs == 0 {
+                            String::new()
+                        } else {
+                            format!("repair:{repairs}:")
+                        };
+                        let model_key = format!("{prefix}model:{}", run.turn());
                         let presented = self
                             .store
                             .operation(&c.run, &model_key)
@@ -713,9 +821,28 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                         if !offered.tools.contains(&descriptor) || !catalog.contains(&descriptor) {
                             return Err(Error::Conflict);
                         }
-                        let key = format!("tool:{}:{}", run.turn(), call.id());
+                        let key = format!("{prefix}tool:{}:{}", run.turn(), call.id());
                         let input = call.arguments();
-                        validate_schema(&input, &descriptor.input_schema)?;
+                        let diagnostics = schema_diagnostics(&input, &descriptor.input_schema)?;
+                        if !diagnostics.is_empty() {
+                            let output = serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
+                            messages.push(Message {
+                                role: "tool".into(),
+                                text: String::new(),
+                                call_id: Some(call.id().to_string()),
+                                tool: Some(name),
+                                data: output.clone(),
+                            });
+                            run.answer(call.answer(ToolResult::failed(ToolExecutionError::new(
+                                ToolErrorKind::InvalidArgs,
+                                output.to_string(),
+                            ))))
+                            .map_err(|e| Error::Invalid(e.to_string()))?;
+                            cursor += 1;
+                            self.save(c, &run, messages.clone(), cursor, &catalog)
+                                .await?;
+                            continue;
+                        }
                         let mut d = DispatchRequest::new(
                             &key,
                             OperationKind::Tool,
@@ -779,6 +906,62 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     // No call-count gate: only current budget, deadline and trusted receipts.
                     self.store.finalization_allowed(c, self.clock.now()).await?;
                     let receipt = self.validator.validate(&current, &output)?;
+                    if receipt.hash != digest(&output)
+                        || receipt.basis_revision != current.spec.basis_revision
+                        || receipt.config_version != current.spec.config_version
+                        || receipt.validator != current.spec.validator
+                        || receipt.validator_version != current.spec.validator_version
+                    {
+                        return Err(Error::Conflict);
+                    }
+                    if !receipt.passed {
+                        if !self.validator.repairable(&receipt.diagnostics) {
+                            return self
+                                .validation_failure(
+                                    c,
+                                    &current,
+                                    output,
+                                    receipt,
+                                    "VALIDATION_UNREPAIRABLE",
+                                )
+                                .await;
+                        }
+                        let previous = current
+                            .checkpoint
+                            .as_ref()
+                            .map(|cp| cp.payload["repair"].clone())
+                            .unwrap_or(Value::Null);
+                        let count = previous["count"].as_u64().unwrap_or(0);
+                        let started = previous["started"].as_u64().unwrap_or(self.clock.now());
+                        let policy = self.validator.repair_policy();
+                        if policy.max_repairs.is_some_and(|max| count >= max)
+                            || policy
+                                .max_elapsed
+                                .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
+                        {
+                            return self
+                                .validation_failure(
+                                    c,
+                                    &current,
+                                    output,
+                                    receipt,
+                                    "VALIDATION_REPAIR_LIMIT",
+                                )
+                                .await;
+                        }
+                        let feedback = serde_json::json!({"candidate":output,"diagnostics":receipt.diagnostics,"instruction":"Correct the candidate and submit it for validation again"});
+                        messages.push(Message::text("user", feedback.to_string()));
+                        let next = AgentRun::from_spec(&protocol_spec, feedback.to_string(), None);
+                        let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+                        cp.payload["protocol"] =
+                            serde_json::to_value(next).map_err(|_| Error::Storage)?;
+                        cp.payload["repair"] = serde_json::json!({"schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started,"candidate":output,"receipt":receipt});
+                        cp.messages = messages;
+                        self.store
+                            .checkpoint(c, current.revision, cp, self.clock.now())
+                            .await?;
+                        return Err(Error::Pending("validation repair".into()));
+                    }
                     let completion = self.finalizer.finalize(&current, output, receipt)?;
                     self.store.finalize(c, completion, self.clock.now()).await?;
                     return self.store.get(&c.run).await;
@@ -800,104 +983,6 @@ fn completed(result: ExternalResult) -> Result<Value> {
         }
     }
 }
-/// Small, explicit schema subset used by the reference driver. Unsupported schema
-/// keywords are rejected rather than silently treated as a successful validation.
-pub fn validate_schema(value: &Value, schema: &Value) -> Result<()> {
-    let obj = schema
-        .as_object()
-        .ok_or_else(|| Error::Invalid("schema must be object".into()))?;
-    for (name, valid) in [
-        ("type", schema.get("type").is_none_or(Value::is_string)),
-        (
-            "properties",
-            schema.get("properties").is_none_or(Value::is_object),
-        ),
-        (
-            "required",
-            schema.get("required").is_none_or(Value::is_array),
-        ),
-        ("enum", schema.get("enum").is_none_or(Value::is_array)),
-        (
-            "additionalProperties",
-            schema
-                .get("additionalProperties")
-                .is_none_or(Value::is_boolean),
-        ),
-    ] {
-        if !valid {
-            return Err(Error::Invalid(format!("invalid schema {name}")));
-        }
-    }
-    for key in obj.keys() {
-        if ![
-            "type",
-            "properties",
-            "items",
-            "required",
-            "additionalProperties",
-            "enum",
-            "description",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(Error::Unsupported(format!("schema keyword {key}")));
-        }
-    }
-    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
-        let ok = match kind {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            _ => return Err(Error::Unsupported(format!("schema type {kind}"))),
-        };
-        if !ok {
-            return Err(Error::Invalid("schema type mismatch".into()));
-        }
-    }
-    if let Some(items) = schema.get("items")
-        && let Some(values) = value.as_array()
-    {
-        for value in values {
-            validate_schema(value, items)?;
-        }
-    }
-    if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        for name in required {
-            let name = name
-                .as_str()
-                .ok_or_else(|| Error::Invalid("required field".into()))?;
-            if value.get(name).is_none() {
-                return Err(Error::Invalid(format!("missing {name}")));
-            }
-        }
-    }
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for (name, schema) in properties {
-            if let Some(value) = value.get(name) {
-                validate_schema(value, schema)?;
-            }
-        }
-    }
-    if schema.get("additionalProperties") == Some(&Value::Bool(false))
-        && let Some(fields) = value.as_object()
-    {
-        for name in fields.keys() {
-            if schema.get("properties").and_then(|p| p.get(name)).is_none() {
-                return Err(Error::Invalid(format!("unexpected {name}")));
-            }
-        }
-    }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array)
-        && !values.contains(value)
-    {
-        return Err(Error::Invalid("enum mismatch".into()));
-    }
-    Ok(())
-}
 
 impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, F: Finalizer>
     Runtime<S, M, T, P, C, V, F>
@@ -906,7 +991,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
     pub async fn compact_context(
         &self,
         c: &Claim,
-        data: &data::DataStore,
+        data: &impl data::ContextStore,
         access: &data::Access,
         key: &str,
     ) -> Result<data::ContextState> {

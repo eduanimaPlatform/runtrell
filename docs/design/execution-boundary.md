@@ -16,3 +16,13 @@ NotFound再送は、同じscope・retention内の未実行保証がある場合�
 取消・期限後は新規送信を止める。lookup/record/settlement/cleanupは業務開始と別の継続経路。停止不能・未知料金・残diskは終端Runと独立して未完了を残す。保存失敗の注入はtransaction適用前に失敗させ、部分更新を残さない。MemoryStoreのclone共有はworker再生成を試験するだけでOS再起動を試験しない。
 
 2b: copyの入力はWorkspaceSnapshot全体で固定する。回収mergeは現行snapshot完全一致と各file期待revisionの双方を検査し、write/deleteを1回commitする。保存済みデータを古いcopyで上書きしない。2dは[ExecutionBackend](execution.md)を追加。OS process backendと試験用FakeExecutionBackendを提供し、実隔離確認には実行環境制約がある。Artifact確定は現在のmanifest/hashとstore保存evidence・必要validator版をnamespace transactionで確認する。DataFinalizerのcompletion保存後、2aのRunStore.finalizeがRun終端を別に保存する。安定IDで再照会でき、業務owner反映の代わりにはしない。
+
+## 検証不合格と修正（rt-3c）
+
+検証の失敗結果は`passed=false`のreceiptと構造化diagnostics。`Validator::repairable`がseverity/codeを業務方針に照らして判定する。権限拒否・保存障害・receiptのhash/根拠版/構成版/検証器版不一致はErrorであり修正候補にしない。driverは最終候補でもreceiptを照合してから分類する。
+
+修正可能なら、候補・失敗receipt・開始時刻・修正回数・次のprotocol状態・モデル入力へ追加する診断を一つのcheckpoint CASで保存してmachine waitに移る。実行slotは解放し、hostの通常の再pollで再開する。checkpoint失敗時は追加モデルを呼ばない。Worker再起動でも同じ修正番号のoperation keyを用い、送信済み呼出しは通常のlookup経路で照合する。修正結果は毎回Validatorへ戻し、古いreceiptを転用しない。
+
+`RepairPolicy`の回数/経過時間上限はhostが供給し、既定はどちらもNone（回数上限を設けない方針）。Runの予算・期限・所有権・認可は常時適用する。経過時間上限は次のpoll開始時にも照合し、修正モデル呼出しのtimeoutにも反映する。候補での上限到達/修正不能は最新候補とreceiptを`last_validation`へ保存して理由付きFailed、予算/Run期限は既存の終端理由へ収束する。無料確定を許す口座でも追加LLMは`dispatch`の通常予約対象。保存障害・証跡不整合はErrorとしてhostへ返し、成功や修正待ちへ変換しない。
+
+予約拒否Waitはstateを保存してdriveを返す。待機中にDB transaction・lock・実行slotを保持しない。hostは期限内に再pollし、同じ許可検査/全祖先予約を繰り返す。Shrinkは`max(接続先min_max_output_tokens, host min_output_budget_tokens)`を満たす予約枠だけを採用する。

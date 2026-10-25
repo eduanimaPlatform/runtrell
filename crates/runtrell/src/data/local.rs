@@ -2,8 +2,8 @@
 use super::State;
 use crate::{Error, Result};
 use rustix::fs::{
-    AtFlags, CWD, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, mkdirat, openat,
-    renameat, unlinkat,
+    AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, mkdirat,
+    openat, renameat, unlinkat,
 };
 use std::{
     fs::File,
@@ -79,6 +79,30 @@ impl Local {
         .map_err(err)?;
         regular(&lock)?;
         flock(&lock, FlockOperation::LockExclusive).map_err(err)?;
+        // Holding the namespace lock proves no live transaction owns these files.
+        // They never became the authoritative state marker and are immediately
+        // expired once their owning transaction has stopped.
+        for entry in Dir::read_from(&dir).map_err(err)? {
+            let entry = entry.map_err(err)?;
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .ok()
+                .and_then(|s| s.strip_prefix("stage-"))
+                .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+            {
+                let fd = openat(
+                    &dir,
+                    name,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(err)?;
+                regular(&fd)?;
+                unlinkat(&dir, name, AtFlags::empty()).map_err(err)?;
+                fsync(&dir).map_err(err)?;
+            }
+        }
         let mut state = match openat(
             &dir,
             "state",

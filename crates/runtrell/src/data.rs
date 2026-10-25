@@ -202,12 +202,13 @@ impl Default for StoragePolicy {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Staged {
     pub id: String,
     owner: Namespace,
     bytes: Vec<u8>,
     class: DataClass,
+    expires_at: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
@@ -332,8 +333,10 @@ pub struct ContextState {
     pub history: Vec<ContextItem>,
     pub summary: Option<String>,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct State {
+    schema: u32,
+    staged: BTreeMap<String, Staged>,
     revision: u64,
     artifact_revision: u64,
     files: BTreeMap<String, File>,
@@ -344,17 +347,48 @@ struct State {
     context: ContextState,
     retention: BTreeMap<DataClass, u64>,
 }
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            schema: 2,
+            staged: BTreeMap::new(),
+            revision: 0,
+            artifact_revision: 0,
+            files: BTreeMap::new(),
+            grants: BTreeMap::new(),
+            blobs: BTreeMap::new(),
+            evidence: BTreeMap::new(),
+            completions: BTreeMap::new(),
+            context: ContextState::default(),
+            retention: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Backend {
     Memory(Arc<Mutex<BTreeMap<String, Arc<Mutex<State>>>>>),
     Local(Arc<Local>),
+    External(Arc<dyn NamespaceBackend>),
 }
 #[derive(Clone)]
 pub struct DataStore {
     backend: Backend,
     policy: StoragePolicy,
 }
+/// Opaque, versioned namespace state. Adapters must durably CAS the complete
+/// payload; no partial state may become visible. Version tokens must prevent ABA.
+pub trait NamespaceBackend: Send + Sync {
+    fn load(&self, namespace: &str) -> Result<(String, Option<Vec<u8>>)>;
+    fn compare_exchange(&self, namespace: &str, expected: &str, payload: &[u8]) -> Result<()>;
+}
 impl DataStore {
+    pub fn external(backend: Arc<dyn NamespaceBackend>, policy: StoragePolicy) -> Self {
+        Self {
+            backend: Backend::External(backend),
+            policy,
+        }
+    }
     pub fn memory(policy: StoragePolicy) -> Self {
         Self {
             backend: Backend::Memory(Arc::default()),
@@ -374,6 +408,9 @@ impl DataStore {
         a.actor.key()?;
         let key = a.target.key()?;
         let apply = |s: &mut State| {
+            if s.schema != 2 {
+                return Err(Error::Unsupported("data state schema".into()));
+            }
             if a.actor != a.target {
                 let g = a
                     .grant
@@ -416,6 +453,22 @@ impl DataStore {
                 apply(&mut guard)
             }
             Backend::Local(local) => local.tx(&key, apply),
+            Backend::External(backend) => {
+                let (version, bytes) = backend.load(&key)?;
+                let mut state = match bytes {
+                    Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?,
+                    None => State::default(),
+                };
+                let out = apply(&mut state)?;
+                if write {
+                    backend.compare_exchange(
+                        &key,
+                        &version,
+                        &serde_json::to_vec(&state).map_err(|_| Error::Storage)?,
+                    )?;
+                }
+                Ok(out)
+            }
         }
     }
     fn class(&self, c: DataClass) -> Result<&ClassPolicy> {
@@ -672,16 +725,73 @@ impl DataStore {
             )
         })
     }
-    pub fn stage(&self, a: &Access, bytes: &[u8], class: DataClass, _now: u64) -> Result<Staged> {
-        self.tx(a, false, |_| Ok(()))?;
+    pub fn stage(&self, a: &Access, bytes: &[u8], class: DataClass, now: u64) -> Result<Staged> {
+        self.stage_named(a, bytes, class, now, uuid::Uuid::new_v4().to_string())
+    }
+    fn stage_named(
+        &self,
+        a: &Access,
+        bytes: &[u8],
+        class: DataClass,
+        now: u64,
+        id: String,
+    ) -> Result<Staged> {
         if bytes.len() > self.class(class)?.max_bytes {
             return Err(invalid("CAPACITY"));
         }
-        Ok(Staged {
-            id: uuid::Uuid::new_v4().to_string(),
+        let staged = Staged {
+            id,
             owner: a.target.clone(),
             bytes: bytes.to_vec(),
             class,
+            expires_at: now.saturating_add(self.class(class)?.retention),
+        };
+        self.tx(a, true, |s| {
+            if let Some(blob) = s.blobs.get(&staged.id) {
+                if blob.bytes != staged.bytes || blob.reference.class != class {
+                    return Err(Error::Conflict);
+                }
+                return Ok(staged);
+            }
+            if let Some(previous) = s.staged.get(&staged.id) {
+                if previous.bytes != staged.bytes || previous.class != class {
+                    return Err(Error::Conflict);
+                }
+                return Ok(previous.clone());
+            }
+            if s.staged.len() >= self.policy.max_entries
+                || s.staged
+                    .values()
+                    .filter(|v| v.class == class)
+                    .map(|v| v.bytes.len())
+                    .sum::<usize>()
+                    .saturating_add(bytes.len())
+                    > self.class(class)?.max_bytes
+            {
+                return Err(invalid("STAGING_CAPACITY"));
+            }
+            s.staged.insert(staged.id.clone(), staged.clone());
+            Ok(staged)
+        })
+    }
+    /// Resume a persisted staging operation after worker loss.
+    pub fn staged(&self, a: &Access, id: &str) -> Result<Staged> {
+        if a.actor != a.target {
+            return Err(Error::PermissionDenied);
+        }
+        self.tx(a, false, |s| {
+            s.staged.get(id).cloned().ok_or(Error::NotFound)
+        })
+    }
+    /// Only the owning namespace can reclaim expired, unpublished staging data.
+    pub fn cleanup_staging(&self, a: &Access, now: u64) -> Result<usize> {
+        if a.actor != a.target {
+            return Err(Error::PermissionDenied);
+        }
+        self.tx(a, true, |s| {
+            let before = s.staged.len();
+            s.staged.retain(|_, value| now < value.expires_at);
+            Ok(before - s.staged.len())
         })
     }
     pub async fn save(&self, a: &Access, staged: Staged, now: u64) -> Result<ArtifactRef> {
@@ -694,6 +804,9 @@ impl DataStore {
                     return Err(Error::Conflict);
                 }
                 return Ok(existing.reference.clone());
+            }
+            if s.staged.get(&staged.id) != Some(&staged) {
+                return Err(Error::Conflict);
             }
             let policy = self.class(staged.class)?;
             if s.blobs
@@ -718,6 +831,7 @@ impl DataStore {
                 retention_until: now.saturating_add(policy.retention),
                 class: staged.class,
             };
+            s.staged.remove(&r.id);
             s.blobs.insert(
                 r.id.clone(),
                 Blob {
@@ -1284,25 +1398,31 @@ impl DataStore {
                     || now < b.reference.retention_until
                     || b.completion.is_some()
             });
-            Ok(if s.blobs.values().any(|b| b.reference.class == class) {
-                Progress::Pending
-            } else {
-                Progress::Confirmed
-            })
+            s.staged
+                .retain(|_, staged| staged.class != class || now < staged.expires_at);
+            Ok(
+                if s.blobs.values().any(|b| b.reference.class == class)
+                    || s.staged.values().any(|staged| staged.class == class)
+                {
+                    Progress::Pending
+                } else {
+                    Progress::Confirmed
+                },
+            )
         })
     }
 }
 /// Driver adapters use exactly the same evidence and finalization contract for
 /// structured decisions and file-backed results. References are host-bound.
-pub struct DataValidator<V> {
-    pub store: DataStore,
+pub struct DataValidator<V, S = DataStore> {
+    pub store: S,
     pub access: Access,
     pub validator: V,
     pub workspace: bool,
     pub artifacts: Vec<ArtifactRef>,
 }
-pub struct DataFinalizer {
-    pub store: DataStore,
+pub struct DataFinalizer<S = DataStore> {
+    pub store: S,
     pub access: Access,
     pub required: Vec<ValidatorKey>,
     pub workspace: bool,
@@ -1334,7 +1454,7 @@ impl DataStore {
         })
     }
 }
-impl<V: TargetValidator> Validator for DataValidator<V> {
+impl<V: TargetValidator, S: EvidenceStore> Validator for DataValidator<V, S> {
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt> {
         let target = self.store.run_target(
             &self.access,
@@ -1349,13 +1469,16 @@ impl<V: TargetValidator> Validator for DataValidator<V> {
             .receipt)
     }
 }
-impl Finalizer for DataFinalizer {
+impl<S: EvidenceStore> Finalizer for DataFinalizer<S> {
     fn finalize(
         &self,
         run: &RunRecord,
         candidate: Value,
         receipt: ValidationReceipt,
     ) -> Result<Completion> {
+        if !receipt.passed {
+            return Err(invalid("VALIDATION_FAILED"));
+        }
         let target = self.store.run_target(
             &self.access,
             run,
@@ -1363,13 +1486,7 @@ impl Finalizer for DataFinalizer {
             self.workspace,
             self.artifacts.clone(),
         )?;
-        let evidence = self.store.tx(&self.access, false, |s| {
-            Ok(s.evidence
-                .values()
-                .filter(|e| e.target_hash == target.hash())
-                .cloned()
-                .collect::<Vec<_>>())
-        })?;
+        let evidence = self.store.evidence(&self.access, &target)?;
         if !evidence.iter().any(|e| e.receipt == receipt) {
             return Err(Error::Conflict);
         }
@@ -1432,8 +1549,13 @@ impl DataStore {
         if bytes.len() <= inline_limit {
             return Ok(StoredOutput::Inline(value));
         }
-        let mut staged = self.stage(a, &bytes, DataClass::Intermediate, now)?;
-        staged.id = digest(&json!([a.target, operation, "output"]));
+        let staged = self.stage_named(
+            a,
+            &bytes,
+            DataClass::Intermediate,
+            now,
+            digest(&json!([a.target, operation, "output"])),
+        )?;
         let artifact = self.save(a, staged, now).await?;
         let preview = self.read_artifact(a, &artifact, 0, inline_limit).await?;
         Ok(StoredOutput::External { artifact, preview })
@@ -1481,5 +1603,143 @@ impl DataStore {
                 grant: Some(id),
             })
         })
+    }
+}
+
+/// Synchronous evidence boundary used by the synchronous Validator/Finalizer API.
+/// Implementations must compare current target and persisted evidence atomically
+/// when publishing the completion marker.
+pub trait EvidenceStore: Send + Sync {
+    fn run_target(
+        &self,
+        a: &Access,
+        run: &RunRecord,
+        value: Value,
+        workspace: bool,
+        artifacts: Vec<ArtifactRef>,
+    ) -> Result<Target>;
+    fn validate_sync(
+        &self,
+        a: &Access,
+        target: &Target,
+        validator: &impl TargetValidator,
+    ) -> Result<Evidence>;
+    fn evidence(&self, a: &Access, target: &Target) -> Result<Vec<Evidence>>;
+    fn finalize_sync(
+        &self,
+        a: &Access,
+        current: &Target,
+        evidence: &[Evidence],
+        required: &[ValidatorKey],
+    ) -> Result<String>;
+}
+impl EvidenceStore for DataStore {
+    fn run_target(
+        &self,
+        a: &Access,
+        run: &RunRecord,
+        value: Value,
+        workspace: bool,
+        artifacts: Vec<ArtifactRef>,
+    ) -> Result<Target> {
+        DataStore::run_target(self, a, run, value, workspace, artifacts)
+    }
+    fn validate_sync(
+        &self,
+        a: &Access,
+        target: &Target,
+        validator: &impl TargetValidator,
+    ) -> Result<Evidence> {
+        DataStore::validate_sync(self, a, target, validator)
+    }
+    fn evidence(&self, a: &Access, target: &Target) -> Result<Vec<Evidence>> {
+        self.tx(a, false, |s| {
+            Ok(s.evidence
+                .values()
+                .filter(|e| e.target_hash == target.hash())
+                .cloned()
+                .collect())
+        })
+    }
+    fn finalize_sync(
+        &self,
+        a: &Access,
+        current: &Target,
+        evidence: &[Evidence],
+        required: &[ValidatorKey],
+    ) -> Result<String> {
+        DataStore::finalize_sync(self, a, current, evidence, required)
+    }
+}
+/// Additional standard tool operations; adapters may implement these directly
+/// or use DataStore with a NamespaceBackend to reuse the reference algorithms.
+pub trait StandardToolStore: WorkspaceStore + ArtifactStore {
+    fn policy(&self) -> &StoragePolicy;
+    async fn exact_replace(
+        &self,
+        a: &Access,
+        expected: u64,
+        edits: Vec<ExactEdit>,
+    ) -> Result<WorkspaceSnapshot>;
+    async fn store_output(
+        &self,
+        a: &Access,
+        operation: &str,
+        value: Value,
+        inline_limit: usize,
+        now: u64,
+    ) -> Result<StoredOutput>;
+}
+impl StandardToolStore for DataStore {
+    fn policy(&self) -> &StoragePolicy {
+        DataStore::policy(self)
+    }
+    async fn exact_replace(
+        &self,
+        a: &Access,
+        expected: u64,
+        edits: Vec<ExactEdit>,
+    ) -> Result<WorkspaceSnapshot> {
+        DataStore::exact_replace(self, a, expected, edits).await
+    }
+    async fn store_output(
+        &self,
+        a: &Access,
+        operation: &str,
+        value: Value,
+        inline_limit: usize,
+        now: u64,
+    ) -> Result<StoredOutput> {
+        DataStore::store_output(self, a, operation, value, inline_limit, now).await
+    }
+}
+
+/// Context is a separate CAS boundary from workspace and artifact publication.
+pub trait ContextStore: Send + Sync {
+    async fn context(&self, access: &Access) -> Result<ContextState>;
+    async fn append_context(&self, access: &Access, item: ContextItem) -> Result<ContextState>;
+    async fn commit_compaction(
+        &self,
+        access: &Access,
+        base: &ContextState,
+        summary: &str,
+        complete: bool,
+    ) -> Result<ContextState>;
+}
+impl ContextStore for DataStore {
+    async fn context(&self, access: &Access) -> Result<ContextState> {
+        DataStore::context(self, access).await
+    }
+    async fn append_context(&self, access: &Access, item: ContextItem) -> Result<ContextState> {
+        DataStore::append_context(self, access, item).await
+    }
+    async fn commit_compaction(
+        &self,
+        access: &Access,
+        base: &ContextState,
+        summary: &str,
+        complete: bool,
+    ) -> Result<ContextState> {
+        DataStore::commit_compaction(self, access, base, summary, complete).await
     }
 }

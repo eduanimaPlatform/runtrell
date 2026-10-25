@@ -7,7 +7,8 @@ pub use api::*;
 mod driver;
 pub mod memory;
 pub use driver::Runtime;
-pub use driver::validate_schema;
+pub mod schema;
+pub use schema::{schema_diagnostics, validate_schema};
 pub mod data;
 pub use data::{
     ArtifactRef, ArtifactStore, FileVersion, Namespace, WorkspaceSnapshot, WorkspaceStore,
@@ -18,3 +19,5 @@ pub use execution::{ExecutionBackend, ExecutionLimits, ExecutionRef};
 
 pub mod budget;
 pub use budget::{AccountPolicy, ReservationPolicy, SchedulingPolicy};
+
+pub mod assembly;

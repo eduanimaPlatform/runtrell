@@ -30,7 +30,7 @@ Sessionの先行する非終端Runがある間は新規業務を機械的待機�
 
 2aのFinalizerは保存済み結果を確認する純粋な信頼済み拡張であり、終端は一つのstore commitで確定する。外部Artifact seal/owner finalizeを行う段階ではFinalizing intentを先に保存し、元ID照会を伴う操作として実装する。enumのFinalizingがあることを、Artifact確定の実装済み証拠にはしない。
 
-2bのdata schema 1は[workspace](workspace.md)・`data.rs`が正本。namespace状態の原子的commitにworkspace revision、file hash、artifact revision/保存状態、共有grant、検証evidence、completion ID、context revision/high-waterを保存する。Stagedは復元対象外、Savedのみ保存完了。localはnamespace別file lock＋rename/fsync、memoryはnamespace別mutex。保存済みArtifactとRun成功・業務反映は別状態。
+data schema 2は[workspace](workspace.md)・`data.rs`が正本。namespace状態の原子的commitにworkspace revision、file hash、artifact revision/保存状態、共有grant、検証evidence、completion ID、context revision/high-waterを保存する。Stagedは所有/期限付きで復元可能だが未公開、Savedのみ保存完了。未知/旧schemaは拒否する。localはnamespace別file lock＋rename/fsync、memoryはnamespace別mutex。保存済みArtifactとRun成功・業務反映は別状態。
 
 ## 2e：ExecutionLedger
 

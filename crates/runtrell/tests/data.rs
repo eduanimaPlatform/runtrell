@@ -277,7 +277,7 @@ fn exact_replace_all_refusals_and_atomic_batch() {
     });
 }
 #[test]
-fn local_reopen_and_uncommitted_stage_loss() {
+fn local_reopen_preserves_unpublished_staging() {
     drive(async {
         let temp = tempfile::tempdir().unwrap();
         let a = Access::owner(ns("r"));
@@ -295,6 +295,7 @@ fn local_reopen_and_uncommitted_stage_loss() {
         let s = DataStore::local(&temp.path().canonicalize().unwrap(), policy).unwrap();
         assert_eq!(s.snapshot(&a).await.unwrap().files.len(), 1);
         assert!(s.artifact(&a, &staged.id).await.is_err());
+        assert_eq!(s.staged(&a, &staged.id).unwrap().id, staged.id);
         assert_eq!(
             s.read_artifact(&a, &saved, 0, 10).await.unwrap().bytes,
             b"checkpoint"
@@ -669,6 +670,7 @@ impl TargetValidator for RejectRules {
     }
     fn check(&self, _: &Target) -> Result<Vec<Diagnostic>> {
         Ok(vec![Diagnostic {
+            schema_path: None,
             code: "MISSING_EVIDENCE".into(),
             severity: "error".into(),
             path: "decision.reason".into(),

@@ -157,8 +157,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 } else if data_scope {
                     (
-                        "data.rs / data/local.rs / file_tools.rs / driver.rs",
-                        "runtrell/tests/data.rs・testkit/tests/data_tools.rs。U05のcache/credential、A17の実Sandbox喪失、A26後半、DATA-06の運用/障害試験は残る。workspace.md参照",
+                        "data.rs / data/local.rs / file_tools.rs / driver.rs / schema.rs / assembly.rs",
+                        "runtrell/tests/{data,backend_contract,schema}.rs・testkit/tests/{data_tools,repair,assembly}.rs。U05のcache/credential、A17の実Sandbox喪失、A26後半、DATA-06の運用/障害試験は残る。workspace.md参照",
                     )
                 } else if id.starts_with("FORK") || id == "F01" || id == "F02" {
                     (

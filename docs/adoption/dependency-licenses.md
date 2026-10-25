@@ -4,7 +4,7 @@
 
 MIT。Copyright (c) 2024, Playgrounds Analytics Inc. 原文は`LICENSES/MIT-Rig.txt`。元root LICENSEと同一SHA-256: `42cf0f78132fe1de338cbff947bf5b9f7d2d8a377cb827c9df9e90b4b9499ef7`。新規・改変部分Apache-2.0と区別し、crate全体は`MIT AND Apache-2.0`。
 
-## 推移依存のlicense宣言集計
+## 初回抽出時の推移依存license宣言集計（現在のworkspace総数ではない）
 
 cargo metadata --locked --format-version 1のresolve graphを起点crateから巡回。runtimeはnormal/build、test集合はdevも含む。name/version別。全target候補とnativeのmetadataを分ける。manifestの宣言集計であり、全配布物の法律監査や他targetのbuild成立を示さない。
 
@@ -141,3 +141,41 @@ Tokio/HTTP/native transportは通常依存にない。tracingは原本の診断�
 ## 2dの直接依存追加
 
 2dではprocess supervisorのため`tokio 1.54.1`（MIT）を`runtrell`の通常依存へ追加する。既存lockfile内の版を使用し、HTTP/クラウドtransportは追加しない。新規lock entryは`signal-hook-registry 1.4.8`（MIT OR Apache-2.0、crate manifest確認）のみ。`rustix`へprocess featureを追加し、専用helperのsetrlimit/execに利用する。`libc 0.2.186`（MIT OR Apache-2.0）は既存の推移依存から直接依存へ追加し、新しいhelper process内だけで継承raw FDをcloseするために利用する。ライブラリ本体はunsafe禁止を維持する。上の旧「Tokioは通常依存にない」は初回抽出時の記録。
+
+
+## rt-3c Schema評価器
+
+`jsonschema = { version = "0.49", default-features = false }`、lockは0.49.9、MIT、MSRV 1.85。採用元の[0.49.9ドキュメント](https://docs.rs/jsonschema/0.49.9/jsonschema/)とキャッシュ済みCargo.toml/README/LICENSEを確認。公開の[保守元](https://github.com/Stranger6667/jsonschema)では後続版も公開されており、採用系列と最新版は区別する。HTTP/file resolver・TLSの既定featureを無効化し、追加依存はキャッシュからオフライン解決した。独自評価器の保守をやめ、共通の標準評価器へ委譲する。未知keyword/外部参照/別dialectを前処理で拒否する方針はRuntrell側が保守する。
+
+今回lockへ追加した依存のmanifest license宣言（全配布物の法律監査ではない）：
+
+| package | version | license宣言 |
+|---|---|---|
+| ahash | 0.8.12 | MIT OR Apache-2.0 |
+| aho-corasick | 1.1.5 | Unlicense OR MIT |
+| borrow-or-share | 0.2.4 | MIT-0 |
+| bytecount | 0.6.9 | Apache-2.0/MIT |
+| data-encoding | 2.11.1 | MIT |
+| email_address | 0.2.9 | MIT |
+| fancy-regex | 0.19.2 | MIT |
+| fluent-uri | 0.4.1 | MIT |
+| foldhash | 0.2.0 | Zlib |
+| fraction | 0.15.4 | MIT OR Apache-2.0 |
+| jsonschema | 0.49.9 | MIT |
+| jsonschema-regex | 0.49.9 | MIT |
+| jsonschema-value | 0.49.9 | MIT |
+| micromap | 0.3.0 | MIT |
+| num | 0.4.3 | MIT OR Apache-2.0 |
+| num-bigint | 0.4.8 | MIT OR Apache-2.0 |
+| num-cmp | 0.1.0 | MIT/Apache-2.0 |
+| num-complex | 0.4.6 | MIT OR Apache-2.0 |
+| num-rational | 0.4.2 | MIT OR Apache-2.0 |
+| outref | 0.5.2 | MIT |
+| referencing | 0.49.9 | MIT |
+| regex | 1.12.3 | MIT OR Apache-2.0 |
+| regex-automata | 0.4.18 | MIT OR Apache-2.0 |
+| strum | 0.28.0 | MIT |
+| strum_macros | 0.28.0 | MIT |
+| unicode-general-category | 1.1.0 | Apache-2.0 |
+| uuid-simd | 0.8.0 | MIT |
+| vsimd | 0.8.0 | MIT |

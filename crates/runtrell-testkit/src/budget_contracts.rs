@@ -370,6 +370,27 @@ pub async fn driver_policies<S: ControlStore>(s: std::sync::Arc<S>) {
             }
             ReservationPolicy::Wait { .. } => {
                 assert_eq!(r.state, RunState::Waiting("budget".into()));
+                // This suite uses default capacity. Every per-run slot must be
+                // available while waiting; idempotent reacquisition of the active
+                // key alone would not prove that its original slot was released.
+                let mut probes = Vec::new();
+                for index in 0..Capacity::default().run[&OperationKind::Run] {
+                    let key = format!("probe:{}:{}:{index}", c.run.tenant, c.run.id);
+                    s.acquire(SlotRequest {
+                        key: key.clone(),
+                        tenant: c.run.tenant.clone(),
+                        run: c.run.id.clone(),
+                        kind: OperationKind::Run,
+                    })
+                    .await
+                    .unwrap();
+                    probes.push(key);
+                }
+                for key in probes {
+                    s.release_slot(&key).await.unwrap();
+                }
+                assert_eq!(s.account(&a).await.unwrap().reserved, Amount::default());
+                assert!(s.list_operations(&h).await.unwrap().is_empty());
                 rt.clock.set(10);
                 assert!(matches!(
                     rt.drive(&c).await.unwrap().state,

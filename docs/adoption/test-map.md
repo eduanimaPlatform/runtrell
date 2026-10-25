@@ -395,7 +395,7 @@
 | agent/tests compaction atomicity | runtime::storage_barriers_* | 圧縮本体未実装。CP失敗・旧revisionで現行履歴を壊さない条件のみ |
 | Runner資源上限/Workspace越境 | 未着手（U08） | 次段階で新APIへ移植、検証済みに数えない |
 
-Rigの104 run unit/13 run doctestを含む既存試験は除外も弱体化もしない。2a driverはprotocol Doneを候補として扱い、信頼済みFinalizer保存を追加する。新APIのschema subsetはunsupported keywordを拒否し、protocolの存在確認を完全なschema検証と称しない。
+Rigの104 run unit/13 run doctestを含む既存試験は除外も弱体化もしない。2a driverはprotocol Doneを候補として扱い、信頼済みFinalizer保存を追加する。rt-3cでdriverのschema subsetを標準Draft 2020-12評価器へ置換。protocol内部の存在確認とは区別する。
 
 2aの追加安全試験は`fences.rs`に集約：Lookup後取消/失効、保存前I/O拒否、renew後の世代交代、結果保存失敗後の元operation照会、catalog/accountの変更拒否、検証〜確定間取消、単価不足、Session先行入力待機、再送証拠保存後の引継ぎ、3tenant巡回、部分usageの証拠保持、予約不能時の共有口座停止。
 
@@ -449,3 +449,13 @@ Rigの104 run unit/13 run doctestを含む既存試験は除外も弱体化も�
 | 保存・Runtime共通契約 | budget_contracts::driver_policies（Memory/Pg） | 既存assertionを維持し、品質枠2に対して実生成1で成功・精算できるケースを追加。未予約I/Oなし・不明予約保持・重複精算防止の既存試験も維持 |
 
 公開の7区分価格（reasoningとimage outputは非交差、cached imageは独立単価）を維持し、重複するcatalog/usage型は追加しない。純粋計算は新APIが存在しないコンパイル失敗をRedとして確認後に実装した。実provider/Brokerの接続試験や実価格の正しさはこの試験の対象外。
+
+
+## rt-3c：標準保存・Schema・組立・修正
+
+- `runtrell/tests/backend_contract.rs`: Memory・Local再open・外部fakeに同一のstaging/保存/証跡/確定/CAS/期限GC契約。各公開境界でclientを破棄し再開。外部fakeには各境界のcommit前停止、部分upload停止、commit後応答喪失を追加。実クラウドや電源断の試験ではない。
+- `runtrell/tests/schema.rs`: Draft 2020-12、文書内参照、数値制約、format、未知指定・外部参照・別draft拒否、instance/schema位置。独自subsetを標準評価器へ置換する意図した仕様拡張。既存assertionは弱めていない。
+- `testkit/tests/assembly.rs`: 異種Tool登録、全件構成診断、object順非依存digest、配列順保持、receipt全照合項目、Validator合成。
+- `testkit/tests/repair.rs`: 不合格候補・診断のcheckpoint、Worker交代、再検証、別operation予約/精算、修正中のtool再使用、入力diagnosticsのAgent返却、host回数/時間制限、修正不能、予算/期限、権限・保存・証跡エラーの非修正扱い。
+- `testkit::budget_contracts::driver_policies`: Memory/Pg共通でWait中のstore再操作、予約/operationが残らないことを追加。既存の全祖先原子性、重複精算、不明予約、認可、技術的下限/品質下限の試験を維持。
+- `local_reopen_preserves_unpublished_staging`: 旧試験の未公開stagingをread/finalizeできないassertionを維持し、stagingからの継続を追加。メモリ内だけだったstagingを永続化する意図した変更。

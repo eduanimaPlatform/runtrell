@@ -1,4 +1,4 @@
-# runtrell API（2a control schema 1 / 2b data schema 1）
+# runtrell API（2a control schema 1 / data schema 2）
 
 依存は host → `runtrell` → `runtrell-protocol`。fake host → `runtrell-testkit` → `runtrell`。新規コードはApache-2.0。crate名は実行機構、判断protocol、試験接続の責務を示す作業名で、registry名の取得を意味しない。protocolの型はruntime APIで再exportしない。
 
@@ -21,6 +21,14 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 エラーはConflict（digest/版/CAS不一致）、OwnershipLost、Closed、Deadline、BudgetAtLimit、ReservationDenied、UsageUnknown、PermissionDenied、Unsupported、Backpressure、QueueTimeout、NotFound、Invalid、Storage。Storageは成功応答を返さず、I/O前失敗は外部呼出し0、I/O後失敗は元operation照合で回復する。
 
 費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。実際の価格・品質値・provider形式変換はhostが供給する。詳細は[budget](budget.md)。
+
+## 任意の標準構成（rt-3c）
+
+`assembly::RegisteredTool`は異なるTool実装を同じVecへ登録する。`ValidationChain`はSchemaと版付きValidatorを合成し、各receiptのhash/根拠版/構成版/検証器版を照合する。`CheckedFinalizer`は確定器が返すIDの存在と候補/receiptの完全一致を検査する。`AssemblyConfig::diagnostics`は名前衝突、必須validator不足、能力不足、範囲外設定、Schema構成不正を全件返す。具体的な接続先・業務presetはhostが供給する。`configuration_digest`は入れ子のobject keyをソートし、配列順を保持する。集合の配列化はhostが先に正規化する。自分自身のdigestフィールドは入力へ含めない。
+
+`FileTool<S>`/`StoredOutputTool<T,S>`は`StandardToolStore`（WorkspaceStore + ArtifactStore）を、`DataValidator<V,S>`/`DataFinalizer<S>`は`EvidenceStore`を要求する。context圧縮は`ContextStore`を受け取る。既定型はDataStoreであり、外部adapterはtraitを直接実装するか、`NamespaceBackend`のopaque state読取/CASへ接続して共通アルゴリズムを再利用する。同期Validator/Finalizerに合わせた同期保存境界であり、hostは必要ならblocking executorへ配置する。任意の非同期DB clientを直接同期trait内でblock_onすることを推奨するものではない。
+
+`schema::compile_schema`/`schema_diagnostics`/`validate_schema`は同一評価器。SchemaValidatorはTargetValidatorとして保存証跡へ接続でき、ValidationChainは構造化出力に使える。未知keywordを検査する前処理は対応範囲の拒否専用で、インスタンスの検証はjsonschemaへ委譲する。Schema構成エラーとインスタンス不合格は区別し、診断はinstance pointer（path）・schema pointer（schema_path）・原因を保持する。
 
 <!-- generated-contracts -->
 ## Rust契約定義
@@ -137,7 +145,22 @@ pub trait Tool: Send + Sync {
     async fn invoke(&self, context: &ToolContext, input: Value) -> Result<ExternalResult>;
     async fn lookup(&self, context: &ToolContext, input: Value) -> Result<Lookup>;
 }
+/// Host supplies limits and business-specific diagnostic classification.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RepairPolicy {
+    pub max_repairs: Option<u64>,
+    pub max_elapsed: Option<u64>,
+}
 pub trait Validator: Send + Sync {
+    fn repair_policy(&self) -> RepairPolicy {
+        RepairPolicy::default()
+    }
+    fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
+        !diagnostics.is_empty()
+            && diagnostics
+                .iter()
+                .all(|d| d.severity == "error" && d.code == "SCHEMA_VALIDATION")
+    }
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt>;
 }
 pub trait Finalizer: Send + Sync {
