@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/committed.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The run's append-only history, and the one pure projection of its tool
 //! calls and results that the engine and a foreign host both stream.
 
 use std::sync::Arc;
 
-use rig_core::completion::Message;
-use rig_core::message::{AssistantContent, ToolCall, ToolResult, UserContent};
+use crate::completion::Message;
+use crate::message::{AssistantContent, ToolCall, ToolResult, UserContent};
 use serde::{Deserialize, Serialize};
 
 /// The run's history: the prompt and every message a turn commits after it.
@@ -62,7 +65,7 @@ pub enum CommittedItem<'a> {
 /// call, and an output reprompt commits the call with its feedback result.
 ///
 /// ```
-/// use rig_agent::run::{AgentRun, CommittedItem, project};
+/// use runtrell_protocol::run::{AgentRun, CommittedItem, project};
 /// let run = AgentRun::new("hi");
 /// let cursor = run.projection_start(); // then drive one protocol call
 /// for item in project(&run.messages()[cursor..]) {

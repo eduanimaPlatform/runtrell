@@ -1,6 +1,9 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/batch.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The tool calls of one assistant turn and the answers fed for them.
 
-use rig_core::message::{Message, ToolCall, UserContent};
+use crate::message::{Message, ToolCall, UserContent};
 use serde::{Deserialize, Serialize};
 
 use super::calls::{ExecCall, MalformedCall, PendingToolCall};
@@ -71,13 +74,13 @@ impl ToolBatch {
     }
 
     /// The results so far in call order, every unanswered call closed by
-    /// [`close_pending`](rig_core::conversation::pairing::close_pending).
+    /// [`close_pending`](crate::conversation::pairing::close_pending).
     pub(super) fn interrupt(&self) -> Message {
         let open = self.slots.iter().filter_map(|slot| match slot {
             ToolSlot::Execute(tool_call) | ToolSlot::Malformed(tool_call) => Some(tool_call),
             ToolSlot::Answered(_) => None,
         });
-        let mut closed = match rig_core::conversation::pairing::close_pending(open) {
+        let mut closed = match crate::conversation::pairing::close_pending(open) {
             Message::User { content } => content.into_iter(),
             _ => Vec::new().into_iter(),
         };

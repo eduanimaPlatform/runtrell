@@ -1,0 +1,11 @@
+[package]
+name = "runtrell-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "Credential-free adapters for runtrell contract tests"
+
+[dependencies]
+runtrell = { path = "../runtrell", version = "0.1.0" }
+serde_json = "1"

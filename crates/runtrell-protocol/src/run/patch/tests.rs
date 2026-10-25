@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/patch/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
 
 /// A patch a host may cache in serializable state round-trips.

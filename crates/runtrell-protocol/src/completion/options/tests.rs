@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/options/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
 use serde_json::json;
 
@@ -404,5 +407,35 @@ fn a_wire_that_breaks_the_mapping_contract_names_the_option() {
             "fake answered `Mapping::Nothing` for the option `reasoning`, which the request sets"
         ),
         "{nothing}"
+    );
+}
+
+#[test]
+fn host_rewrites_are_explicit_json_edits_after_all_layers() {
+    let mut request = request(GenerationOptions::new().seed(3));
+    request.additional_params = Some(json!({"sampling":{"seed":9}, "remove_me": true}));
+    let body = request_params(
+        &Fake(answers),
+        &request,
+        base,
+        RawAt::Top,
+        &[
+            Rewrite::Set("sampling".into(), json!({"seed":12})),
+            Rewrite::Remove("remove_me".into()),
+            Rewrite::MoveLast("tools"),
+        ],
+    )
+    .expect("host rewrite");
+    assert_eq!(body.get("sampling"), Some(&json!({"seed":12})));
+    assert_eq!(body.get("remove_me"), None);
+    assert_eq!(
+        body.deserialize::<serde_json::Value>()
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .next_back()
+            .map(String::as_str),
+        Some("tools")
     );
 }

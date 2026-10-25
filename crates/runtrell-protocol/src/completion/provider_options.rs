@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/provider_options.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Typed per-provider request options and reply extras. A provider's
 //! [`ProviderExtension`] marker names its key, its serialize-only `Options`
 //! and its `Extras` view of a reply. [`ProviderOptions`] holds entries for
@@ -17,12 +20,25 @@
 //! not serialize fail the request's encode.
 //!
 //! ```
-//! use rig_core::completion::{CompletionRequest, ProviderOptions};
-//! use rig_core::providers::openrouter::extension::{OpenRouterExt, OpenRouterOptions};
-//!
-//! let request =
-//!     CompletionRequest::new("hi").provider_option(OpenRouterOptions::new().session_id("s-1"));
-//! assert!(request.provider_options.contains::<OpenRouterExt>());
+//! use runtrell_protocol::completion::{ProviderOptions, ProviderExtension, ExtensionOptions, ReplyExtras};
+//! use runtrell_protocol::message::Api;
+//! use serde::{Serialize, Deserialize};
+//! struct Host;
+//! #[derive(Clone, Debug, Serialize)]
+//! struct Options { #[serde(rename = "*")] shared: serde_json::Value }
+//! impl ExtensionOptions for Options { type Ext = Host; }
+//! #[derive(Deserialize)]
+//! struct Extras { receipt: String }
+//! impl ReplyExtras for Extras {
+//!     fn from_reply(_: &Api, raw: &serde_json::Value) -> Result<Self, serde_json::Error> { serde_json::from_value(raw.clone()) }
+//! }
+//! impl ProviderExtension for Host {
+//!     const PROVIDER: &'static str = "host";
+//!     type Options = Options;
+//!     type Extras = Extras;
+//! }
+//! let options = ProviderOptions::new().set(Options { shared: serde_json::json!({"session_id":"s-1"}) });
+//! assert!(options.contains::<Host>());
 //! ```
 
 use std::collections::BTreeMap;
@@ -102,7 +118,7 @@ pub trait ReplyExtras: Sized {
 /// # Errors
 ///
 /// When the value is present but is not a `T`.
-pub(crate) fn reply_field<T: serde::de::DeserializeOwned>(
+pub fn reply_field<T: serde::de::DeserializeOwned>(
     raw: &Value,
     pointer: &str,
 ) -> Result<Option<T>, serde_json::Error> {
@@ -247,11 +263,25 @@ impl ProviderOptions {
     /// [`Self::with::<P>`](Self::with) instead, or its wire never reads them.
     ///
     /// ```
-    /// use rig_core::completion::ProviderOptions;
-    /// use rig_core::providers::openrouter::extension::{OpenRouterExt, OpenRouterOptions};
-    ///
-    /// let options = ProviderOptions::new().set(OpenRouterOptions::new().session_id("s-1"));
-    /// assert!(options.contains::<OpenRouterExt>());
+    /// use runtrell_protocol::completion::{ProviderOptions, ProviderExtension, ExtensionOptions, ReplyExtras};
+    /// use runtrell_protocol::message::Api;
+    /// use serde::{Serialize, Deserialize};
+    /// struct Host;
+    /// #[derive(Clone, Debug, Serialize)]
+    /// struct Options { #[serde(rename = "*")] shared: serde_json::Value }
+    /// impl ExtensionOptions for Options { type Ext = Host; }
+    /// #[derive(Deserialize)]
+    /// struct Extras { receipt: String }
+    /// impl ReplyExtras for Extras {
+    ///     fn from_reply(_: &Api, raw: &serde_json::Value) -> Result<Self, serde_json::Error> { serde_json::from_value(raw.clone()) }
+    /// }
+    /// impl ProviderExtension for Host {
+    ///     const PROVIDER: &'static str = "host";
+    ///     type Options = Options;
+    ///     type Extras = Extras;
+    /// }
+    /// let options = ProviderOptions::new().set(Options { shared: serde_json::json!({"session_id":"s-1"}) });
+    /// assert!(options.contains::<Host>());
     /// ```
     pub fn set<O: ExtensionOptions>(mut self, options: O) -> Self {
         let provider = <O::Ext as ProviderExtension>::PROVIDER;

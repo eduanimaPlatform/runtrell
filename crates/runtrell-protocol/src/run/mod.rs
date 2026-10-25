@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/mod.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Serializable, sans-I/O state machine for model turns, tool recovery, and history.
 //!
 //! Drivers act on [`AgentRunStep`] and supply responses or tool results before
@@ -5,10 +8,10 @@
 //! provide those services and lifecycle policy.
 //!
 //! ```
-//! use rig_agent::run::{AgentRun, AgentRunStep};
-//! let mut run = AgentRun::new("What is 2+2?").max_turns(3);
+//! use runtrell_protocol::run::{AgentRun, AgentRunStep};
+//! let mut run = AgentRun::new("What is 2+2?");
 //! assert!(matches!(run.next_step()?, AgentRunStep::CallModel { turn: 1, .. }));
-//! # Ok::<(), rig_agent::run::PromptError>(())
+//! # Ok::<(), runtrell_protocol::run::PromptError>(())
 //! ```
 
 mod calls;
@@ -35,29 +38,29 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use rig_core::completion::{CompletionResponse, FinishReason, ToolDefinition};
-use rig_core::error::ProviderError;
+use crate::completion::{CompletionResponse, FinishReason, ToolDefinition};
+use crate::error::ProviderError;
 
-use rig_core::conversation::Aside;
-use rig_core::conversation::pairing::{PairingError, validate};
-use rig_core::message::{AssistantContent, AssistantMessage, ToolCall, ToolName, UserContent};
-use rig_core::tool::feedback::{
+use crate::conversation::Aside;
+use crate::conversation::pairing::{PairingError, validate};
+use crate::message::{AssistantContent, AssistantMessage, ToolCall, ToolName, UserContent};
+use crate::tool::feedback::{
     invalid_arguments_feedback, not_executed, tool_result_message, tool_result_output,
 };
 
 use calls::AnswerKind;
 
-use rig_core::completion::{Message, ResponseIdentity, Usage};
+use crate::completion::{Message, ResponseIdentity, Usage};
 pub mod policy;
 pub mod response;
 pub mod streamed;
 
+use crate::completion::message::turn_failure;
+use crate::structured_output;
 pub use policy::{
     InvalidToolCallAction, InvalidToolCallContext, InvalidToolCallReason, RetryRequest, TurnPolicy,
 };
 pub use response::{CompletionCall, PromptError, PromptResponse};
-use rig_core::completion::message::turn_failure;
-use rig_core::structured_output;
 use transcript::{assistant_message, assistant_turn, choice_text, invalid_tool_retry_user_message};
 
 pub use streamed::{
@@ -94,8 +97,8 @@ pub enum AgentRunStep {
         /// The current assistant turn's unanswered tool calls, in emission order.
         calls: Vec<PendingToolCall>,
     },
-    /// The run is complete.
-    Done(PromptResponse),
+    /// Judgment-level termination candidate; the host Finalizer decides completion.
+    Done(Box<PromptResponse>),
 }
 
 /// A completed model turn fed back to [`AgentRun::model_response`].
@@ -282,7 +285,8 @@ enum RunState {
     /// process re-obtains the unanswered calls from [`AgentRun::next_step`].
     ExecutingTools(ToolBatch, TurnPolicy),
     /// Terminal: the run completed successfully.
-    Done(PromptResponse),
+    /// Judgment-level termination candidate; the host Finalizer decides completion.
+    Done(Box<PromptResponse>),
     /// Terminal: the run returned an error.
     Failed,
 }
@@ -305,7 +309,6 @@ pub struct AgentRun {
     /// The envelope format ([`RUN_FORMAT`]).
     #[serde(deserialize_with = "run_format")]
     format: u32,
-    max_turns: usize,
     max_invalid_tool_call_retries: usize,
     /// See [`RunSpec::max_consecutive_malformed_tool_calls`].
     max_consecutive_malformed_tool_calls: Option<usize>,
@@ -340,7 +343,7 @@ pub struct AgentRun {
     /// error still counts). Persisted so a resumed run's model-selection
     /// hook sees the model the run last asked, as a fresh run's would,
     /// rather than a run that has asked none.
-    previous_model: Option<rig_core::completion::ModelRef>,
+    previous_model: Option<crate::completion::ModelRef>,
     /// The tool definitions the driver advertised to the model for a turn,
     /// recorded with [`AgentRun::advertise_tools`]. Protocol data, so a second
     /// driver (or a resumed run) can re-pair tool calls with what was offered.
@@ -353,10 +356,10 @@ pub struct AgentRun {
 }
 
 /// The [`AgentRun`] envelope format this crate writes and reads.
-pub const RUN_FORMAT: u32 = 5;
+pub const RUN_FORMAT: u32 = 1;
 
 /// Deserialize the envelope's `format`, refusing any other than
-/// [`RUN_FORMAT`] by name so a run persisted by another rig is never loaded
+/// [`RUN_FORMAT`] by name so a run persisted by another protocol version is never loaded
 /// with defaults filled in.
 fn run_format<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     let format = u32::deserialize(deserializer)?;
@@ -364,7 +367,7 @@ fn run_format<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, 
         Ok(format)
     } else {
         Err(serde::de::Error::custom(format!(
-            "resume refused: the run is format {format}, this rig reads format {RUN_FORMAT}"
+            "resume refused: the run is format {format}, this runtrell protocol reads format {RUN_FORMAT}"
         )))
     }
 }
@@ -393,7 +396,6 @@ impl AgentRun {
     pub fn new(prompt: impl Into<Message>) -> Self {
         Self {
             format: RUN_FORMAT,
-            max_turns: 1,
             max_invalid_tool_call_retries: 0,
             max_consecutive_malformed_tool_calls: None,
             unhandled_invalid_tool_call: UnhandledInvalidToolCall::Fail,
@@ -433,7 +435,7 @@ impl AgentRun {
     /// [`initial_prompt`](Self::initial_prompt) is `Some`; once the first
     /// [`AgentRunStep::CallModel`] has been emitted the prompt is committed
     /// and rewriting returns [`PromptError::Cancelled`].
-    pub(crate) fn rewrite_initial_prompt(
+    pub fn rewrite_initial_prompt(
         &mut self,
         prompt: impl Into<Message>,
     ) -> Result<(), PromptError> {
@@ -491,19 +493,10 @@ impl AgentRun {
         self
     }
 
-    /// Set the total model-call budget, including the initial call and every
-    /// retry or continuation. A budget of zero emits no model calls. Exceeding
-    /// the budget makes [`AgentRun::next_step`] return
-    /// [`PromptError::MaxTurns`].
-    pub fn max_turns(mut self, max_turns: usize) -> Self {
-        self.max_turns = max_turns;
-        self
-    }
-
     /// Set the output schema and retry budget for missing output-tool calls,
     /// output-tool arguments that are not a JSON object, or required fields.
     /// Validation checks only top-level required field presence; exhausting
-    /// either the output or model-call budget finalizes best-effort, except
+    /// the output repair budget finalizes best-effort, except
     /// that arguments that are not a JSON object fail the run.
     pub fn with_output_validation(
         mut self,
@@ -522,11 +515,9 @@ impl AgentRun {
         self.chat_history.as_deref().unwrap_or_default()
     }
 
-    /// Whether the run may re-prompt for valid Tool-mode output: both the
-    /// output-retry budget and the total model-call budget must remain.
-    /// Otherwise, finalize best-effort rather than surface a max-turns error.
+    /// Whether the configured output repair retry budget remains.
     fn can_reprompt_for_output(&self) -> bool {
-        self.output_retries < self.max_output_retries && self.current_turn < self.max_turns
+        self.output_retries < self.max_output_retries
     }
 
     /// Roll the run back to re-prompt for valid output. The caller must
@@ -540,8 +531,7 @@ impl AgentRun {
     }
 
     /// Set the retry budget for [`InvalidToolCallAction::Retry`]
-    /// resolutions. Invalid tool-call retries also consume the total model-call
-    /// budget.
+    /// resolutions. Every accepted reply remains in usage accounting.
     pub fn max_invalid_tool_call_retries(mut self, retries: usize) -> Self {
         self.max_invalid_tool_call_retries = retries;
         self
@@ -595,7 +585,7 @@ impl AgentRun {
     }
 
     /// The policy for an invalid tool call no hook resolves.
-    pub(crate) fn unhandled_invalid_tool_call(&self) -> UnhandledInvalidToolCall {
+    pub fn unhandled_invalid_tool_call(&self) -> UnhandledInvalidToolCall {
         self.unhandled_invalid_tool_call
     }
 
@@ -610,13 +600,13 @@ impl AgentRun {
     }
 
     /// Model of the preceding issued attempt, as recorded by the driver.
-    pub fn previous_model(&self) -> Option<&rig_core::completion::ModelRef> {
+    pub fn previous_model(&self) -> Option<&crate::completion::ModelRef> {
         self.previous_model.as_ref()
     }
 
     /// Record the model an attempt is about to be issued to; the driver
     /// calls this immediately before the model turn is driven.
-    pub fn set_previous_model(&mut self, model: rig_core::completion::ModelRef) {
+    pub fn set_previous_model(&mut self, model: crate::completion::ModelRef) {
         self.previous_model = Some(model);
     }
 
@@ -689,8 +679,7 @@ impl AgentRun {
     /// preparation. [`RetryRequest::Feedback`] records the rejected response
     /// followed by corrective user feedback. Canonical empty assistant turns
     /// are omitted from history, matching normal turn advancement. Both modes
-    /// preserve completion-call and usage accounting, and the next call consumes
-    /// the existing total model-call budget.
+    /// preserve completion-call and usage accounting.
     ///
     /// Tool-bearing turns cannot be retried through this operation because
     /// preserving them without matching tool results would create invalid
@@ -729,7 +718,7 @@ impl AgentRun {
     /// The full conversation: input history followed by [`Self::messages`],
     /// with a tool batch the host has not finished answering closed: its
     /// results so far, then the other calls closed by
-    /// [`close_pending`](rig_core::conversation::pairing::close_pending) (a pre-resolved
+    /// [`close_pending`](crate::conversation::pairing::close_pending) (a pre-resolved
     /// result stands), so it resumes as a canonical transcript.
     pub fn full_history(&self) -> Vec<Message> {
         self.owned_history(self.closure())
@@ -772,11 +761,11 @@ impl AgentRun {
     }
 
     /// [`Self::full_history`] closed for cancellation by
-    /// [`repair`](rig_core::conversation::pairing::repair): mid tool batch,
+    /// [`repair`](crate::conversation::pairing::repair): mid tool batch,
     /// the results so far follow it with the rest closed, and every call
     /// still unanswered in the unchecked input history is closed as well.
     pub fn canonical_history(&self) -> Vec<Message> {
-        rig_core::conversation::pairing::repair(self.full_history()).messages
+        crate::conversation::pairing::repair(self.full_history()).messages
     }
 
     /// Build the cancellation error a driver should return when one of its
@@ -840,12 +829,11 @@ impl AgentRun {
     /// drains) the previous model call or stream, so nothing of it reaches
     /// [`Self::model_response`], [`Self::record_streamed_completion_call`] or
     /// [`Self::streamed_turn`]. Re-issues are not budgeted: they consume no
-    /// turn of [`Self::max_turns`], and an attempt that never reached
+    /// accepted model turn, and an attempt that never reached
     /// `model_response` or `record_streamed_completion_call` is not in
     /// [`Self::usage`]. A driver that re-issues in a loop bounds it itself.
     ///
     /// # Errors
-    /// - [`PromptError::MaxTurns`] when the total model-call budget is exhausted.
     /// - [`PromptError::Cancelled`] when the machine is driven out of
     ///   protocol (for example, calling this while an invalid tool-call
     ///   resolution is pending).
@@ -855,15 +843,6 @@ impl AgentRun {
             // attempt stays recorded and billed if it was.
             state @ (RunState::PreparingRequest { .. } | RunState::AwaitingModel { .. }) => {
                 if let RunState::PreparingRequest { .. } = state {
-                    if self.current_turn >= self.max_turns
-                        && let Some(prompt) = self.history.last()
-                    {
-                        return Err(PromptError::MaxTurns {
-                            max_turns: self.max_turns,
-                            chat_history: self.full_history(),
-                            prompt: Message::clone(prompt),
-                        });
-                    }
                     self.current_turn += 1;
                 }
                 let step = self.call_model_step()?;
@@ -1112,8 +1091,8 @@ impl AgentRun {
             )
             .with_completion_calls(self.completion_calls.clone())
             .with_output_tool_calls(output_tool_calls);
-        self.state = RunState::Done(response.clone());
-        AgentRunStep::Done(response)
+        self.state = RunState::Done(Box::new(response.clone()));
+        AgentRunStep::Done(Box::new(response))
     }
 
     /// Park an accepted model turn in [`RunState::AwaitingAdvance`]. Both the
@@ -1245,8 +1224,7 @@ impl AgentRun {
     /// - [`InvalidToolCallAction::Fail`] fails the run with
     ///   [`PromptError::UnknownToolCall`].
     /// - [`InvalidToolCallAction::Retry`] rolls the turn back with
-    ///   corrective feedback while budget remains, consuming the total
-    ///   model-call budget.
+    ///   corrective feedback while its repair retry budget remains.
     /// - [`InvalidToolCallAction::Repair`] renames the tool call; the
     ///   repaired name is revalidated against the allowed tools.
     /// - [`InvalidToolCallAction::Stop`] cancels the run with
@@ -1728,7 +1706,6 @@ impl AgentRun {
         history: Option<Vec<Arc<Message>>>,
     ) -> Self {
         let mut run = AgentRun::new(prompt)
-            .max_turns(spec.effective_max_turns())
             .max_invalid_tool_call_retries(spec.max_invalid_tool_call_retries)
             .with_unhandled_invalid_tool_call(spec.unhandled_invalid_tool_call)
             .with_output_validation(
@@ -1793,7 +1770,7 @@ fn malformed_answer(
         None => invalid_arguments_feedback(name.as_str(), raw),
         Some(InvalidToolCallAction::Retry { feedback }) => feedback,
         Some(InvalidToolCallAction::Skip { reason }) => {
-            let skipped = rig_core::tool::ToolResult::skipped(reason);
+            let skipped = crate::tool::ToolResult::skipped(reason);
             return Ok(tool_result_output(id, name, &skipped));
         }
         Some(InvalidToolCallAction::Stop { reason }) => return Err(Ok(reason)),

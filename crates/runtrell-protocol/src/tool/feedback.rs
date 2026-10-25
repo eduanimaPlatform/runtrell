@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/tool/feedback.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! What the model reads about its tool calls: a tool's result shaped as a
 //! tool result, the error result of a call that never ran, what a call
 //! that did not finish says ([`not_finished`]), and the feedback for
 //! arguments that do not fit a tool.
 //!
 //! ```
-//! use rig_core::tool::feedback::invalid_arguments_feedback;
+//! use runtrell_protocol::tool::feedback::invalid_arguments_feedback;
 //!
 //! assert!(invalid_arguments_feedback("add", "[1]").contains("not a JSON object"));
 //! ```
@@ -189,8 +192,8 @@ pub fn arguments_refusal(parameters: &serde_json::Value, call: &ToolCall) -> Opt
 /// is, without a final period.
 ///
 /// ```
-/// use rig_core::tool::feedback::not_finished;
-/// use rig_core::tool::{Scope, Touches};
+/// use runtrell_protocol::tool::feedback::not_finished;
+/// use runtrell_protocol::tool::{Scope, Touches};
 ///
 /// let reads = Touches::Reads(Scope::Anything);
 /// let why = "the user stopped the turn";

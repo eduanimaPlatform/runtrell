@@ -1,0 +1,21 @@
+# 共有予約・並列制御
+
+Run/Model/Tool/Sandbox/ChildRunごとに全体・tenant・Run枠を設定する。起動中・停止確認待ち・結果不明もslotを占有する。pool/管理余裕も同じ共有枠へ予約する。2aは共有MemoryStoreのlock内で予約し、processローカルsemaphoreを全体制御の正本にしない。複数processの上限保証は次段階の共有DB adapterで検証する。
+
+累積予算はaccountの親参照で全体→tenant→業務依頼/親子孫→Run→operationを表す。start時にtenant権限を検査し、全祖先を同じtransactionで予約/精算する。瞬間slotと累積Amount(tokens,micro_usd)は別台帳。unknown予約は解放しない。input/output総量を加算し、cached/reasoningは内数。価格の未設定、未計測、予約不能、実績がいずれか上限以上なら新規課金と確定を拒否する。
+
+ModelLimitsはcontext/max_output、入力上界と区分単価を持つ。出力cap=min(物理max, context余裕, token残-input, 費用残からのcap)。費用はu128で積算・切上げしu64範囲を検査する。単価はhost設定snapshotを固定し、自動価格取得はしない。50/80/95%は各軸の到達をaccountに保存、次model requestに同じtransactionでSystemNoteを追加する。複数閾値を飛び越えたら最高閾値を通知する。再開/別Runで重複配信しない。
+
+queueは全体上限・tenant上限、enqueue時刻/待機deadline/優先度を保存し、満杯はBackpressure。tenant round-robinを優先し、tenant内は低遅延を先にするが連続優先処理数を制限し待機可能を飢餓にしない。期限切れはQueueTimeoutで除去、取消は除去。queue・slot獲得は共有store操作。slot不足でI/Oを始めず、呼出し元へ機械的Waitingを返す。slot lease切れだけで外部処理が止まったとは扱わず、照合確認前に再割当しない。
+
+障害retryはpolicyで最大attempt数、backoff、累積待機時間を設定し、provider rate limitを尊重する。Runのturn/tool回数の既定上限は置かない。hostの既定deadlineも設定しない。非同期jobはPendingを返しworker占有を解く。厳密なCPU/RAM/停止保証が必要なnative toolは適合ExecutionBackendへ配置する。
+
+## 参照adapterの配置
+
+MemoryStoreのmutexは短いtransactionだけを保護し、モデル/toolのawait中には保持しない。独立したRunのI/O全体をglobalに直列化しない。実DB adapterではaccount祖先の安定したlock順、Run/operation CAS、共有slotのunique制約を実装し、複数processから試験する。
+
+Run受付時も有限queue容量を検査する。Scheduler::dequeueがtenantの巡回と優先度を決め、host workerが返されたRunをclaimする。claimは所有権取得の低水準APIでもあり、復旧workerは既知Runを直接再取得できる。tenantの巡回は3tenant以上でも同じ2tenantを交互に選び続けない。operation枠はintentと同時に獲得し、不明結果・外部実行継続中は精算/停止照合前に解放しない。子Runの枠も子の終端確認まで保持する。
+
+Clockの時刻・deadline・timeoutは同じ単位のUTC Unix millisecondとしてhostが実装する。fake clockは0起点の仮想時刻である。leaseの延長、jobの照会、retry待機はRoot Run期限や共有予算を新しくしない。Clock::wait_untilによりI/O待機を打ち切っても、外部停止とは扱わない。2dの[ExecutionBackend](execution.md)は対応能力を照会し、非対応の厳密なCPU/RAM/停止要件を拒否する。Future timeoutは実停止のreceiptではない。
+
+2bのファイルtoolはRun内で既定直列。descriptor.conflict_scopeはnamespace、operation.scopeは提示descriptor全体のdigestを固定し、復旧時も実装版/account/schema/認可scopeを照合する。ファイルの競合はnamespace revisionとfile revision CASで拒否する。memoryのmap lockはnamespaceの検索だけ、localのroot gateはnamespace directoryを開くまでで、実データI/O中はnamespace別lockだけを保持する。並行Run全体のglobal I/O lockは置かない。

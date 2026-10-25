@@ -1,23 +1,26 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/prepare.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Pure request preparation from run settings, model capabilities, history, tools,
 //! and per-turn overrides. Retrieval and model execution remain driver responsibilities.
 //!
 //! ```
-//! use rig_agent::run::{prepare::prepare_request, spec::RunSpec};
+//! use runtrell_protocol::run::{prepare::prepare_request, spec::RunSpec};
 //! let request = prepare_request(&RunSpec::new(), &Default::default(), &[], vec![], None, None)?;
 //! assert!(request.tools.is_empty());
-//! # Ok::<(), rig_agent::run::prepare::PrepareError>(())
+//! # Ok::<(), runtrell_protocol::run::prepare::PrepareError>(())
 //! ```
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use rig_core::completion::{
+use crate::completion::{
     CompletionRequest, Document, GenerationOptions, Message, ProviderCapabilities, ProviderOptions,
     ToolDefinition,
 };
-use rig_core::error::ProviderError;
-use rig_core::message::ToolName;
-use rig_core::structured_output::{
+use crate::error::ProviderError;
+use crate::message::ToolName;
+use crate::structured_output::{
     AUGMENTATION_SEPARATOR, OUTPUT_TOOL_DESCRIPTION, output_tool_augmentation,
     output_tool_callable, output_tool_name, prompted_augmentation,
 };
@@ -76,7 +79,7 @@ pub struct PreparedRequest {
     pub provider_options: ProviderOptions,
     /// The provider-native structured-output constraint, set only when the
     /// resolved mode is [`OutputMode::Native`].
-    pub output_schema: Option<rig_core::schemars::Schema>,
+    pub output_schema: Option<crate::schemars::Schema>,
     /// The mode this turn actually runs in (never [`OutputMode::Auto`]).
     pub output_mode: OutputMode,
     /// The turn's tool policy: executable tools, effective tool choice
@@ -153,7 +156,7 @@ pub fn prepare_request(
         request_patch.and_then(|o| o.additional_params.as_ref()),
     ) {
         (Some(base), Some(patch)) if base.is_object() && patch.is_object() => {
-            Some(rig_core::json_utils::merge(base.clone(), patch.clone()))
+            Some(crate::json_utils::merge(base.clone(), patch.clone()))
         }
         (base, patch) => patch.or(base).cloned(),
     };
@@ -243,9 +246,7 @@ pub fn prepare_request(
             }
             OutputMode::Tool => None,
             OutputMode::Prompted => output_schema.map(|schema| {
-                prompted_augmentation(&rig_core::json_utils::to_canonical_string(
-                    schema.as_value(),
-                ))
+                prompted_augmentation(&crate::json_utils::to_canonical_string(schema.as_value()))
             }),
             OutputMode::Native | OutputMode::Auto => None,
         };

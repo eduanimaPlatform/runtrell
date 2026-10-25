@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/message.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use crate::error::ProviderError;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, str::FromStr};
@@ -451,7 +454,7 @@ impl ToolResultContent {
     /// is not `T`'s JSON, is an error. The content itself is unchanged.
     ///
     /// ```
-    /// use rig_core::message::ToolResultContent;
+    /// use runtrell_protocol::message::ToolResultContent;
     ///
     /// let text = ToolResultContent::text(r#"{"count": 3}"#);
     /// let json = ToolResultContent::Json { value: serde_json::json!({"count": 3}) };
@@ -537,7 +540,7 @@ impl ToolCall {
 /// every wire receives an object.
 ///
 /// ```
-/// use rig_core::message::{ToolFunction, ToolName};
+/// use runtrell_protocol::message::{ToolFunction, ToolName};
 ///
 /// let name = ToolName::new("search")?;
 /// let call = ToolFunction::parse(name.clone(), r#"{"q": "ab"#);
@@ -547,7 +550,7 @@ impl ToolCall {
 /// let call = ToolFunction::new(name, serde_json::json!("{\"q\":1}"));
 /// assert_eq!(call.arguments["q"], 1);
 /// assert!(call.invalid_arguments.is_none());
-/// # Ok::<(), rig_core::message::EmptyToolName>(())
+/// # Ok::<(), runtrell_protocol::message::EmptyToolName>(())
 /// ```
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct ToolFunction {
@@ -904,7 +907,7 @@ impl ImageMediaType {
     /// reads. `None` for anything else.
     ///
     /// ```
-    /// use rig_core::message::ImageMediaType;
+    /// use runtrell_protocol::message::ImageMediaType;
     ///
     /// assert_eq!(ImageMediaType::sniff(b"GIF89a..."), Some(ImageMediaType::GIF));
     /// assert_eq!(ImageMediaType::sniff(b"plain text"), None);
@@ -981,7 +984,7 @@ impl Message {
     /// model's message, still asks for tool calls, or has no text.
     ///
     /// ```
-    /// use rig_core::message::Message;
+    /// use runtrell_protocol::message::Message;
     ///
     /// assert_eq!(Message::assistant(" Done. ").final_answer().as_deref(), Some("Done."));
     /// assert_eq!(Message::user("Done.").final_answer(), None);

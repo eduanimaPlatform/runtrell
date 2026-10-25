@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/tool/footprint/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use std::path::PathBuf;
 
 use super::{Scope, Touches};
@@ -69,52 +72,6 @@ fn reads_only_and_the_default_from_annotations() {
     );
 }
 
-/// A tool says what each call touches from its arguments, and its handler
-/// says it through erasure; arguments that do not parse say nothing.
-#[test]
-fn a_tool_handler_gives_each_call_its_footprint() {
-    use crate::effect::EffectKind;
-    use crate::serve::{ErasedHandler, adapters::ToolAdapter};
-    use crate::tool::{Tool, ToolContext};
-
-    struct Open;
-
-    impl Tool for Open {
-        const NAME: &'static str = "open";
-        type Args = PathBuf;
-        type Output = String;
-        type Error = std::convert::Infallible;
-
-        fn description(&self) -> String {
-            "Opens a file.".to_owned()
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "string" })
-        }
-
-        fn footprint(&self, path: &PathBuf) -> Touches {
-            Touches::Reads(Scope::Paths(vec![path.clone()]))
-        }
-
-        async fn call(&self, _: &mut ToolContext, _: PathBuf) -> Result<String, Self::Error> {
-            Ok(String::new())
-        }
-    }
-
-    let handler = ErasedHandler::new(ToolAdapter::new(Open));
-    let call = |name: &str, args: &str| EffectKind::ToolCall {
-        name: name.to_owned(),
-        args: args.to_owned(),
-    };
-    assert_eq!(
-        handler.footprint(&call("open", "\"/w/a.rs\"")),
-        Some(Touches::Reads(paths(&["/w/a.rs"])))
-    );
-    assert_eq!(handler.footprint(&call("open", "{")), None);
-    assert_eq!(handler.footprint(&call("other", "\"/w/a.rs\"")), None);
-}
-
 /// `..` and `.` fold away, so a path cannot climb past what a guard
 /// compares; a relative path, which names no checkable place, is anything.
 #[test]
@@ -133,4 +90,27 @@ fn normalized_folds_dots_and_widens_relative_paths() {
         Touches::Writes(Scope::Anything)
     );
     assert_eq!(Touches::Independent.normalized(), Touches::Independent);
+}
+
+/// A host adapter consumes the declared footprint without the upstream serve layer.
+#[test]
+fn a_tool_handler_gives_each_call_its_footprint() {
+    let definition = crate::completion::ToolDefinition::new(
+        crate::message::ToolName::new("open").expect("name"),
+        "Opens a file.",
+        serde_json::json!({"type":"string"}),
+    );
+    let footprint = |name: &str, args: &str| {
+        if name != definition.name.as_str() {
+            return None;
+        }
+        let path: PathBuf = serde_json::from_str(args).ok()?;
+        Some(Touches::Reads(Scope::Paths(vec![path])))
+    };
+    assert_eq!(
+        footprint("open", "\"/w/a.rs\""),
+        Some(Touches::Reads(paths(&["/w/a.rs"])))
+    );
+    assert_eq!(footprint("open", "{"), None);
+    assert_eq!(footprint("other", "\"/w/a.rs\""), None);
 }

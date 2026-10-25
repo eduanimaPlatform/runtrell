@@ -1,7 +1,11 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/test_utils/trace_capture.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
+#![allow(dead_code)]
 //! A `tracing` layer that records spans and events for test assertions.
 //!
 //! ```
-//! use rig_core::test_utils::TraceCapture;
+//! use runtrell_protocol::test_utils::TraceCapture;
 //!
 //! let capture = TraceCapture::default();
 //! tracing::subscriber::with_default(capture.subscriber(), || {

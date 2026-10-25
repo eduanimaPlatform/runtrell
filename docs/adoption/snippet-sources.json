@@ -1,0 +1,24 @@
+[
+  {
+    "source": "crates/rig-core/src/operation/completion.rs",
+    "lines": [
+      1195,
+      1203
+    ],
+    "source_file_sha256": "05fbaaff24b7ceb464ae73a8ada6232ad683c4c1b8fa1c6435de30abb395667b",
+    "copied_fragment_sha256": "dee451ea7ae9ec8d8f0215e9bb2c547f200adcf0d92da1679514d5047943b037",
+    "target": "crates/runtrell-protocol/src/completion/request.rs",
+    "change": "同一処理を移設・importと配置を変更。targetの変更後hashはsnapshot-files.json。"
+  },
+  {
+    "source": "crates/rig-core/src/provider_response.rs",
+    "lines": [
+      381,
+      384
+    ],
+    "source_file_sha256": "7106b45aab2a9b6ee6deb1ed56e519a6219e8b424f1f8bed6eedc5673c2a9ecb",
+    "copied_fragment_sha256": "e237f1e61d73a9d82169727694c8d755c461cfd8a3222cb6ffa2212edfd04cab",
+    "target": "crates/runtrell-protocol/src/completion/request.rs",
+    "change": "同一処理を移設・importと配置を変更。targetの変更後hashはsnapshot-files.json。"
+  }
+]

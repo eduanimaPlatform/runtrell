@@ -1,6 +1,9 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/streaming/event.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The events of a completion stream. A completion decoder never builds one:
 //! it writes through the reply's part handles
-//! ([`Out`](crate::wire::Out)), and the writer emits each part's start, its
+//! (the host adapter), and the writer emits each part's start, its
 //! fragments and its end, in that order. A [`Part`] is a part's position in
 //! the response's `choice`. A stream transform that splits or adds parts
 //! (reasoning a model wrote inside its text, tool calls written as text)
@@ -10,7 +13,7 @@
 //! is checked.
 //!
 //! ```
-//! use rig_core::streaming::{PartKind, StreamEvent, StreamRecord};
+//! use runtrell_protocol::streaming::{PartKind, StreamEvent, StreamRecord};
 //!
 //! let transcript = StreamRecord::parse(serde_json::json!([
 //!     {"item": "event", "value": {"event": "start", "part": 0, "kind": "text"}},
@@ -22,7 +25,7 @@
 //!     transcript.events().next(),
 //!     Some(StreamEvent::Start { kind: PartKind::Text, .. })
 //! ));
-//! # Ok::<(), rig_core::streaming::SequenceError>(())
+//! # Ok::<(), runtrell_protocol::streaming::SequenceError>(())
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -37,7 +40,7 @@ use super::UnknownPayload;
 /// parts are numbered in the order they start.
 ///
 /// ```
-/// use rig_core::streaming::Part;
+/// use runtrell_protocol::streaming::Part;
 ///
 /// assert_eq!(Part::new(2).index(), 2);
 /// ```

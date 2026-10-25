@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/options.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Portable generation options: provider-neutral knobs a request sets once
 //! and every completion wire maps to its own JSON, or refuses. They hold only
 //! what [`CompletionRequest`](super::CompletionRequest) has no field for, so
@@ -5,7 +8,7 @@
 //! request.
 //!
 //! ```
-//! use rig_core::completion::{CacheRetention, CompletionRequest, Effort, GenerationOptions};
+//! use runtrell_protocol::completion::{CacheRetention, CompletionRequest, Effort, GenerationOptions};
 //!
 //! let options = GenerationOptions::default()
 //!     .reasoning(Effort::High)
@@ -20,12 +23,9 @@ use serde::{Deserialize, Serialize};
 
 mod mapping;
 mod merge;
+pub use merge::{BaseInput, FinalBody, RawAt, Rewrite, check, param, request_params};
 
 pub use mapping::{Mapping, OptionFields, OptionMap};
-#[cfg(feature = "image")]
-pub(crate) use merge::deep_merge;
-pub use merge::{BaseInput, FinalBody, RawAt, Rewrite, check, param, request_params};
-pub(crate) use merge::{CatalogRefusal, catalog_refusals, collect_refusals};
 
 /// Provider-neutral generation knobs for one request. An unset field leaves
 /// the provider's default. A field the wire or model cannot honour is
@@ -377,31 +377,6 @@ impl UnsupportedOption {
             reason: reason.into(),
         }
     }
-}
-
-/// Why a dry run of a completion request failed: what
-/// [`DynModel::check`](crate::DynModel::check) returns.
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum CheckError {
-    /// Every option the wire or model cannot honour, in the order the wire
-    /// meets them. The request builds once they are removed.
-    #[error("{}", unsupported_list(.0))]
-    Unsupported(Vec<UnsupportedOption>),
-    /// The request cannot be built for another reason, such as an empty
-    /// history. Refusals met before it are not listed, since the build
-    /// stopped there.
-    #[error(transparent)]
-    Invalid(crate::error::ProviderError),
-}
-
-/// The refusals, one per clause.
-fn unsupported_list(refusals: &[UnsupportedOption]) -> String {
-    refusals
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 #[cfg(test)]

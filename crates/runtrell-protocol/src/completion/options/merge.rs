@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/options/merge.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The one merge of a completion request body: the wire's own encoding of
 //! the request, then the mapped options, then the provider options, then
 //! `additional_params`, then the closed list of [`Rewrite`]s.
@@ -15,8 +18,6 @@ use super::{CacheRetention, GenerationOptions, OnUnsupported, UnsupportedOption}
 use crate::completion::provider_options::SHARED;
 use crate::completion::{CompletionRequest, ReplayTarget};
 use crate::error::EncodeError;
-use crate::providers::openai::wire::BodyRewrite;
-use crate::wire::Body;
 
 /// The merged request body. Its field is private to this module, so only
 /// [`request_params`] builds one, and nothing writes to it afterwards.
@@ -46,12 +47,6 @@ impl FinalBody {
         } else {
             value.pointer(&format!("/{rest}"))
         }
-    }
-
-    /// The request bytes of an HTTP completion wire: the body as compact
-    /// JSON.
-    pub fn into_body(self) -> Body {
-        Body::Bytes(Value::Object(self.0).to_string().into_bytes())
     }
 
     /// The body read as `T`: an SDK-backed wire's request type, or a local
@@ -99,72 +94,11 @@ pub enum RawAt {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Rewrite {
-    /// Chat Completions: `max_tokens` as `max_completion_tokens` for an
-    /// OpenAI reasoning model.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    OutputCapRename,
-    /// Anthropic: ask to drop thinking bound to another context, when the
-    /// body's thinking is adaptive or unset.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    DropUnboundThinking,
-    /// Anthropic on a platform whose URL names the model: `model` removed
-    /// and `anthropic_version` set to this value.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    AnthropicVersionInBody(String),
-    /// Anthropic streams: a default `tool_choice` beside tools, none without
-    /// them.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    ToolChoiceNeedsTools,
-    /// `stream` set to this value.
-    Stream(bool),
-    /// `stream` removed.
-    NoStream,
-    /// OpenAI Responses over a WebSocket session: `background` removed,
-    /// which the session ignores.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    NoBackground,
-    /// Chat Completions streams: `stream_options.include_usage: true`
-    /// unless the body states it.
-    StreamUsage,
-    /// OpenAI Responses: ask for the reasoning ciphertext when the body
-    /// reasons or stores nothing, or always when `true`.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    ReasoningCiphertext(bool),
-    /// OpenAI Responses on ChatGPT: `store: false`.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    CodexStore,
-    /// The Chat Completions dialect's own rewrite.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    ChatDialect(BodyRewrite),
-    /// Gemini `cachedContent`: each raw `cachedContent`/`cached_content`
-    /// handle, then the wire's own, checked against the body. The
-    /// GenerateContent wires that name it also read a raw
-    /// `generationConfig: null` as absent, as they always have.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
-    GeminiCachedContent(Option<String>),
-    /// The top-level `key` moved to the end of the body, so a request that
-    /// only appended to it starts with the previous request's bytes.
-    ///
-    /// For rig's own crates; not covered by semver.
-    #[doc(hidden)]
+    /// Host-selected JSON key assignment, applied after all layers.
+    Set(String, Value),
+    /// Host-selected key removal.
+    Remove(String),
+    /// Put a key last, preserving all values.
     MoveLast(&'static str),
 }
 
@@ -252,9 +186,6 @@ fn refuse(
     let option = option.into();
     let provider = target.provider();
     let model = model_of(target, request);
-    if collected(|| UnsupportedOption::new(option.clone(), provider, model, reason.clone())) {
-        return Ok(());
-    }
     match request.options.unsupported_policy() {
         OnUnsupported::Error => Err(EncodeError::unsupported(UnsupportedOption::new(
             option, provider, model, reason,
@@ -392,7 +323,7 @@ pub fn check(
     unserialized(request)?;
     let settled = settle(target, request)?;
     clear(&mut request.options, &settled.ignored);
-    model_rules(target, request)?;
+
     let layer = provider_layer(target, request);
     for refusal in &layer.refused {
         refuse(
@@ -413,159 +344,6 @@ pub fn check(
     Ok(())
 }
 
-/// Report each option of `request` the catalog entry of its model on
-/// `target` refuses by [`ModelSpec::refusals`](crate::catalog::ModelSpec::refusals),
-/// under the request's policy, and clear it under
-/// [`OnUnsupported::Ignore`]. The wire's own answers come first, so an
-/// option it already refused is not reported twice.
-fn model_rules(
-    target: &dyn ReplayTarget,
-    request: &mut CompletionRequest,
-) -> Result<(), EncodeError> {
-    let facts = target
-        .facts()
-        .unwrap_or_else(|| crate::catalog::ModelFacts::builtin());
-    let Some(spec) = facts.for_model(target.provider(), model_of(target, request)) else {
-        return Ok(());
-    };
-    let refusals = spec.request_rules(request);
-    let mut ignored = Vec::new();
-    for CatalogRefusal { field, reason } in refusals {
-        refuse(target, request, field, reason)?;
-        ignored.push(field);
-    }
-    if ignored.contains(&"temperature") {
-        request.temperature = None;
-    }
-    clear(&mut request.options, &ignored);
-    Ok(())
-}
-
-thread_local! {
-    /// The refusals collected by [`collect_refusals`] on this thread, while
-    /// it runs.
-    static COLLECTED: std::cell::RefCell<Option<Vec<UnsupportedOption>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Run `encode` with every refusal collected instead of reported: each
-/// refused option is skipped as under [`OnUnsupported::Ignore`], without a
-/// warning, and the refusals come back in the order they were made. Encoding
-/// is synchronous and pure, so a thread-local scope sees every refusal it
-/// makes. `DynModel::check` dry-runs a request under it.
-pub(crate) fn collect_refusals<T>(encode: impl FnOnce() -> T) -> (T, Vec<UnsupportedOption>) {
-    /// Restores the enclosing scope's collection, also on unwind.
-    struct Scope(Option<Vec<UnsupportedOption>>);
-    impl Drop for Scope {
-        fn drop(&mut self) {
-            let outer = self.0.take();
-            COLLECTED.with(|collected| collected.replace(outer));
-        }
-    }
-    let outer = COLLECTED.with(|collected| collected.replace(Some(Vec::new())));
-    let scope = Scope(outer);
-    let value = encode();
-    let refusals = COLLECTED
-        .with(|collected| collected.borrow_mut().take())
-        .unwrap_or_default();
-    drop(scope);
-    (value, refusals)
-}
-
-/// Whether a [`collect_refusals`] scope is open, after adding the refusal
-/// `make` builds to it.
-fn collected(make: impl FnOnce() -> UnsupportedOption) -> bool {
-    COLLECTED.with(|collected| match collected.borrow_mut().as_mut() {
-        Some(refusals) => {
-            refusals.push(make());
-            true
-        }
-        None => false,
-    })
-}
-
-/// A part of a final body that a model's catalog entry says the API
-/// rejects: a top-level body key, or `tools` for the request's tools, and
-/// why. Found on the final body, because `additional_params` can set the
-/// same keys.
-pub(crate) struct CatalogRefusal {
-    pub(crate) field: &'static str,
-    pub(crate) reason: String,
-}
-
-/// `body` after the refusals `target`'s catalog entry for the model makes
-/// of it. A request that sets no [`GenerationOptions`] is sent as built,
-/// and the provider decides. Otherwise each refusal goes through the
-/// request's policy under the name of its body key: an error under
-/// [`OnUnsupported::Error`]; under [`OnUnsupported::Ignore`] a warning, and
-/// a field rig wrote from a typed source (a request field such as
-/// `temperature`, a generation option, a provider option) is left out of
-/// the body. A key whose value `additional_params` sets, and the request's
-/// `tools`, are sent as written.
-///
-/// Inside [`collect_refusals`], every refusal is collected and handled as
-/// under [`OnUnsupported::Ignore`], so a dry run lists them all.
-///
-/// # Errors
-///
-/// Under [`OnUnsupported::Error`], for the first refusal.
-pub(crate) fn catalog_refusals(
-    target: &dyn ReplayTarget,
-    request: &CompletionRequest,
-    body: FinalBody,
-    refusals: Vec<CatalogRefusal>,
-) -> Result<FinalBody, EncodeError> {
-    let provider = target.provider();
-    let model = model_of(target, request);
-    if request.options.is_default() {
-        for refusal in &refusals {
-            tracing::debug!(
-                option = refusal.field,
-                provider,
-                model,
-                reason = refusal.reason.as_str(),
-                "catalog refusal not applied: the request sets no generation options"
-            );
-        }
-        return Ok(body);
-    }
-    let FinalBody(mut body) = body;
-    for CatalogRefusal { field, reason } in refusals {
-        let collecting =
-            collected(|| UnsupportedOption::new(field, provider, model, reason.clone()));
-        if !collecting && request.options.unsupported_policy() == OnUnsupported::Error {
-            return Err(EncodeError::unsupported(UnsupportedOption::new(
-                field, provider, model, reason,
-            )));
-        }
-        let raw = request
-            .additional_params
-            .as_ref()
-            .and_then(|params| params.get(field));
-        let typed = field != "tools" && raw.is_none_or(|raw| body.get(field) != Some(raw));
-        if typed {
-            body.shift_remove(field);
-        }
-        if collecting {
-            continue;
-        }
-        tracing::warn!(
-            option = field,
-            provider,
-            model,
-            reason = reason.as_str(),
-            "{}",
-            match typed {
-                true => "option skipped: the model's catalog entry refuses it",
-                false => "catalog refusal ignored: sent as written",
-            }
-        );
-    }
-    Ok(FinalBody(body))
-}
-
-/// A provider field the target cannot send: its body key, the section it
-/// came from and why.
 struct Refused {
     field: &'static str,
     section: String,
@@ -798,17 +576,7 @@ pub fn request_params(
 ) -> Result<FinalBody, EncodeError> {
     unserialized(request)?;
     let settled = settle(target, request)?;
-    let mut provider = provider_layer(target, request);
-    // The rewrite drops a raw `background` as it always has; a typed one is
-    // refused rather than dropped unseen.
-    if rewrites.contains(&Rewrite::NoBackground) {
-        provider.refuse(
-            target,
-            request,
-            "background",
-            "a WebSocket session takes no `background`".to_owned(),
-        );
-    }
+    let provider = provider_layer(target, request);
     for refusal in provider.refused {
         refuse(target, request, refusal.name(target), refusal.reason)?;
     }
@@ -818,28 +586,6 @@ pub fn request_params(
         RawAt::Top | RawAt::Split { .. } => raw.shift_remove("tools"),
         RawAt::Under(_) | RawAt::Ignored(_) => None,
     };
-    let mut handles = Vec::new();
-    if rewrites
-        .iter()
-        .any(|rewrite| matches!(rewrite, Rewrite::GeminiCachedContent(_)))
-    {
-        for spelling in ["cachedContent", "cached_content"] {
-            match raw.shift_remove(spelling) {
-                None => {}
-                Some(Value::String(name)) => handles.push(name),
-                Some(other) => {
-                    return Err(EncodeError::request(format!(
-                        "Gemini `additional_params.{spelling}` should be a string, got {other}"
-                    )));
-                }
-            }
-        }
-        // GenerateContent has always read a raw `generationConfig: null` as
-        // absent, so the typed and mapped fields under it are still sent.
-        if raw.get("generationConfig").is_some_and(Value::is_null) {
-            raw.shift_remove("generationConfig");
-        }
-    }
     let raw = placed(raw, raw_at);
     let upper = upper_layers(&settled.sends, &provider, &raw);
     let mut input = BaseInput {
@@ -858,96 +604,19 @@ pub fn request_params(
     deep_merge(&mut body, provider);
     deep_merge(&mut body, raw);
     for rewrite in rewrites {
-        apply(target, rewrite, &mut body, &handles)?;
+        apply(rewrite, &mut body);
     }
     Ok(FinalBody(body))
 }
 
 /// Apply one post-merge write to `body`.
-fn apply(
-    target: &dyn ReplayTarget,
-    rewrite: &Rewrite,
-    body: &mut Map<String, Value>,
-    handles: &[String],
-) -> Result<(), EncodeError> {
+fn apply(rewrite: &Rewrite, body: &mut Map<String, Value>) {
     match rewrite {
-        Rewrite::OutputCapRename => {
-            // Read on the full id: a `vendor/model` id (a LiteLLM-style
-            // proxy behind `OPENAI_BASE_URL`) keeps `max_tokens`.
-            let reasoning = body
-                .get("model")
-                .and_then(Value::as_str)
-                .is_some_and(|model| {
-                    let facts = target
-                        .facts()
-                        .unwrap_or_else(|| crate::catalog::ModelFacts::builtin());
-                    !model.contains('/')
-                        && crate::providers::openai::options::reasons(facts, model) == Some(true)
-                });
-            if reasoning && let Some(max_tokens) = body.shift_remove("max_tokens") {
-                body.entry("max_completion_tokens").or_insert(max_tokens);
-            }
+        Rewrite::Set(key, value) => {
+            body.insert(key.clone(), value.clone());
         }
-        Rewrite::DropUnboundThinking => {
-            let adaptive = body.get("thinking").is_none_or(|thinking| {
-                thinking.get("type").and_then(Value::as_str) == Some("adaptive")
-            });
-            if adaptive {
-                crate::providers::anthropic::completion::drop_unbound_thinking(body);
-            }
-        }
-        Rewrite::AnthropicVersionInBody(version) => {
-            body.shift_remove("model");
-            body.insert("anthropic_version".to_owned(), version.as_str().into());
-        }
-        Rewrite::ToolChoiceNeedsTools => {
-            let has_tools = body
-                .get("tools")
-                .and_then(Value::as_array)
-                .is_some_and(|tools| !tools.is_empty());
-            if has_tools {
-                body.entry("tool_choice")
-                    .or_insert_with(|| serde_json::json!({ "type": "auto" }));
-            } else {
-                body.shift_remove("tool_choice");
-            }
-        }
-        Rewrite::Stream(stream) => {
-            body.insert("stream".to_owned(), Value::Bool(*stream));
-        }
-        Rewrite::NoStream => {
-            body.shift_remove("stream");
-        }
-        Rewrite::NoBackground => {
-            body.shift_remove("background");
-        }
-        Rewrite::StreamUsage => {
-            if let Some(options) = body
-                .entry("stream_options")
-                .or_insert_with(|| Value::Object(Map::new()))
-                .as_object_mut()
-            {
-                options.entry("include_usage").or_insert(Value::Bool(true));
-            }
-        }
-        Rewrite::ReasoningCiphertext(always) => {
-            let wanted = *always
-                || body.get("reasoning").is_some()
-                || body.get("store") == Some(&Value::Bool(false));
-            if wanted {
-                crate::providers::openai::responses_api::include_ciphertext(body);
-            }
-        }
-        Rewrite::CodexStore => {
-            body.insert("store".to_owned(), Value::Bool(false));
-        }
-        Rewrite::ChatDialect(kind) => {
-            crate::providers::openai::wire::chat::rewrite_body(*kind, body)?;
-        }
-        Rewrite::GeminiCachedContent(handle) => {
-            for name in handles.iter().chain(handle) {
-                crate::providers::gemini::completion::with_cached_content(body, name)?;
-            }
+        Rewrite::Remove(key) => {
+            body.shift_remove(key);
         }
         Rewrite::MoveLast(key) => {
             if let Some(value) = body.shift_remove(*key) {
@@ -955,5 +624,4 @@ fn apply(
             }
         }
     }
-    Ok(())
 }

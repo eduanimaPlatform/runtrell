@@ -1,31 +1,13 @@
-//! The provider error type, serializable error reports, and shared retry
-//! classifications for the effect protocol. Reports preserve classifications,
-//! available provider metadata, and textual source chains.
-//!
-//! ```
-//! use rig_core::error::{ErrorKind, ProviderError};
-//!
-//! let error = ProviderError::from_http_response(http::StatusCode::TOO_MANY_REQUESTS, "slow down");
-//! assert!(error.is_retryable());
-//! assert_eq!(error.report().kind, ErrorKind::ProviderResponse);
-//! ```
-
-use std::fmt;
-use std::sync::Arc;
-
-use serde::{Deserialize, Serialize};
-
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/error.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
+//! Serializable failures; transport-specific details are opaque host JSON.
 use crate::{
     completion::UnsupportedOption,
-    http_client,
-    observe::AdapterErrorBoundary,
-    provider_response::ProviderResponseError,
     tool::{ToolErrorKind, ToolExecutionError},
-    vector_store::VectorStoreError,
 };
-
-mod retry;
-
+use serde::{Deserialize, Serialize};
+use std::{fmt, sync::Arc};
 /// Normalized classification of an [`ErrorReport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,7 +94,7 @@ pub struct ErrorReport {
     /// A provider- or tool-specific machine code, when one was reported:
     /// for a provider's reply, the transport's own code when it gave one
     /// apart from the body, else the code the body names
-    /// ([`ProviderResponseError::machine_code`]).
+    /// (the host adapter).
     pub code: Option<String>,
     /// The HTTP status, when the failure had one.
     pub http_status: Option<u16>,
@@ -127,7 +109,7 @@ pub struct ErrorReport {
     /// Preserved provider failure response, including available status, body,
     /// headers, and request ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_response: Option<crate::provider_response::ProviderResponseError>,
+    pub provider_response: Option<serde_json::Value>,
 }
 
 impl ErrorReport {
@@ -182,75 +164,12 @@ impl ErrorReport {
     }
 }
 
-impl ErrorReport {
-    /// The provider response body preserved on this report, if any.
-    pub fn provider_response_body(&self) -> Option<&str> {
-        self.provider_response
-            .as_ref()
-            .map(|response| response.body.as_str())
-    }
-
-    /// The preserved provider response body parsed as JSON, when present.
-    pub fn provider_response_json(&self) -> Result<Option<serde_json::Value>, serde_json::Error> {
-        crate::provider_response::json(self.provider_response_body())
-    }
-
-    /// The preserved provider response headers, if any.
-    pub fn provider_response_headers(&self) -> Option<&http::HeaderMap> {
-        self.provider_response
-            .as_ref()
-            .and_then(|response| response.headers.as_ref())
-    }
-
-    /// The HTTP status this report carries, as a status code.
-    pub fn provider_response_status(&self) -> Option<http::StatusCode> {
-        self.http_status
-            .and_then(|status| http::StatusCode::from_u16(status).ok())
-    }
-
-    /// The provider's transport request id, if the failure carried one.
-    pub fn provider_request_id(&self) -> Option<&str> {
-        self.request_id.as_deref()
-    }
-}
-
 impl fmt::Display for ErrorReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
     }
 }
-
 impl std::error::Error for ErrorReport {}
-
-/// The one status → retryable table.
-///
-/// Request Timeout (408), Too Early (425), Too Many Requests (429) and every
-/// server error (5xx) are retryable; every other status is not. A missing
-/// status decides nothing here: a failure with no status is classified by
-/// what it is ([`transient_transport`]), not by what it lacks.
-pub const fn retryable_status(status: Option<u16>) -> bool {
-    match status {
-        None => false,
-        Some(408 | 425 | 429) => true,
-        Some(s) => s >= 500 && s <= 599,
-    }
-}
-
-/// Classifies `StreamEnded` and backend `Instance` errors as retryable.
-/// Protocol, header, and content-type errors, and a client that could not be
-/// built (`Unbuilt`), are not retryable. Errors carrying
-/// an HTTP status use [`retryable_status`]. This does not guarantee the server
-/// has not processed the request.
-pub fn transient_transport(error: &http_client::Error) -> bool {
-    match error {
-        http_client::Error::StreamEnded | http_client::Error::Instance(_) => true,
-        http_client::Error::InvalidStatusCodeWithDetails { status, .. } => {
-            retryable_status(Some(status.as_u16()))
-        }
-        _ => false,
-    }
-}
-
 /// Collect the `Display` of each `source()` link below `error`, outermost
 /// first.
 pub(crate) fn source_chain(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
@@ -281,118 +200,25 @@ pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 #[cfg(target_family = "wasm")]
 pub type SharedError = Arc<dyn std::error::Error + 'static>;
 
-/// A failed provider operation: completion, embedding, reranking,
-/// transcription, image or audio generation, verification, model listing, or
-/// context caching.
-///
-/// The variant is the classification, and each variant maps to one
-/// [`ErrorKind`]. A provider's reply is preserved as a
-/// [`ProviderResponseError`] with its status, body, headers, and request ID;
-/// read it through [`Self::provider_response`] or the accessors below.
-///
-/// ```
-/// use rig_core::error::ProviderError;
-///
-/// fn log(error: &ProviderError) {
-///     if let Some(status) = error.provider_response_status() {
-///         // Error envelopes can arrive with successful HTTP statuses.
-///         eprintln!("provider returned HTTP {status}");
-///     }
-///     match error.provider_response_json() {
-///         Ok(Some(json)) => eprintln!("provider error payload: {json}"),
-///         Ok(None) => eprintln!("no provider response body: {error}"),
-///         Err(_) => eprintln!("non-JSON body: {:?}", error.provider_response_body()),
-///     }
-/// }
-/// ```
-///
-/// Errors are `Clone`: sources are shared, so a stream that already yielded
-/// an error can hand the same error to a later caller.
-#[non_exhaustive]
+/// A failed model operation. Hosts relay transport failures as a full report.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ProviderError {
-    /// A transport failure that produced no provider reply: a reset
-    /// connection, a timeout, an unreadable response. A reply the server
-    /// made is [`Self::ProviderResponse`].
-    Http(Arc<http_client::Error>),
-    /// JSON serialization or deserialization failed.
     Json(Arc<serde_json::Error>),
-    /// A URL could not be parsed.
-    Url(url::ParseError),
-    /// The request could not be built.
     Request(SharedError),
-    /// The reply decoded but does not answer the request.
     Response(String),
-    /// The provider reported a failure without a preserved reply: a Rig
-    /// diagnostic, never classified as retryable. A provider's own error
-    /// payload belongs in [`Self::ProviderResponse`], whose envelope decides
-    /// its code and retry verdict; never put provider JSON here.
     Provider(String),
-    /// The provider's reply, preserved: a non-success status with its body, a
-    /// 2xx error envelope, or a non-HTTP transport's error payload.
-    ProviderResponse(ProviderResponseError),
-    /// The provider rejected the configured credentials with 401 or 403.
-    InvalidAuthentication(ProviderResponseError),
-    /// A request for an existing context-cache handle answered 403 or 404.
-    /// The reply's body is the provider's explanation, which can name a
-    /// cause other than expiry, such as a credential or quota failure.
-    CacheExpired {
-        /// The cache handle the request named.
-        name: String,
-        /// The provider's reply.
-        response: ProviderResponseError,
-    },
-    /// The provider returned vectors of a width other than the one the caller
-    /// declared through an embedding wire's `ndims` argument. Raised only
-    /// when the width was set explicitly.
-    MismatchedDimensions {
-        /// Provider whose response disagreed with the declared width.
-        provider: String,
-        /// Width the caller declared.
-        requested: usize,
-        /// Width the provider actually returned.
-        returned: usize,
-    },
-    /// A failure a relay delivered as its report, such as a relayed
-    /// stream. It reports as the relayed report, unchanged.
     Relayed(Box<ErrorReport>),
-    /// The reply stopped before the provider ended it: its frames ran out,
-    /// or the runtime stopped, without the provider's end.
     Truncated,
-    /// A [`GenerationOptions`](crate::completion::GenerationOptions) field
-    /// the wire or model cannot honour, under
-    /// [`OnUnsupported::Error`](crate::completion::OnUnsupported::Error).
     UnsupportedOption(UnsupportedOption),
 }
-
 impl fmt::Display for ProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Http(error) => write!(f, "HttpError: {error}"),
             Self::Json(error) => write!(f, "JsonError: {error}"),
-            Self::Url(error) => write!(f, "UrlError: {error}"),
             Self::Request(error) => write!(f, "RequestError: {error}"),
             Self::Response(message) => write!(f, "ResponseError: {message}"),
             Self::Provider(message) => write!(f, "ProviderError: {message}"),
-            Self::ProviderResponse(response) => write!(f, "ProviderResponseError: {response}"),
-            Self::InvalidAuthentication(response) => {
-                write!(f, "invalid authentication: {response}")
-            }
-            Self::CacheExpired { name, response } => write!(
-                f,
-                "cached content `{name}` is expired or was deleted: {}",
-                response.body
-            ),
-            Self::MismatchedDimensions {
-                provider,
-                requested,
-                returned,
-            } => write!(
-                f,
-                "{provider} embedding response returned {returned}-dimension vectors, but the \
-                 model was created with {requested} dimensions; this provider does not resize \
-                 embeddings"
-            ),
             Self::Relayed(report) => f.write_str(&report.message),
             Self::Truncated => {
                 f.write_str("ResponseError: the reply ended before the provider ended it")
@@ -401,260 +227,66 @@ impl fmt::Display for ProviderError {
         }
     }
 }
-
-/// The source is the shared error itself, not its `Arc`, so callers can
-/// downcast it.
+// The shared source itself, not its Arc: inherited downcast behavior.
 impl std::error::Error for ProviderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Json(error) => Some(&**error),
-            Self::Url(error) => Some(error),
             Self::Request(error) => Some(&**error),
             _ => None,
         }
     }
 }
-
-impl From<url::ParseError> for ProviderError {
-    fn from(error: url::ParseError) -> Self {
-        Self::Url(error)
-    }
-}
-
 impl ProviderError {
-    /// A request that could not be built, for the given reason.
     pub fn request(reason: impl Into<BoxError>) -> Self {
         Self::Request(Arc::from(reason.into()))
     }
-
-    /// Preserves the status and verbatim body as [`Self::ProviderResponse`],
-    /// including error envelopes returned with 2xx statuses.
-    pub fn from_http_response(status: http::StatusCode, body: impl Into<String>) -> Self {
-        Self::ProviderResponse(ProviderResponseError::new(status, body))
-    }
-
-    /// Preserves a verbatim provider error body with no HTTP status as
-    /// [`Self::ProviderResponse`] (see [`ProviderResponseError::from_body`]).
-    pub fn from_provider_body(body: impl Into<String>) -> Self {
-        Self::ProviderResponse(ProviderResponseError::from_body(body))
-    }
-
-    /// Converts a non-success reply the transport reported as an error to
-    /// [`Self::ProviderResponse`], keeping its status, body, and headers.
-    /// Other transport errors become [`Self::Http`].
-    pub fn from_transport_error(error: http_client::Error) -> Self {
-        match error {
-            http_client::Error::InvalidStatusCodeWithDetails {
-                status,
-                body,
-                headers,
-            } => Self::from_http_response(status, body).with_response_headers(Some(headers)),
-            other => Self::Http(Arc::new(other)),
-        }
-    }
-
-    /// The classification this error reports as.
     pub fn kind(&self) -> ErrorKind {
         match self {
-            Self::Http(_) => ErrorKind::Http,
             Self::Json(_) => ErrorKind::Json,
-            Self::Url(_) => ErrorKind::Url,
             Self::Request(_) | Self::UnsupportedOption(_) => ErrorKind::Request,
-            Self::Response(_) | Self::MismatchedDimensions { .. } | Self::Truncated => {
-                ErrorKind::Response
-            }
+            Self::Response(_) | Self::Truncated => ErrorKind::Response,
             Self::Provider(_) => ErrorKind::Provider,
-            Self::ProviderResponse(_)
-            | Self::InvalidAuthentication(_)
-            | Self::CacheExpired { .. } => ErrorKind::ProviderResponse,
             Self::Relayed(report) => report.kind,
         }
     }
-
-    /// Classifies transport failures with [`transient_transport`] and
-    /// preserved replies with [`ProviderResponseError::is_retryable`]; a
-    /// truncated reply is retryable. Every other failure, rejected
-    /// credentials and expired caches included, is not retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(error) => transient_transport(error),
-            Self::ProviderResponse(response) => response.is_retryable(),
-            Self::Relayed(report) => report.retryable,
-            // A reply cut short, by its transport or its runtime, may end on
-            // the next attempt.
             Self::Truncated => true,
+            Self::Relayed(report) => report.retryable,
             _ => false,
         }
     }
-
-    /// The provider's preserved reply, when this error carries one.
-    pub fn provider_response(&self) -> Option<&ProviderResponseError> {
-        match self {
-            Self::ProviderResponse(response)
-            | Self::InvalidAuthentication(response)
-            | Self::CacheExpired { response, .. } => Some(response),
-            Self::Relayed(report) => report.provider_response.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// The preserved reply's body. An empty body returns `Some("")`, while
-    /// [`Self::provider_response_json`] maps it to `Ok(None)`.
-    pub fn provider_response_body(&self) -> Option<&str> {
-        self.provider_response()
-            .map(|response| response.body.as_str())
-    }
-
-    /// Parses the preserved reply's body as JSON: `Ok(None)` when there is no
-    /// body or it is empty, `Err` when it is not valid JSON.
-    pub fn provider_response_json(&self) -> Result<Option<serde_json::Value>, serde_json::Error> {
-        crate::provider_response::json(self.provider_response_body())
-    }
-
-    /// The preserved reply's HTTP status. It may be 2xx for an error envelope.
-    pub fn provider_response_status(&self) -> Option<http::StatusCode> {
-        self.provider_response()
-            .and_then(|response| response.status)
-    }
-
-    /// The provider's transport request ID, when the reply carried one.
-    pub fn provider_request_id(&self) -> Option<&str> {
-        self.provider_response()
-            .and_then(|response| response.provider_request_id.as_deref())
-    }
-
-    /// The preserved reply's headers. `None` means not captured, as for
-    /// non-HTTP transports and replies built from only a status and body.
-    /// This example reads the seconds form of `Retry-After`:
-    ///
-    /// ```no_run
-    /// # use rig_core::error::ProviderError;
-    /// # use std::time::Duration;
-    /// fn backoff(error: &ProviderError) -> Option<Duration> {
-    ///     let seconds = error
-    ///         .provider_response_headers()?
-    ///         .get(http::header::RETRY_AFTER)?
-    ///         .to_str()
-    ///         .ok()?
-    ///         .parse()
-    ///         .ok()?;
-    ///     Some(Duration::from_secs(seconds))
-    /// }
-    /// ```
-    pub fn provider_response_headers(&self) -> Option<&http::HeaderMap> {
-        self.provider_response()
-            .and_then(|response| response.headers.as_ref())
-    }
-
-    /// Fills an absent request ID on the preserved reply, ignoring empty
-    /// strings.
-    pub fn with_provider_request_id(self, request_id: Option<String>) -> Self {
-        self.map_response(|response| match response.provider_request_id {
-            Some(_) => response,
-            None => response.with_provider_request_id(request_id),
-        })
-    }
-
-    /// Fills absent headers on the preserved reply.
-    pub fn with_response_headers(self, headers: Option<http::HeaderMap>) -> Self {
-        self.map_response(|response| match (&response.headers, headers) {
-            (None, Some(headers)) => response.with_headers(Some(headers)),
-            _ => response,
-        })
-    }
-
-    /// Attaches the HTTP status a transport reported beside a reply preserved
-    /// without one, so it classifies by status. A captured status is kept.
-    pub fn with_provider_status(self, status: Option<http::StatusCode>) -> Self {
-        self.map_response(|response| response.with_status(status))
-    }
-
-    /// Attaches the provider's machine-readable code for the failure, such as
-    /// a gRPC status name or an AWS exception type.
-    pub fn with_provider_code(self, code: Option<String>) -> Self {
-        self.map_response(|response| response.with_code(code))
-    }
-
-    /// Replaces the preserved reply's transport retry verdict, used when its
-    /// status is absent or successful.
-    pub fn with_transient(self, transient: Option<bool>) -> Self {
-        self.map_response(|response| response.with_transient(transient))
-    }
-
-    /// The wire form of this error.
     pub fn report(&self) -> ErrorReport {
-        ErrorReport::from(self)
-    }
-
-    /// Which boundary produced this error, by its classification.
-    pub(crate) fn boundary(&self) -> AdapterErrorBoundary {
-        match (self, self.kind()) {
-            (Self::Http(error), _) => AdapterErrorBoundary::from_http(error),
-            (_, ErrorKind::Json | ErrorKind::Response) => AdapterErrorBoundary::Decode,
-            (_, ErrorKind::Provider | ErrorKind::ProviderResponse) => {
-                AdapterErrorBoundary::ProviderResponse
-            }
-            _ => AdapterErrorBoundary::Request,
+        if let Self::Relayed(report) = self {
+            return (**report).clone();
         }
-    }
-
-    fn map_response(
-        self,
-        map: impl FnOnce(ProviderResponseError) -> ProviderResponseError,
-    ) -> Self {
-        match self {
-            Self::ProviderResponse(response) => Self::ProviderResponse(map(response)),
-            Self::InvalidAuthentication(response) => Self::InvalidAuthentication(map(response)),
-            Self::CacheExpired { name, response } => Self::CacheExpired {
-                name,
-                response: map(response),
-            },
-            // The report restates what it read from the reply it preserves,
-            // so what the map fills reaches both. What it held is kept.
-            Self::Relayed(mut report) => {
-                if let Some(response) = report.provider_response.take() {
-                    let response = map(response);
-                    report.request_id = report
-                        .request_id
-                        .or_else(|| response.provider_request_id.clone());
-                    report.http_status = report
-                        .http_status
-                        .or_else(|| response.status.map(|status| status.as_u16()));
-                    report.code = report.code.or_else(|| response.machine_code());
-                    report.refusal |= response.refusal;
-                    report.provider_response = Some(response);
-                }
-                Self::Relayed(report)
-            }
-            other => other,
-        }
+        let mut report =
+            ErrorReport::new(self.kind(), self.to_string()).with_retryable(self.is_retryable());
+        report.source_chain = source_chain(self);
+        report
     }
 }
-
 impl From<serde_json::Error> for ProviderError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(Arc::new(error))
     }
 }
-
 impl From<BoxError> for ProviderError {
     fn from(error: BoxError) -> Self {
         Self::Request(Arc::from(error))
     }
 }
-
-impl From<http_client::Error> for ProviderError {
-    fn from(error: http_client::Error) -> Self {
-        Self::from_transport_error(error)
+impl From<ProviderError> for ErrorReport {
+    fn from(error: ProviderError) -> Self {
+        error.report()
     }
 }
-
-/// A failure to build a provider request, returned by
-/// [`Wire::encode`](crate::wire::Wire::encode). It converts only into
-/// [`ProviderError::Request`] or [`ProviderError::UnsupportedOption`], both
-/// of kind [`ErrorKind::Request`], so every provider classifies its encode
-/// failures alike.
-#[non_exhaustive]
+impl From<&ProviderError> for ErrorReport {
+    fn from(error: &ProviderError) -> Self {
+        error.report()
+    }
+}
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct EncodeError(ProviderError);
@@ -683,64 +315,6 @@ impl From<EncodeError> for ProviderError {
     fn from(error: EncodeError) -> Self {
         debug_assert_eq!(error.0.kind(), ErrorKind::Request);
         error.0
-    }
-}
-
-impl From<http::Error> for EncodeError {
-    fn from(error: http::Error) -> Self {
-        Self::request(error)
-    }
-}
-
-impl From<serde_json::Error> for EncodeError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::request(error)
-    }
-}
-
-impl From<crate::message::MessageError> for EncodeError {
-    fn from(error: crate::message::MessageError) -> Self {
-        Self::request(error)
-    }
-}
-
-impl From<BoxError> for EncodeError {
-    fn from(error: BoxError) -> Self {
-        Self(ProviderError::from(error))
-    }
-}
-
-impl From<http::Error> for ProviderError {
-    fn from(error: http::Error) -> Self {
-        Self::request(error)
-    }
-}
-
-impl From<&ProviderError> for ErrorReport {
-    fn from(error: &ProviderError) -> Self {
-        if let ProviderError::Relayed(report) = error {
-            return (**report).clone();
-        }
-        let response = error.provider_response();
-        ErrorReport {
-            kind: error.kind(),
-            retryable: error.is_retryable(),
-            message: error.to_string(),
-            code: response.and_then(ProviderResponseError::machine_code),
-            http_status: response
-                .and_then(|response| response.status)
-                .map(|status| status.as_u16()),
-            refusal: response.is_some_and(|response| response.refusal),
-            source_chain: source_chain(error),
-            request_id: response.and_then(|response| response.provider_request_id.clone()),
-            provider_response: response.cloned(),
-        }
-    }
-}
-
-impl From<ProviderError> for ErrorReport {
-    fn from(error: ProviderError) -> Self {
-        Self::from(&error)
     }
 }
 
@@ -824,84 +398,12 @@ impl From<ErrorReport> for ToolExecutionError {
     }
 }
 
-impl From<&VectorStoreError> for ErrorReport {
-    fn from(error: &VectorStoreError) -> Self {
-        let (kind, provider_response) = match error {
-            VectorStoreError::EmbeddingError(inner) => {
-                return Self {
-                    message: error.to_string(),
-                    source_chain: source_chain(error),
-                    ..Self::from(inner)
-                };
-            }
-            VectorStoreError::JsonError(_) => (ErrorKind::Json, None),
-            VectorStoreError::DatastoreError(_) => (ErrorKind::Provider, None),
-            VectorStoreError::FilterError(_) | VectorStoreError::SamplesOutOfRange { .. } => {
-                (ErrorKind::Request, None)
-            }
-            VectorStoreError::MissingIdError(_) => (ErrorKind::Response, None),
-            VectorStoreError::Http(crate::http_client::Error::InvalidStatusCodeWithDetails {
-                status,
-                body,
-                headers,
-            }) => (
-                ErrorKind::ProviderResponse,
-                Some(
-                    crate::provider_response::ProviderResponseError::new(*status, body.clone())
-                        .with_headers(Some(headers.clone())),
-                ),
-            ),
-            VectorStoreError::Http(_) => (ErrorKind::Http, None),
-            // A store's own non-2xx reply: the server answered, so the status
-            // classifies it and its retryability, like any provider reply.
-            VectorStoreError::ExternalAPIError(status, body) => (
-                ErrorKind::ProviderResponse,
-                Some(crate::provider_response::ProviderResponseError::new(
-                    *status,
-                    body.clone(),
-                )),
-            ),
-        };
-        let http_status = provider_response
-            .as_ref()
-            .and_then(|response| response.status.map(|status| status.as_u16()));
-        let retryable = match error {
-            VectorStoreError::Http(inner) => transient_transport(inner),
-            VectorStoreError::ExternalAPIError(..) => retryable_status(http_status),
-            _ => false,
-        };
-        let code = provider_response
-            .as_ref()
-            .and_then(|response| response.machine_code());
-        ErrorReport {
-            kind,
-            retryable,
-            message: error.to_string(),
-            code,
-            http_status,
-            refusal: provider_response.as_ref().is_some_and(|r| r.refusal),
-            source_chain: source_chain(error),
-            request_id: None,
-            provider_response,
-        }
-    }
-}
-
-impl From<VectorStoreError> for ErrorReport {
-    fn from(error: VectorStoreError) -> Self {
-        Self::from(&error)
-    }
-}
-
-// The report is the wire error of the effect protocol: it must cross threads
-// and serialize on every target, browser wasm included.
-const _: fn() = || {
-    fn assert_wire<T: Send + Sync + 'static + Serialize + serde::de::DeserializeOwned>() {}
-    assert_wire::<ErrorReport>();
-    assert_wire::<ErrorKind>();
-};
-
-#[cfg(test)]
-mod encode_tests;
 #[cfg(test)]
 mod tests;
+pub const fn retryable_status(status: Option<u16>) -> bool {
+    match status {
+        None => false,
+        Some(408 | 425 | 429) => true,
+        Some(s) => s >= 500 && s <= 599,
+    }
+}

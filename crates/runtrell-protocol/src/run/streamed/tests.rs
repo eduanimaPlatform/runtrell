@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/streamed/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::super::policy::InvalidToolCallAction;
 use super::super::response::PromptError;
 use super::super::{AgentRun, AgentRunStep, PendingToolCall, ToolAnswer};
 use super::*;
-use rig_core::completion::{CompletionResponse, Usage};
-use rig_core::message::ToolFunction;
-use rig_core::streaming::StreamRecord;
+use crate::completion::{CompletionResponse, Usage};
+use crate::message::ToolFunction;
+use crate::streaming::StreamRecord;
 use serde_json::json;
 
 /// Answer an executable call with the success `2`.
@@ -12,8 +15,8 @@ fn answer_two(call: PendingToolCall) -> ToolAnswer {
     let PendingToolCall::Execute(call) = call else {
         panic!("expected an executable call, got {call:?}");
     };
-    call.answer(rig_core::tool::ToolResult::success(
-        rig_core::tool::ToolOutput::text("2"),
+    call.answer(crate::tool::ToolResult::success(
+        crate::tool::ToolOutput::text("2"),
     ))
 }
 
@@ -89,7 +92,7 @@ fn response(choice: Vec<AssistantContent>) -> CompletionResponse {
     CompletionResponse::new(
         choice,
         Usage::default(),
-        rig_core::message::Origin::new("test.api", "mock", ""),
+        crate::message::Origin::new("test.api", "mock", ""),
         json!({}),
     )
 }
@@ -316,7 +319,7 @@ fn surface_invalid(
 
 #[test]
 fn streamed_run_completes_a_tool_roundtrip() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
 
     // Turn 1: the model streams one tool call.
     let AgentRunStep::CallModel { .. } = run.next_step().expect("next_step") else {
@@ -331,7 +334,7 @@ fn streamed_run_completes_a_tool_roundtrip() {
         .total_tokens(12);
     run.record_streamed_completion_call(
         usage,
-        rig_core::completion::ResponseIdentity::default(),
+        crate::completion::ResponseIdentity::default(),
         None,
         serde_json::json!({}),
     )
@@ -355,7 +358,7 @@ fn streamed_run_completes_a_tool_roundtrip() {
     let asm = assembler();
     run.record_streamed_completion_call(
         Usage::default(),
-        rig_core::completion::ResponseIdentity::default(),
+        crate::completion::ResponseIdentity::default(),
         None,
         serde_json::json!({}),
     )
@@ -438,7 +441,7 @@ fn streamed_completion_call_record_requires_a_model_call() {
     let err = run
         .record_streamed_completion_call(
             Usage::default(),
-            rig_core::completion::ResponseIdentity::default(),
+            crate::completion::ResponseIdentity::default(),
             None,
             serde_json::json!({}),
         )
@@ -449,7 +452,7 @@ fn streamed_completion_call_record_requires_a_model_call() {
     run.next_step().expect("next_step should still succeed");
     run.record_streamed_completion_call(
         Usage::default(),
-        rig_core::completion::ResponseIdentity::default(),
+        crate::completion::ResponseIdentity::default(),
         None,
         serde_json::json!({}),
     )
@@ -495,7 +498,7 @@ fn streamed_completion_call_is_recorded_once_per_turn() {
 
     run.record_streamed_completion_call(
         Usage::default(),
-        rig_core::completion::ResponseIdentity::default(),
+        crate::completion::ResponseIdentity::default(),
         None,
         serde_json::json!({}),
     )
@@ -503,7 +506,7 @@ fn streamed_completion_call_is_recorded_once_per_turn() {
     let err = run
         .record_streamed_completion_call(
             Usage::default(),
-            rig_core::completion::ResponseIdentity::default(),
+            crate::completion::ResponseIdentity::default(),
             None,
             serde_json::json!({}),
         )
@@ -514,7 +517,7 @@ fn streamed_completion_call_is_recorded_once_per_turn() {
 
 #[test]
 fn streamed_run_serde_round_trips_while_tools_pend() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     run.next_step().expect("next_step");
 
     let add = tool_call("tc_1", "add");
@@ -522,7 +525,7 @@ fn streamed_run_serde_round_trips_while_tools_pend() {
     ingest_all(&mut asm, &items([call(0, &add)]));
     run.record_streamed_completion_call(
         Usage::default(),
-        rig_core::completion::ResponseIdentity::default(),
+        crate::completion::ResponseIdentity::default(),
         None,
         serde_json::json!({}),
     )
@@ -549,7 +552,7 @@ fn streamed_run_serde_round_trips_while_tools_pend() {
 fn typed_namespaces_survive_pending_tool_checkpoints_and_completed_turn_reuse() {
     for reverse in [false, true] {
         for after_call_tools in [false, true] {
-            let mut run = AgentRun::new("do both twice").max_turns(3);
+            let mut run = AgentRun::new("do both twice");
             run.next_step().unwrap();
             for turn in 0..2 {
                 let generated = ToolCall::new(

@@ -1,0 +1,18 @@
+runtrell
+
+This distribution includes code derived from Rig v0.45.0:
+https://github.com/0xPlaygrounds/rig
+commit 98ed06d7f1c911e6e4c7fdb5d690093bc964c514
+Copyright (c) 2024, Playgrounds Analytics Inc.
+Licensed under MIT; the original text is in LICENSES/MIT-Rig.txt.
+
+The adopted scope is crates/rig-agent/src/run and selected rig-core message,
+request, options, conversation, streaming event, tool result/feedback/schema,
+JSON, ID and error code, plus selected test-only helpers. Source-to-destination
+paths and initial hashes are in docs/adoption/snapshot-files.json.
+Derived files are marked as modified. Modifications and new source files are
+licensed under Apache-2.0; original MIT permissions and obligations remain.
+The root Apache license does not replace the MIT license of inherited code.
+
+Independent third-party dependency declarations are inventoried separately in
+docs/adoption/dependency-licenses.md. This notice does not relicense dependencies.

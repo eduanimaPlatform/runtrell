@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/conversation/pairing.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The rules pairing a conversation's tool calls with their results:
 //! validation and repair of a message list, the same repair over entries
 //! that keeps their ids ([`normalize`]), the calls a cut-short conversation
 //! still owes, and where a window of it may start.
 //!
 //! ```
-//! use rig_core::{conversation::pairing, message::Message};
+//! use runtrell_protocol::{conversation::pairing, message::Message};
 //!
 //! pairing::validate(&[Message::user("Hello"), Message::assistant("Hi")])?;
 //! # Ok::<(), pairing::PairingError>(())

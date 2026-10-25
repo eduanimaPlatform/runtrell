@@ -1,15 +1,18 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/patch.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Per-turn overrides applied before request preparation without changing agent defaults.
 //!
 //! ```
-//! use rig_agent::run::patch::RequestPatch;
+//! use runtrell_protocol::run::patch::RequestPatch;
 //! let patch = RequestPatch::new().temperature(0.2).max_tokens(256);
 //! assert!(!patch.is_empty());
 //! ```
 
 use std::sync::Arc;
 
-use rig_core::completion::Document;
-use rig_core::message::{Message, ToolChoice};
+use crate::completion::Document;
+use crate::message::{Message, ToolChoice};
 use serde::{Deserialize, Serialize};
 
 /// A non-sticky patch applied only to the current turn's completion request.
@@ -152,7 +155,7 @@ impl RequestPatch {
         self.extra_context.extend(later.extra_context);
         self.additional_params = match (self.additional_params.take(), later.additional_params) {
             (Some(base), Some(patch)) if base.is_object() && patch.is_object() => {
-                Some(rig_core::json_utils::merge(base, patch))
+                Some(crate::json_utils::merge(base, patch))
             }
             (base, patch) => patch.or(base),
         };

@@ -1,6 +1,9 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/wire/citation.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Citations as a provider states them, before the completion fold resolves
 //! their spans. A decoder hands each one to
-//! [`Out::cite`](crate::wire::Out::cite) with the unit its provider counts
+//! the host adapter with the unit its provider counts
 //! offsets in, so no decoder converts a unit or builds a byte span itself.
 
 use crate::message::Source;

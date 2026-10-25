@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/json_utils.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::convert::Infallible;
@@ -62,7 +65,7 @@ pub(crate) fn merge_params(
 }
 
 // Callers require the image or audio feature.
-#[cfg_attr(not(any(feature = "image", feature = "audio")), allow(dead_code))]
+
 pub fn merge_inplace(a: &mut serde_json::Value, b: serde_json::Value) {
     if let (serde_json::Value::Object(a_map), serde_json::Value::Object(b_map)) = (a, b) {
         b_map.into_iter().for_each(|(key, value)| {
@@ -184,7 +187,7 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
 /// only those are validated and executed.
 ///
 /// ```
-/// use rig_core::streaming::parse_partial_arguments;
+/// use runtrell_protocol::streaming::parse_partial_arguments;
 ///
 /// let partial = parse_partial_arguments(r#"{"path": "notes.md", "content": "Hel"#);
 /// assert_eq!(partial["path"], "notes.md");
@@ -361,7 +364,7 @@ mod tests;
 /// needs can never fail a reply.
 ///
 /// ```
-/// use rig_core::json_utils::Lenient;
+/// use runtrell_protocol::json_utils::Lenient;
 /// use serde_json::json;
 ///
 /// let reply = json!({"id": "r1", "usage": {"input_tokens": "7"}, "output": null});

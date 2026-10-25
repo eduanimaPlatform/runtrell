@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/calls.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The open calls of a `CallTools` step and the answers that close them. The
 //! run classifies each call once, and builds every result from the answer.
 
 use serde::{Deserialize, Serialize};
 
-use rig_core::message::{CallId, ToolCall, ToolName};
-use rig_core::tool::ToolResult;
+use crate::message::{CallId, ToolCall, ToolName};
+use crate::tool::ToolResult;
 
 use super::InvalidToolCallAction;
 
@@ -65,8 +68,8 @@ impl ExecCall {
 /// It cannot be answered as executed:
 ///
 /// ```compile_fail,E0308
-/// # use rig_agent::run::MalformedCall;
-/// # use rig_core::tool::{ToolOutput, ToolResult};
+/// # use runtrell_protocol::run::MalformedCall;
+/// # use runtrell_protocol::tool::{ToolOutput, ToolResult};
 /// fn answer(call: MalformedCall) {
 ///     let _ = call.answer(ToolResult::success(ToolOutput::text("wrote 5 bytes")));
 /// }
@@ -75,7 +78,7 @@ impl ExecCall {
 /// Nor read as a call to execute:
 ///
 /// ```compile_fail,E0624
-/// # use rig_agent::run::MalformedCall;
+/// # use runtrell_protocol::run::MalformedCall;
 /// fn arguments(call: &MalformedCall) {
 ///     let _ = call.tool_call();
 /// }
@@ -131,8 +134,8 @@ impl MalformedCall {
 /// A driver cannot build one itself:
 ///
 /// ```compile_fail,E0451
-/// # use rig_agent::run::ToolAnswer;
-/// # use rig_core::message::CallId;
+/// # use runtrell_protocol::run::ToolAnswer;
+/// # use runtrell_protocol::message::CallId;
 /// fn forge(call: CallId, other: ToolAnswer) -> ToolAnswer {
 ///     ToolAnswer { index: 0, call, ..other }
 /// }
@@ -141,8 +144,8 @@ impl MalformedCall {
 /// Nor hand the run result content it built:
 ///
 /// ```compile_fail,E0599
-/// # use rig_agent::run::AgentRun;
-/// # use rig_core::message::UserContent;
+/// # use runtrell_protocol::run::AgentRun;
+/// # use runtrell_protocol::message::UserContent;
 /// fn answer(run: &mut AgentRun, results: Vec<UserContent>) {
 ///     let _ = run.tool_results(results);
 /// }

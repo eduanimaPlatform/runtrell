@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/message/identity.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Identities a message carries: a tool call's one [`CallId`] and a tool's
 //! [`ToolName`].
 
@@ -8,12 +11,12 @@ use serde::{Deserialize, Serialize};
 /// A tool name, never empty.
 ///
 /// ```
-/// use rig_core::message::ToolName;
+/// use runtrell_protocol::message::ToolName;
 ///
 /// let name = ToolName::new("add")?;
 /// assert_eq!(name.as_str(), "add");
 /// assert!(ToolName::new("").is_err());
-/// # Ok::<(), rig_core::message::EmptyToolName>(())
+/// # Ok::<(), runtrell_protocol::message::EmptyToolName>(())
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -37,7 +40,7 @@ impl ToolName {
 
     /// `name` without the emptiness check. Callers prove `name` is not empty,
     /// for example with a compile-time assertion on a `Tool::NAME`.
-    pub(crate) fn new_unchecked(name: &str) -> Self {
+    pub fn new_unchecked(name: &str) -> Self {
         debug_assert!(!name.is_empty());
         Self(name.to_owned())
     }
@@ -133,7 +136,7 @@ impl PartialEq<ToolName> for str {
 /// the two always match.
 ///
 /// ```
-/// use rig_core::message::{CallId, ProviderCallId};
+/// use runtrell_protocol::message::{CallId, ProviderCallId};
 ///
 /// let id = CallId::from(ProviderCallId::new("call_1").ok_or("empty id")?);
 /// assert_eq!(id.to_string(), "call_1");

@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/message/native.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Where an assistant turn came from and the provider items it was decoded
 //! from. An [`Origin`] names the wire, provider and requested model of a
 //! turn; a [`Native`] holds one provider item verbatim beside the canonical
@@ -5,7 +8,7 @@
 //! block stops replaying its stale item.
 //!
 //! ```
-//! use rig_core::message::{AssistantContent, Text};
+//! use runtrell_protocol::message::{AssistantContent, Text};
 //!
 //! let block = AssistantContent::Text(Text::new("hi"))
 //!     .with_native(serde_json::json!({"type": "text", "text": "hi", "citations": []}));
@@ -279,7 +282,7 @@ impl Native {
     /// blobs of.
     ///
     /// ```
-    /// use rig_core::message::{Api, Fingerprint, Native};
+    /// use runtrell_protocol::message::{Api, Fingerprint, Native};
     ///
     /// let native = Native {
     ///     item: serde_json::json!({"type": "thinking", "thinking": "plan", "signature": "c2ln"}),

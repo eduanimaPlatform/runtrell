@@ -1,8 +1,11 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/message/citation/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use serde_json::json;
 
 use super::{Citation, Source, SourceLocation, Span, attach, resolve};
+use crate::message::citation::{SpanUnit, WireCitation, WireSpan};
 use crate::message::{AssistantContent, Text};
-use crate::wire::{SpanUnit, WireCitation, WireSpan};
 
 fn url(url: &str) -> Source {
     Source::new(SourceLocation::Url {

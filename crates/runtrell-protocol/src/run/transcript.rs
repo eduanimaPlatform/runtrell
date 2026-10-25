@@ -1,7 +1,10 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/transcript.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Invalid-call feedback and assistant-turn classification.
 
-use rig_core::message::{AssistantContent, AssistantMessage, CallId, Message};
-use rig_core::tool::feedback::invalid_call_feedback;
+use crate::message::{AssistantContent, AssistantMessage, CallId, Message};
+use crate::tool::feedback::invalid_call_feedback;
 
 /// Build tool-result feedback for an invalid call and skipped-peer notices for
 /// other calls, in content order. Returns `None` when there are no tool calls.

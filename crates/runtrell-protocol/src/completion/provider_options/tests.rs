@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/provider_options/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! The provider-options layer and typed reply extras, through a test-only
 //! extension for a fake provider with two routes, `fake.chat` and
 //! `fake.responses`.
@@ -571,8 +574,6 @@ fn requests_stay_unwind_safe() {
     fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
     unwind_safe::<ProviderOptions>();
     unwind_safe::<CompletionRequest>();
-    unwind_safe::<crate::effect::EffectKind>();
-    unwind_safe::<crate::serve::BeforeServe>();
 }
 
 #[test]

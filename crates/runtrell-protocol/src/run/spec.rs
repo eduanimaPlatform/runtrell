@@ -1,14 +1,17 @@
-//! Serializable request settings, turn budgets, and output policies for runs.
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/spec.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
+//! Serializable request settings, output policies for runs.
 //! Live models, tools, and hooks remain owned by the driver.
 //!
 //! ```
-//! use rig_agent::run::spec::RunSpec;
+//! use runtrell_protocol::run::spec::RunSpec;
 //! let spec = RunSpec::new();
-//! assert_eq!(spec.effective_max_turns(), 1);
+//! assert_eq!(spec, RunSpec::default());
 //! ```
 
-use rig_core::completion::{Document, GenerationOptions, ProviderOptions};
-use rig_core::message::ToolChoice;
+use crate::completion::{Document, GenerationOptions, ProviderOptions};
+use crate::message::ToolChoice;
 use serde::{Deserialize, Serialize};
 
 use super::output::OutputMode;
@@ -17,7 +20,7 @@ use super::output::OutputMode;
 /// [`Default`] equals [`RunSpec::new`], and a field missing from serialized
 /// input takes its value from there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RunSpec {
     /// System prompt.
     pub preamble: Option<String>,
@@ -39,9 +42,6 @@ pub struct RunSpec {
     pub temperature: Option<f64>,
     /// Tool choice applied to every model call.
     pub tool_choice: Option<ToolChoice>,
-    /// Total model-call budget for the run. `None` means the protocol default
-    /// of one call.
-    pub max_turns: Option<usize>,
     /// How many times an invalid model tool call may be retried with feedback.
     pub max_invalid_tool_call_retries: usize,
     /// How many consecutive turns may call a tool with arguments that are not
@@ -51,7 +51,7 @@ pub struct RunSpec {
     pub max_consecutive_malformed_tool_calls: Option<usize>,
     /// JSON schema the final answer must satisfy, when structured output is
     /// requested.
-    pub output_schema: Option<rig_core::schemars::Schema>,
+    pub output_schema: Option<crate::schemars::Schema>,
     /// How structured output is obtained.
     pub output_mode: OutputMode,
     /// Name of the synthetic output tool when output is collected through a
@@ -71,11 +71,10 @@ pub struct RunSpec {
     pub accept_unknown_finish_reasons: bool,
 }
 
-/// Policy applied when every [`on_invalid_tool_call`] hook declines to resolve
+/// Policy applied when the host declines to resolve
 /// a call to an unknown or disallowed tool. Defaults to failure; ignoring drops
 /// the call and continues.
 ///
-/// [`on_invalid_tool_call`]: crate::agent::AgentHook::on_invalid_tool_call
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnhandledInvalidToolCall {
@@ -87,7 +86,7 @@ pub enum UnhandledInvalidToolCall {
 }
 
 impl RunSpec {
-    /// Create a spec with a one-call budget, no preamble, tool choice, or schema,
+    /// Create a spec with no preamble, tool choice, schema or turn limit,
     /// and output-preamble augmentation enabled.
     pub fn new() -> Self {
         Self {
@@ -99,7 +98,6 @@ impl RunSpec {
             max_tokens: None,
             temperature: None,
             tool_choice: None,
-            max_turns: None,
             max_invalid_tool_call_retries: 0,
             max_consecutive_malformed_tool_calls: None,
             output_schema: None,
@@ -110,11 +108,6 @@ impl RunSpec {
             unhandled_invalid_tool_call: UnhandledInvalidToolCall::default(),
             accept_unknown_finish_reasons: false,
         }
-    }
-
-    /// The turn budget the protocol will use.
-    pub fn effective_max_turns(&self) -> usize {
-        self.max_turns.unwrap_or(1)
     }
 }
 

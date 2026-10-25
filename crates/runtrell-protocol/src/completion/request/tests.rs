@@ -1,15 +1,15 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/request/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::{CompletionResponse, FinishReason, Usage};
 use crate::completion::CompletionRequest;
-use crate::error::ProviderError;
 use crate::message::AssistantContent;
-use crate::{http_client, provider_response};
 
 /// An empty conversation or message parses, and the request boundary
 /// rejects it by role and index. An empty tool result is the adapter's to
 /// fill, as pi says `(no tool output)`.
 mod empty_lists_parse_and_are_rejected_when_sent {
     use crate::message::Message;
-    use crate::test_utils::{MockCompletionModel, MockTurn};
     use serde_json::json;
 
     #[test]
@@ -24,16 +24,14 @@ mod empty_lists_parse_and_are_rejected_when_sent {
 
     /// Deserializing `[]` is not where the rule lives: the message reads and
     /// writes the same JSON, and sending it is what fails.
-    #[tokio::test]
-    async fn an_empty_content_list_round_trips_and_is_rejected_when_sent() {
+    #[test]
+    fn an_empty_content_list_round_trips_and_is_rejected_when_sent() {
         let json = json!({"role": "user", "content": []});
         let message = serde_json::from_value::<Message>(json.clone()).expect("parses");
         assert_eq!(serde_json::to_value(&message).expect("serializes"), json);
 
-        let model = MockCompletionModel::from_turns([MockTurn::text("unreachable")]);
-        let error = model
-            .call(super::CompletionRequest::new(message))
-            .await
+        let error = super::CompletionRequest::new(message)
+            .validate_message_content()
             .expect_err("sending it is rejected");
         assert!(
             error
@@ -41,12 +39,8 @@ mod empty_lists_parse_and_are_rejected_when_sent {
                 .contains("user message at index 0 has no content"),
             "{error}"
         );
-        assert_eq!(model.request_count(), 0);
     }
 }
-
-/// The request-boundary check accepts what providers accept.
-mod message_content {}
 
 fn tool_call_choice() -> Vec<AssistantContent> {
     vec![AssistantContent::tool_call(
@@ -270,66 +264,6 @@ fn documents_join_the_first_user_message_so_roles_alternate() {
     );
 }
 
-#[test]
-fn completion_error_provider_response_helpers_with_preserved_json_body() {
-    let body = r#"{"error":{"code":"rate_limit","message":"slow down"}}"#;
-    let error = ProviderError::ProviderResponse(
-        provider_response::ProviderResponseError::without_status(body.to_string()),
-    );
-
-    assert_eq!(error.provider_response_body(), Some(body));
-    assert_eq!(error.provider_response_status(), None);
-    assert_eq!(
-        error
-            .provider_response_json()
-            .expect("fixture body should parse as valid JSON"),
-        Some(serde_json::json!({
-            "error": {
-                "code": "rate_limit",
-                "message": "slow down"
-            }
-        }))
-    );
-}
-
-#[test]
-fn completion_error_provider_response_helpers_with_preserved_plain_text_body() {
-    let error = ProviderError::ProviderResponse(
-        provider_response::ProviderResponseError::without_status("provider exploded".to_string()),
-    );
-
-    assert_eq!(error.provider_response_body(), Some("provider exploded"));
-    assert_eq!(error.provider_response_status(), None);
-    assert!(error.provider_response_json().is_err());
-}
-
-#[test]
-fn completion_error_provider_response_helpers_with_http_non_success_body_and_status() {
-    let body = r#"{"error":{"type":"invalid_request","message":"bad request"}}"#;
-    let error = ProviderError::from_transport_error(http_client::Error::non_success_with_details(
-        http::StatusCode::BAD_REQUEST,
-        http::HeaderMap::new(),
-        body.to_string(),
-    ));
-
-    assert_eq!(error.provider_response_body(), Some(body));
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::BAD_REQUEST)
-    );
-    assert_eq!(
-        error.provider_response_json().expect("valid JSON body"),
-        Some(serde_json::json!({
-            "error": {
-                "type": "invalid_request",
-                "message": "bad request"
-            }
-        }))
-    );
-}
-
-mod additional_params_precedence {}
-
 /// An unknown finish reason fails the turn by default, and replay leaves the
 /// turn out. A request that accepts unknown reasons gets a response that
 /// stops normally, and the turn replays: the response's stop, the run rule
@@ -338,18 +272,18 @@ mod unknown_finish_reasons {
     use crate::completion::message::turn_failure;
     use crate::completion::{CompletionRequest, FinishReason};
     use crate::message::{AssistantContent, Message, StopReason};
-    use crate::test_utils::{MockCompletionModel, MockTurn};
 
-    fn weird(turn: MockTurn) -> MockTurn {
-        turn.with_finish_reason(FinishReason::Other("weird".to_owned()))
+    fn weird(choice: Vec<AssistantContent>) -> super::CompletionResponse {
+        super::CompletionResponse::new(
+            choice,
+            super::Usage::default(),
+            crate::message::Origin::new("test", "test", "test"),
+            serde_json::Value::Null,
+        )
+        .with_finish_reason(FinishReason::Other("weird".to_owned()))
     }
-
-    async fn turn(accept: bool, turn: MockTurn) -> (Message, Option<String>, bool) {
-        let model = MockCompletionModel::from_turns([turn, MockTurn::text("next")]);
-        let response = model
-            .call(CompletionRequest::new("hi").accept_unknown_finish_reasons(accept))
-            .await
-            .expect("the reply folds");
+    fn turn(accept: bool, response: super::CompletionResponse) -> (Message, Option<String>, bool) {
+        let response = response.accept_unknown_finish_reasons(accept);
         assert_eq!(response.accepts_unknown_finish_reasons(), accept);
         let head = response.head();
         let failure = turn_failure(
@@ -358,20 +292,19 @@ mod unknown_finish_reasons {
             response.finish_reason().as_ref(),
         );
         let message = response.message().expect("the turn has content");
-        model
-            .call(CompletionRequest::new("again").messages([Message::user("hi"), message.clone()]))
-            .await
-            .expect("the follow-up folds");
-        let replayed = model.requests()[1]
-            .chat_history
-            .iter()
-            .any(|message| matches!(&**message, Message::Assistant(_)));
+        let replayed = crate::completion::adapt(
+            &[Message::user("hi"), message.clone()],
+            &crate::test_utils::Target,
+        )
+        .iter()
+        .any(|message| matches!(message, Message::Assistant(_)));
         (message, failure, replayed)
     }
 
-    #[tokio::test]
-    async fn a_text_turn_fails_and_is_left_out_by_default() {
-        let (message, failure, replayed) = turn(false, weird(MockTurn::text("answer"))).await;
+    #[test]
+    fn a_text_turn_fails_and_is_left_out_by_default() {
+        let (message, failure, replayed) =
+            turn(false, weird(vec![AssistantContent::text("answer")]));
         let Message::Assistant(turn) = message else {
             panic!("an assistant turn");
         };
@@ -385,9 +318,10 @@ mod unknown_finish_reasons {
         assert!(!replayed, "replay leaves the failed turn out");
     }
 
-    #[tokio::test]
-    async fn an_accepted_text_turn_succeeds_and_replays() {
-        let (message, failure, replayed) = turn(true, weird(MockTurn::text("answer"))).await;
+    #[test]
+    fn an_accepted_text_turn_succeeds_and_replays() {
+        let (message, failure, replayed) =
+            turn(true, weird(vec![AssistantContent::text("answer")]));
         let Message::Assistant(turn) = message else {
             panic!("an assistant turn");
         };
@@ -396,18 +330,18 @@ mod unknown_finish_reasons {
         assert!(replayed, "replay keeps the accepted turn");
     }
 
-    #[tokio::test]
-    async fn a_turn_with_calls_runs_them_only_when_accepted() {
+    #[test]
+    fn a_turn_with_calls_runs_them_only_when_accepted() {
         let call = || {
-            weird(MockTurn::tool_call(
+            weird(vec![AssistantContent::tool_call(
                 "call_1",
-                "lookup",
+                crate::message::ToolName::new("lookup").expect("name"),
                 serde_json::json!({}),
-            ))
+            )])
         };
-        let (_, failure, _) = turn(false, call()).await;
+        let (_, failure, _) = turn(false, call());
         assert!(failure.is_some_and(|failure| failure.contains("none of its tool calls ran")));
-        let (message, failure, _) = turn(true, call()).await;
+        let (message, failure, _) = turn(true, call());
         let Message::Assistant(turn) = message else {
             panic!("an assistant turn");
         };
@@ -575,13 +509,7 @@ mod empty_new_fields_are_not_serialized {
     /// is complete only when both sides are; the mark survives serde.
     #[test]
     fn an_incomplete_cost_stays_incomplete() {
-        let usage = Usage::new()
-            .input_tokens(1_000_000)
-            .output_tokens(0)
-            .cache_creation_input_tokens(1_000_000);
-        let lower_bound = crate::catalog::Pricing::new(1.0, 1.0)
-            .cost(&usage)
-            .expect("priced");
+        let lower_bound = Cost::priced(0.0, 0.0, Some(0.0), None);
         assert!(!lower_bound.is_complete());
         assert!(Cost::from_total(1.0).is_complete());
         assert!(Cost::from_parts(1.0, 1.0, 0.0, 0.0).is_complete());
@@ -828,40 +756,16 @@ mod usage_totals {
 /// written only when something is stated, and read back as written.
 #[test]
 fn tool_annotations_ride_on_the_definition_and_are_written_only_when_stated() {
-    use crate::tool::{Tool, ToolContext, tool_definition};
-
-    struct Look;
-
-    impl Tool for Look {
-        const NAME: &'static str = "look";
-        type Args = serde_json::Value;
-        type Output = String;
-        type Error = std::convert::Infallible;
-
-        fn description(&self) -> String {
-            "Look".to_owned()
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        fn annotations(&self) -> ToolAnnotations {
-            ToolAnnotations::default()
-                .with_read_only(true)
-                .with_title("Look around")
-        }
-
-        async fn call(
-            &self,
-            _: &mut ToolContext,
-            _arguments: Self::Args,
-        ) -> Result<String, Self::Error> {
-            Ok(String::new())
-        }
-    }
-
-    let definition = tool_definition(&Look);
+    let definition = ToolDefinition::new(
+        crate::message::ToolName::new("look").expect("name"),
+        "Look",
+        serde_json::json!({"type":"object"}),
+    )
+    .with_annotations(
+        ToolAnnotations::default()
+            .with_read_only(true)
+            .with_title("Look around"),
+    );
     assert!(definition.annotations.read_only());
     let json = serde_json::to_value(&definition).expect("serializes");
     assert_eq!(

@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/message/citation.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! What a provider says supports an answer text. A [`Citation`] lives on the
 //! [`Text`] it cites, with a byte [`Span`] into that text or none for the
 //! whole block, and the [`Source`]s behind it. The list is bound to the text
@@ -9,7 +12,7 @@
 //! the fold resolves it to bytes when the text block closes.
 //!
 //! ```
-//! use rig_core::message::{Citation, Source, SourceLocation, Text};
+//! use runtrell_protocol::message::{Citation, Source, SourceLocation, Text};
 //!
 //! let text = Text::new("Dock Seven is open.");
 //! let span = text.span(0..10).ok_or("on a character boundary")?;
@@ -27,7 +30,8 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use super::{Fingerprint, Text};
-use crate::wire::{SpanUnit, WireCitation, WireSpan};
+mod input;
+pub use input::{SpanUnit, WireCitation, WireSpan};
 
 /// A claim in a text and the sources that support it.
 #[non_exhaustive]
@@ -291,7 +295,7 @@ impl Text {
 /// block holds already. A span that does not resolve, or covers other text
 /// than the provider quoted, drops its citation with a warning; a citation
 /// never fails a reply. The completion fold is the only caller.
-pub(crate) fn attach(
+pub fn attach(
     text: &mut Text,
     kept: Vec<Citation>,
     wire: Vec<WireCitation>,

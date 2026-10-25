@@ -1,14 +1,17 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/response.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Per-call accounting, final run responses, and prompting errors.
 //!
 //! ```
-//! use rig_agent::run::response::PromptResponse;
+//! use runtrell_protocol::run::response::PromptResponse;
 //! let response = PromptResponse::empty();
 //! assert!(response.output().is_empty());
 //! ```
 
-use rig_core::completion::{FinishReason, ResponseIdentity, Usage};
-use rig_core::error::ProviderError;
-use rig_core::message::{AssistantContent, Message};
+use crate::completion::{FinishReason, ResponseIdentity, Usage};
+use crate::error::ProviderError;
+use crate::message::{AssistantContent, Message};
 use serde::{Deserialize, Serialize};
 
 /// One completion call of a run: what was asked and what came back.
@@ -32,7 +35,7 @@ pub struct CompletionCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
     /// This attempt's provider response payload, as defined by
-    /// [`rig_core::completion::CompletionResponse::raw`]. A stream without a
+    /// [`crate::completion::CompletionResponse::raw`]. A stream without a
     /// terminal response produces no completion-call entry.
     pub raw: serde_json::Value,
 }
@@ -240,44 +243,13 @@ pub enum PromptError {
     /// Structured effect failure from a handler, a hook, or a stream item. A
     /// relayed provider failure arrives as its report.
     #[error(transparent)]
-    Report(#[from] rig_core::error::ErrorReport),
-
-    /// The run's conversation could not be loaded from its memory store,
-    /// before any model call, or the finished run could not be saved there
-    /// ([`AgentBuilder::memory`](crate::AgentBuilder::memory)). The run did
-    /// not succeed. A failed save may already have set aside a torn last
-    /// line the log ended in (to `recovered/` in the store) and stored the
-    /// blobs of the run's images; its own append stored nothing or, cut
-    /// short, a cut last line, which the next save sets aside. A remote
-    /// store that applied the append before failing to answer may hold all
-    /// of it.
-    #[error("the conversation memory failed: {error}")]
-    Memory {
-        /// Why the store refused or failed, such as
-        /// [`SessionError::Changed`](rig_memory::SessionError::Changed) when
-        /// another run saved to the log after this one loaded it.
-        #[source]
-        error: rig_memory::SessionError,
-        /// The finished run whose save failed; `None` when the load did.
-        response: Option<Box<PromptResponse>>,
-    },
-
-    /// The run exhausted its total model-call budget.
-    #[error("reached the max turns limit of {max_turns}")]
-    MaxTurns {
-        /// Configured total model-call budget.
-        max_turns: usize,
-        /// Canonical history available when the budget was exhausted.
-        chat_history: Vec<Message>,
-        /// Prompt for the call that could not be dispatched.
-        prompt: Message,
-    },
+    Report(Box<crate::error::ErrorReport>),
 
     /// The run was cancelled.
     #[error("the run was cancelled: {reason}")]
     Cancelled {
         /// The run's history at cancellation, every tool call answered
-        /// (closed by [`repair`](rig_core::conversation::pairing::repair)).
+        /// (closed by [`repair`](crate::conversation::pairing::repair)).
         chat_history: Vec<Message>,
         /// Human-readable cancellation reason.
         reason: String,
@@ -303,80 +275,26 @@ pub enum PromptError {
 impl From<ProviderError> for PromptError {
     fn from(error: ProviderError) -> Self {
         match error {
-            ProviderError::Relayed(report) => Self::Report(*report),
+            ProviderError::Relayed(report) => Self::Report(report),
             error => Self::Provider(error),
         }
     }
 }
 
-/// Forward provider response accessors through wrapped errors and optional reports.
-macro_rules! forward_provider_response_helpers {
-    ($err:ident, $variant:ident, $inner:literal $(, report = $report:ident)?) => {
-        impl $err {
-            #[doc = concat!("Returns the provider response body exposed by a wrapped ", $inner, ".")]
-            pub fn provider_response_body(&self) -> Option<&str> {
-                match self {
-                    Self::$variant(error) => error.provider_response_body(),
-                    $(Self::$report(report) => report.provider_response_body(),)?
-                    _ => None,
-                }
-            }
-
-            #[doc = concat!("Parses the provider response body of a wrapped ", $inner, " as JSON when present.")]
-            pub fn provider_response_json(
-                &self,
-            ) -> Result<Option<serde_json::Value>, serde_json::Error> {
-                match self {
-                    Self::$variant(error) => error.provider_response_json(),
-                    $(Self::$report(report) => report.provider_response_json(),)?
-                    _ => Ok(None),
-                }
-            }
-
-            #[doc = concat!("Returns the provider transport request id exposed by a wrapped ", $inner, ", or carried by a wire report.")]
-            pub fn provider_request_id(&self) -> Option<&str> {
-                match self {
-                    Self::$variant(error) => error.provider_request_id(),
-                    $(Self::$report(report) => report.request_id.as_deref(),)?
-                    _ => None,
-                }
-            }
-
-            #[doc = concat!("Returns the HTTP status exposed by a wrapped ", $inner, ", or carried by a wire report.")]
-            pub fn provider_response_status(&self) -> Option<http::StatusCode> {
-                match self {
-                    Self::$variant(error) => error.provider_response_status(),
-                    $(Self::$report(report) => report
-                        .http_status
-                        .and_then(|status| http::StatusCode::from_u16(status).ok()),)?
-                    _ => None,
-                }
-            }
-
-            #[doc = concat!("Returns the response headers exposed by a wrapped ", $inner, " or report.")]
-            pub fn provider_response_headers(&self) -> Option<&http::HeaderMap> {
-                match self {
-                    Self::$variant(error) => error.provider_response_headers(),
-                    $(Self::$report(report) => report.provider_response_headers(),)?
-                    _ => None,
-                }
-            }
-        }
-    };
-}
-
-pub(crate) use forward_provider_response_helpers;
-
-forward_provider_response_helpers!(PromptError, Provider, "completion error", report = Report);
-
 impl PromptError {
     /// Build a [`PromptError::Cancelled`]. A driver gets the history from
     /// [`AgentRun::cancel_error`](super::AgentRun::cancel_error), or closes
-    /// its own with [`repair`](rig_core::conversation::pairing::repair).
+    /// its own with [`repair`](crate::conversation::pairing::repair).
     pub fn cancelled(chat_history: Vec<Message>, reason: impl Into<String>) -> Self {
         Self::Cancelled {
             chat_history,
             reason: reason.into(),
         }
+    }
+}
+
+impl From<crate::error::ErrorReport> for PromptError {
+    fn from(report: crate::error::ErrorReport) -> Self {
+        Self::Report(Box::new(report))
     }
 }

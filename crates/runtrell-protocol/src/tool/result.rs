@@ -1,7 +1,10 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/tool/result.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Structured tool failures and model-visible execution results.
 //!
 //! ```
-//! use rig_core::tool::{ToolExecutionError, ToolResult};
+//! use runtrell_protocol::tool::{ToolExecutionError, ToolResult};
 //!
 //! let result = ToolResult::failed(ToolExecutionError::invalid_args("Provide a name"));
 //! assert!(result.is_error());
@@ -12,10 +15,7 @@ use std::error::Error;
 #[cfg(not(target_family = "wasm"))]
 use std::sync::Arc;
 
-use crate::{
-    tool::ToolOutput,
-    wasm_compat::{WasmCompatSend, WasmCompatSync},
-};
+use crate::tool::ToolOutput;
 
 /// Normalized classification for a tool execution error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -186,7 +186,7 @@ impl ToolExecutionError {
     /// retains its classification and presentation.
     pub fn from_error<E>(error: E) -> Self
     where
-        E: Error + WasmCompatSend + WasmCompatSync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         #[cfg(not(target_family = "wasm"))]
         {
@@ -261,7 +261,7 @@ impl ToolExecutionError {
     #[cfg_attr(target_family = "wasm", allow(unused_mut))]
     pub fn with_source<E>(mut self, source: E) -> Self
     where
-        E: Error + WasmCompatSend + WasmCompatSync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         #[cfg(not(target_family = "wasm"))]
         {
@@ -320,7 +320,7 @@ impl ToolExecutionError {
     /// Downcast the concrete source to `E`.
     pub fn downcast_ref<E>(&self) -> Option<&E>
     where
-        E: Error + WasmCompatSend + WasmCompatSync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         #[cfg(not(target_family = "wasm"))]
         {
@@ -335,7 +335,7 @@ impl ToolExecutionError {
     /// Whether the concrete source has type `E`.
     pub fn is<E>(&self) -> bool
     where
-        E: Error + WasmCompatSend + WasmCompatSync + 'static,
+        E: Error + Send + Sync + 'static,
     {
         self.downcast_ref::<E>().is_some()
     }

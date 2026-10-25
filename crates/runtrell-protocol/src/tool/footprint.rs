@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/tool/footprint.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! What a tool call may read and change ([`Touches`]), so a host runs the
 //! calls of one reply that touch different things side by side, and holds
 //! back only those that conflict.
 //!
 //! ```
 //! use std::path::PathBuf;
-//! use rig_core::tool::{Scope, Touches};
+//! use runtrell_protocol::tool::{Scope, Touches};
 //!
 //! let paths = |path: &str| Scope::Paths(vec![PathBuf::from(path)]);
 //! let edit = Touches::Writes(paths("/work/src/a.rs"));
@@ -132,7 +135,7 @@ impl Touches {
     }
 
     /// From the annotations a tool's own code declares, such as a
-    /// [`Tool`](super::Tool)'s: `Reads(Anything)` when it says it only
+    /// the host adapter's: `Reads(Anything)` when it says it only
     /// reads, else `Writes(Anything)`. For annotations from elsewhere, such
     /// as an MCP server's, [`from_hints`](Self::from_hints).
     pub fn from_annotations(annotations: &ToolAnnotations) -> Self {

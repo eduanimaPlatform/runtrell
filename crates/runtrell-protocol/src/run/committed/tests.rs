@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/committed/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
+use crate::completion::Usage;
+use crate::message::{
+    AssistantMessage, CallId, Reasoning, ToolFunction, ToolName, ToolResultContent,
+};
 use crate::run::{
     AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, PendingToolCall, ToolAnswer, TurnPolicy,
-};
-use rig_core::completion::Usage;
-use rig_core::message::{
-    AssistantMessage, CallId, Reasoning, ToolFunction, ToolName, ToolResultContent,
 };
 use serde_json::json;
 
@@ -26,8 +29,8 @@ fn result(id: &str) -> UserContent {
 /// Answer an executable call with the result `result` builds.
 fn answer(call: PendingToolCall) -> ToolAnswer {
     match call {
-        PendingToolCall::Execute(call) => call.answer(rig_core::tool::ToolResult::success(
-            rig_core::tool::ToolOutput::text("3"),
+        PendingToolCall::Execute(call) => call.answer(crate::tool::ToolResult::success(
+            crate::tool::ToolOutput::text("3"),
         )),
         other => panic!("expected an executable call, got {other:?}"),
     }
@@ -93,7 +96,7 @@ fn project_yields_calls_and_results_in_message_order_and_skips_the_rest() {
 
 #[test]
 fn a_resume_cursor_projects_only_what_is_committed_after_it() {
-    let mut run = AgentRun::new("add twice").max_turns(3);
+    let mut run = AgentRun::new("add twice");
     assert!(matches!(
         run.next_step(),
         Ok(AgentRunStep::CallModel { .. })
@@ -137,7 +140,6 @@ fn a_resume_cursor_projects_only_what_is_committed_after_it() {
 fn an_output_reprompt_projects_its_call_with_the_feedback_result() {
     let schema = json!({"type": "object", "required": ["answer"]});
     let mut run = AgentRun::new("answer")
-        .max_turns(2)
         .with_output_tool_name("final_result")
         .with_output_validation(Some(schema), 1);
     assert!(matches!(

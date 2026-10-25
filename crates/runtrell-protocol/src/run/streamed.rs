@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/streamed.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Streamed-turn assembly and early invalid-call diagnostics for [`super::AgentRun`].
 //!
 //! Drivers ingest a completion stream's items, resolve invalid calls before
@@ -6,7 +9,7 @@
 //! [`StreamedTurnEvent`].
 //!
 //! ```
-//! use rig_agent::run::streamed::StreamedTurnAssembler;
+//! use runtrell_protocol::run::streamed::StreamedTurnAssembler;
 //! let assembler = StreamedTurnAssembler::new(Default::default());
 //! assert_eq!(assembler.excluded_assistant_content(), 0);
 //! ```
@@ -15,10 +18,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use rig_core::completion::{FinishReason, Message};
-use rig_core::error::ProviderError;
-use rig_core::message::{AssistantContent, AssistantMessage, CallId, ToolCall, ToolName};
-use rig_core::streaming::{Item, PartKind, StreamEvent};
+use crate::completion::{FinishReason, Message};
+use crate::error::ProviderError;
+use crate::message::{AssistantContent, AssistantMessage, CallId, ToolCall, ToolName};
+use crate::streaming::{Item, PartKind, StreamEvent};
 
 use super::policy::TurnPolicy;
 
@@ -116,7 +119,7 @@ impl PartialStreamedTurn {
             return None;
         };
         let user_message = Message::User {
-            content: rig_core::tool::feedback::invalid_call_feedback(
+            content: crate::tool::feedback::invalid_call_feedback(
                 &turn.content,
                 &invalid_tool_call.id,
                 &feedback,
@@ -389,10 +392,10 @@ impl StreamedTurnAssembler {
 
     /// Snapshot of the turn so far, for diagnostics and rollback messages:
     /// `partial` is what the stream folded so far
-    /// ([`Streamed::partial`](rig_core::streaming::Streamed::partial)).
+    /// (the host adapter).
     pub fn partial_turn(
         &self,
-        partial: &rig_core::completion::CompletionResponse,
+        partial: &crate::completion::CompletionResponse,
     ) -> PartialStreamedTurn {
         PartialStreamedTurn {
             head: partial.continued(Vec::new()),
@@ -404,7 +407,7 @@ impl StreamedTurnAssembler {
     /// Assemble the completed turn from the response the stream folded
     /// into: its choice in start order, with the calls this turn ignored
     /// left out and the ones it repaired renamed.
-    pub fn finish(self, response: &rig_core::completion::CompletionResponse) -> StreamedTurn {
+    pub fn finish(self, response: &crate::completion::CompletionResponse) -> StreamedTurn {
         let choice = response
             .choice
             .iter()

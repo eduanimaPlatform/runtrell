@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/conversation/note.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Notes in a transcript ([`Note`]).
 
 use serde::{Deserialize, Serialize};
@@ -11,8 +14,8 @@ use super::{Aside, Author, MessageId};
 /// conversation; one made [`unsaved`](Aside::unsaved) is not saved.
 ///
 /// ```
-/// use rig_core::conversation::{Author, Conversation, Note};
-/// use rig_core::message::Message;
+/// use runtrell_protocol::conversation::{Author, Conversation, Note};
+/// use runtrell_protocol::message::Message;
 ///
 /// let mut conversation = Conversation::new();
 /// conversation.push(Message::user("Why tabs?"));

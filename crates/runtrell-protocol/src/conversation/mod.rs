@@ -1,10 +1,13 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/conversation/mod.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! One conversation model for all of rig: [`Conversation`], its edits as
 //! [`Change`]s, [`TurnRecord`]s kept as asides, and [`pairing`] of tool
 //! calls with their results.
 //!
 //! ```
-//! use rig_core::conversation::{Author, Conversation, Entry, pairing};
-//! use rig_core::message::Message;
+//! use runtrell_protocol::conversation::{Author, Conversation, Entry, pairing};
+//! use runtrell_protocol::message::Message;
 //!
 //! let mut conversation = Conversation::new();
 //! let hello = conversation.push(Message::user("Hello"));
@@ -734,8 +737,8 @@ impl Conversation {
     /// that carries an id would take one that meant another message here.
     ///
     /// ```
-    /// use rig_core::completion::Message;
-    /// use rig_core::conversation::{Author, Conversation, Entry};
+    /// use runtrell_protocol::completion::Message;
+    /// use runtrell_protocol::conversation::{Author, Conversation, Entry};
     ///
     /// let mut conversation = Conversation::from_messages([
     ///     Message::user("one"),
@@ -888,8 +891,8 @@ impl Conversation {
     /// rewrote.
     ///
     /// ```
-    /// use rig_core::completion::Message;
-    /// use rig_core::conversation::{Author, Conversation};
+    /// use runtrell_protocol::completion::Message;
+    /// use runtrell_protocol::conversation::{Author, Conversation};
     ///
     /// let mut conversation = Conversation::from_messages([
     ///     Message::user("one"),
@@ -1135,8 +1138,8 @@ impl Conversation {
     /// nested call, keeps its own time.
     ///
     /// ```
-    /// use rig_core::conversation::Conversation;
-    /// use rig_core::message::Message;
+    /// use runtrell_protocol::conversation::Conversation;
+    /// use runtrell_protocol::message::Message;
     ///
     /// let mut conversation = Conversation::new();
     /// conversation.dated(1_790_848_800_000, |conversation| {

@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/options/mapping.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! What a completion wire answers for each option: [`OptionFields`] is the
 //! request's options as a wire reads them, and [`OptionMap`] holds one
 //! [`Mapping`] per option. Neither has `..` or a default, so a new option

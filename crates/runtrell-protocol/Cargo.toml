@@ -1,0 +1,24 @@
+[package]
+name = "runtrell-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT AND Apache-2.0"
+description = "Independent, host-driven agent decision protocol extracted from Rig"
+
+[dependencies]
+base64 = "0.22"
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order", "float_roundtrip"] }
+thiserror = "2"
+tracing = "0.1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+fastrand = "2"
+web-time = "1"
+
+[dev-dependencies]
+proptest = "1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }

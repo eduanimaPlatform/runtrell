@@ -1,0 +1,668 @@
+[
+  {
+    "source": "crates/rig-agent/src/run/batch.rs",
+    "target": "crates/runtrell-protocol/src/run/batch.rs",
+    "source_sha256": "cf217fff9dab1bcc4e999dc348c8eab5aab11dc6c154f19fc97954181365f206",
+    "snapshot_sha256": "cf217fff9dab1bcc4e999dc348c8eab5aab11dc6c154f19fc97954181365f206",
+    "source_lines": 94,
+    "extracted_sha256": "4dd66ac04fe84b0a6064675e52be0c39ad15dee5b657e7bffa548c2f1f30ef47",
+    "extracted_lines": 97
+  },
+  {
+    "source": "crates/rig-agent/src/run/calls.rs",
+    "target": "crates/runtrell-protocol/src/run/calls.rs",
+    "source_sha256": "3365056fb6723b3360ca8a3ba7ca7a0851aebccd468e675bca596c41fc01a048",
+    "snapshot_sha256": "3365056fb6723b3360ca8a3ba7ca7a0851aebccd468e675bca596c41fc01a048",
+    "source_lines": 178,
+    "extracted_sha256": "7eb5246f3e29d60d212b591f12d7e276d3ed9974ed714cb5b7d2ccc986d7e469",
+    "extracted_lines": 181
+  },
+  {
+    "source": "crates/rig-agent/src/run/committed.rs",
+    "target": "crates/runtrell-protocol/src/run/committed.rs",
+    "source_sha256": "5d64766395cf7ae725cc4c2f39c8a8756f532ab0ac4b296fe81a2e040e463f72",
+    "snapshot_sha256": "5d64766395cf7ae725cc4c2f39c8a8756f532ab0ac4b296fe81a2e040e463f72",
+    "source_lines": 93,
+    "extracted_sha256": "bcccb640461b8198d1cea621458c545612a0180c90c9cf15cc4a8ef15edd2eb9",
+    "extracted_lines": 96
+  },
+  {
+    "source": "crates/rig-agent/src/run/committed/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/committed/tests.rs",
+    "source_sha256": "5d8f3471f96d076c57e20826ec21c3a12470eedb64ca2341452fcd0155a8f380",
+    "snapshot_sha256": "5d8f3471f96d076c57e20826ec21c3a12470eedb64ca2341452fcd0155a8f380",
+    "source_lines": 177,
+    "extracted_sha256": "80a5059e0c74895577f74cc928bc0cf2e87be2e2e3955b44d137211269a8c5d9",
+    "extracted_lines": 179
+  },
+  {
+    "source": "crates/rig-agent/src/run/mod.rs",
+    "target": "crates/runtrell-protocol/src/run/mod.rs",
+    "source_sha256": "7b10790b03bb265e66891682bd6e218dd748c510ebcfb93f236cc44c8df4a692",
+    "snapshot_sha256": "7b10790b03bb265e66891682bd6e218dd748c510ebcfb93f236cc44c8df4a692",
+    "source_lines": 1812,
+    "extracted_sha256": "344697a991891a1643278b7f541d96acd30827239745632f15ee49bf2aab05a2",
+    "extracted_lines": 1789
+  },
+  {
+    "source": "crates/rig-agent/src/run/output.rs",
+    "target": "crates/runtrell-protocol/src/run/output.rs",
+    "source_sha256": "91048096c58c30c3426360b47377d27aff8a82a1027c553d6b54a3d38105f214",
+    "snapshot_sha256": "91048096c58c30c3426360b47377d27aff8a82a1027c553d6b54a3d38105f214",
+    "source_lines": 30,
+    "extracted_sha256": "555fc347db0c67dc56894834da1cda7893e7ace05e1d7660b2e94e61d3f8d537",
+    "extracted_lines": 33
+  },
+  {
+    "source": "crates/rig-agent/src/run/patch.rs",
+    "target": "crates/runtrell-protocol/src/run/patch.rs",
+    "source_sha256": "e9960e69182a21beb1204252ff77b6f066d3d2c545bbfb04a35bd57205029477",
+    "snapshot_sha256": "e9960e69182a21beb1204252ff77b6f066d3d2c545bbfb04a35bd57205029477",
+    "source_lines": 181,
+    "extracted_sha256": "8f23d906fe23d900285620d7fa6949b9a478e6e8dc4f9e34d85e1ce76d38a1bb",
+    "extracted_lines": 184
+  },
+  {
+    "source": "crates/rig-agent/src/run/patch/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/patch/tests.rs",
+    "source_sha256": "5250249c73d85516239b270ab4d86040d8150286ad4b33ae6a3db66421f313de",
+    "snapshot_sha256": "5250249c73d85516239b270ab4d86040d8150286ad4b33ae6a3db66421f313de",
+    "source_lines": 21,
+    "extracted_sha256": "ab93ded5bfc97973ce917d8c354dea1edf102da4e75d693148cd0279edc5b3df",
+    "extracted_lines": 24
+  },
+  {
+    "source": "crates/rig-agent/src/run/policy.rs",
+    "target": "crates/runtrell-protocol/src/run/policy.rs",
+    "source_sha256": "476621c5d08db8cc4b5147026eb545479ed09b56b565dab524363fbdc80639dc",
+    "snapshot_sha256": "476621c5d08db8cc4b5147026eb545479ed09b56b565dab524363fbdc80639dc",
+    "source_lines": 366,
+    "extracted_sha256": "aeef88994e6e8057f1dec2c5b78bd71b7634579e0841096068b7ab23773c4599",
+    "extracted_lines": 369
+  },
+  {
+    "source": "crates/rig-agent/src/run/policy/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/policy/tests.rs",
+    "source_sha256": "41eefff01a4fbb61cd1d3c00aeb30e95379eb58640d4138719344e728879115c",
+    "snapshot_sha256": "41eefff01a4fbb61cd1d3c00aeb30e95379eb58640d4138719344e728879115c",
+    "source_lines": 212,
+    "extracted_sha256": "240cd8593b25343ebfeef3bc03d8f356e863fa6a841b42bd4f589634fe16b8c1",
+    "extracted_lines": 215
+  },
+  {
+    "source": "crates/rig-agent/src/run/prepare.rs",
+    "target": "crates/runtrell-protocol/src/run/prepare.rs",
+    "source_sha256": "28d024242a5500723ba24868d23792158bf3d070fc060b2abd1ee29675bfe31e",
+    "snapshot_sha256": "28d024242a5500723ba24868d23792158bf3d070fc060b2abd1ee29675bfe31e",
+    "source_lines": 346,
+    "extracted_sha256": "2002310323a241119e414bdd1316dbed33b4bb32f28f542e490b670f3eaef421",
+    "extracted_lines": 347
+  },
+  {
+    "source": "crates/rig-agent/src/run/prepare/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/prepare/tests.rs",
+    "source_sha256": "6d0abdf322e6a9ee0922ce847c53cf3bf105cc4b7b9c0adc66df8366b285830a",
+    "snapshot_sha256": "6d0abdf322e6a9ee0922ce847c53cf3bf105cc4b7b9c0adc66df8366b285830a",
+    "source_lines": 60,
+    "extracted_sha256": "0e918566fc452bf34448850408959607e0b840e0d986b4a57353b26c12d33c69",
+    "extracted_lines": 63
+  },
+  {
+    "source": "crates/rig-agent/src/run/response.rs",
+    "target": "crates/runtrell-protocol/src/run/response.rs",
+    "source_sha256": "a36ffdb5c388d3de5c2b0850c0fd03633000e67dd0ae5206fe5d6f47fe0e8b13",
+    "snapshot_sha256": "a36ffdb5c388d3de5c2b0850c0fd03633000e67dd0ae5206fe5d6f47fe0e8b13",
+    "source_lines": 382,
+    "extracted_sha256": "081e2433cb12b19b5892dc2862406536a362ce93dfef80e55231ddcf47ba9eb3",
+    "extracted_lines": 300
+  },
+  {
+    "source": "crates/rig-agent/src/run/spec.rs",
+    "target": "crates/runtrell-protocol/src/run/spec.rs",
+    "source_sha256": "dc74813bd63ae6178627e88c840960069051a6fb4ee3f04fe6d4edcf33b6ae46",
+    "snapshot_sha256": "dc74813bd63ae6178627e88c840960069051a6fb4ee3f04fe6d4edcf33b6ae46",
+    "source_lines": 135,
+    "extracted_sha256": "0fbef7862922b73097ed7187e955303c6448338a727b6bf5d2b3ba7aabf118f4",
+    "extracted_lines": 128
+  },
+  {
+    "source": "crates/rig-agent/src/run/spec/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/spec/tests.rs",
+    "source_sha256": "0d304250d75161a27daace68385a9585cd8d060f7a5911dd835208bbe5ba7bf2",
+    "snapshot_sha256": "0d304250d75161a27daace68385a9585cd8d060f7a5911dd835208bbe5ba7bf2",
+    "source_lines": 72,
+    "extracted_sha256": "ca540c48a5500e06ebe455fe1f01d54e4dfb12e0cec5ec926ece2132634cda6a",
+    "extracted_lines": 74
+  },
+  {
+    "source": "crates/rig-agent/src/run/streamed.rs",
+    "target": "crates/runtrell-protocol/src/run/streamed.rs",
+    "source_sha256": "24f1910517181b2f3003d1e5a5ee1a1ff9037842399f5fe2d0b836a9daef1ae5",
+    "snapshot_sha256": "24f1910517181b2f3003d1e5a5ee1a1ff9037842399f5fe2d0b836a9daef1ae5",
+    "source_lines": 455,
+    "extracted_sha256": "d99c24b5b8d3c78d3a0da1a760e0bbc5c26ed5c58dedb6c51b4255ad166520bb",
+    "extracted_lines": 458
+  },
+  {
+    "source": "crates/rig-agent/src/run/streamed/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/streamed/tests.rs",
+    "source_sha256": "215ac3d8144e984fad2cbbd154e859c302486737fd5e14174718229f2d61299a",
+    "snapshot_sha256": "215ac3d8144e984fad2cbbd154e859c302486737fd5e14174718229f2d61299a",
+    "source_lines": 634,
+    "extracted_sha256": "2f5b74dea8d360c86144e0d6020f4cc7f22369eed90f6b5ac663d532d552aa37",
+    "extracted_lines": 637
+  },
+  {
+    "source": "crates/rig-agent/src/run/tests.rs",
+    "target": "crates/runtrell-protocol/src/run/tests.rs",
+    "source_sha256": "5146e4e912c7668932ba0ce9650d72d49f42d85da4d80304ea5848770c59de51",
+    "snapshot_sha256": "5146e4e912c7668932ba0ce9650d72d49f42d85da4d80304ea5848770c59de51",
+    "source_lines": 2282,
+    "extracted_sha256": "d78f83408de8276e2171b1197f5cc3cc73c188e36165faa5cff60e88121480fc",
+    "extracted_lines": 2261
+  },
+  {
+    "source": "crates/rig-agent/src/run/transcript.rs",
+    "target": "crates/runtrell-protocol/src/run/transcript.rs",
+    "source_sha256": "eac23a1dbc77949c18631a036b310f7c2fa82fea1ef63cfd343e01870cbe407a",
+    "snapshot_sha256": "eac23a1dbc77949c18631a036b310f7c2fa82fea1ef63cfd343e01870cbe407a",
+    "source_lines": 49,
+    "extracted_sha256": "eae9ef8e17c5e90c96793a76a971ea67c162820b86e41151edf66daa6842ccce",
+    "extracted_lines": 52
+  },
+  {
+    "source": "crates/rig-core/src/completion/handle.rs",
+    "target": "crates/runtrell-protocol/src/completion/handle.rs",
+    "source_sha256": "309a6a20af08d1957ffc41b247685a10d1a22d11abf551f627e58db53941f3ed",
+    "snapshot_sha256": "309a6a20af08d1957ffc41b247685a10d1a22d11abf551f627e58db53941f3ed",
+    "source_lines": 86,
+    "extracted_sha256": "b36cd1880ccbcfaa49fb49f200b9403a46025ca747b16ac197a345b11df39a60",
+    "extracted_lines": 89
+  },
+  {
+    "source": "crates/rig-core/src/completion/history.rs",
+    "target": "crates/runtrell-protocol/src/completion/history.rs",
+    "source_sha256": "cf64ff1f97b52e51e4fb79cdaaa52f36f9709c6da2e65721816025b4150a47f8",
+    "snapshot_sha256": "cf64ff1f97b52e51e4fb79cdaaa52f36f9709c6da2e65721816025b4150a47f8",
+    "source_lines": 1796,
+    "extracted_sha256": "607c2f9117d650ac22f3df2d64984bcd1c5418e41c03c15c50aa33ed10d338a2",
+    "extracted_lines": 1790
+  },
+  {
+    "source": "crates/rig-core/src/completion/history/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/history/tests.rs",
+    "source_sha256": "a977a7ce4ecdcd671800165d2947135d0c59d61f86b930caade30f697b989d85",
+    "snapshot_sha256": "a977a7ce4ecdcd671800165d2947135d0c59d61f86b930caade30f697b989d85",
+    "source_lines": 1236,
+    "extracted_sha256": "b0b7c1fca94d50a1bd48b8d1b8a2de8b580aa22a86dc4f26822ad1cf89dd16ae",
+    "extracted_lines": 1230
+  },
+  {
+    "source": "crates/rig-core/src/completion/message.rs",
+    "target": "crates/runtrell-protocol/src/completion/message.rs",
+    "source_sha256": "eb48489b31cbef8e36ce06414232e42c5f6fc4c504d68882fc6a295c7f93b9c2",
+    "snapshot_sha256": "eb48489b31cbef8e36ce06414232e42c5f6fc4c504d68882fc6a295c7f93b9c2",
+    "source_lines": 1514,
+    "extracted_sha256": "36a327c376785053159291ce4d6996ff22503e66a1d0b5d071a25836595a3d62",
+    "extracted_lines": 1517
+  },
+  {
+    "source": "crates/rig-core/src/completion/message/citation.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/citation.rs",
+    "source_sha256": "2fadb173c68eed0d14983b3b569096e4ebb50a8ec11f2c433b52a49df8aa01da",
+    "snapshot_sha256": "2fadb173c68eed0d14983b3b569096e4ebb50a8ec11f2c433b52a49df8aa01da",
+    "source_lines": 368,
+    "extracted_sha256": "8ca6ab0e572b80748d7a83deba717612deec3f8697e63044560be340434eb275",
+    "extracted_lines": 372
+  },
+  {
+    "source": "crates/rig-core/src/completion/message/citation/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/citation/tests.rs",
+    "source_sha256": "6146a8db38d500e163a7a5aad8989b13df5102323a5d6bb3a5989514af724759",
+    "snapshot_sha256": "6146a8db38d500e163a7a5aad8989b13df5102323a5d6bb3a5989514af724759",
+    "source_lines": 169,
+    "extracted_sha256": "fad434a4f17714ffe1cb96daefd9dbab79435d757c1c099ac70a38a1b693804a",
+    "extracted_lines": 172
+  },
+  {
+    "source": "crates/rig-core/src/completion/message/identity.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/identity.rs",
+    "source_sha256": "abd8c90321ffb4442006ff89671570f2ae7c6e3e979cc27757dc476f8b7d480e",
+    "snapshot_sha256": "abd8c90321ffb4442006ff89671570f2ae7c6e3e979cc27757dc476f8b7d480e",
+    "source_lines": 262,
+    "extracted_sha256": "648e1d4da59ef5f0721dc13a6082435aad9258e785fd8ccfd682fad5abeec975",
+    "extracted_lines": 265
+  },
+  {
+    "source": "crates/rig-core/src/completion/message/native.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/native.rs",
+    "source_sha256": "2b8a3cd5c86a5c527ed3be0cfb8f2b82d2ba65d3e52f69f97e2e52915cd57b6e",
+    "snapshot_sha256": "2b8a3cd5c86a5c527ed3be0cfb8f2b82d2ba65d3e52f69f97e2e52915cd57b6e",
+    "source_lines": 331,
+    "extracted_sha256": "9ccb2b73cd45f1da9ff646930f5994ce5d9d8090285f1294b82bab9f14ffa311",
+    "extracted_lines": 334
+  },
+  {
+    "source": "crates/rig-core/src/completion/message/native/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/native/tests.rs",
+    "source_sha256": "b8cfa72fd683da319305a43ec25d09d5b3695160abba790bd215b70f84deef07",
+    "snapshot_sha256": "b8cfa72fd683da319305a43ec25d09d5b3695160abba790bd215b70f84deef07",
+    "source_lines": 209,
+    "extracted_sha256": "ae73fd36966ba4600e9fa6b5f75c3acccc208a2be1d26cc279520710b15c368e",
+    "extracted_lines": 212
+  },
+  {
+    "source": "crates/rig-core/src/completion/message/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/tests.rs",
+    "source_sha256": "4f82e08ea3cd62e7835b4c2a1af1b6d6ae64b413badfb876d3894689d420b492",
+    "snapshot_sha256": "4f82e08ea3cd62e7835b4c2a1af1b6d6ae64b413badfb876d3894689d420b492",
+    "source_lines": 349,
+    "extracted_sha256": "f9ee2351d6d1da2250550ff4fce63ec6a03974297fdef52fcbc47f1a56ff2f63",
+    "extracted_lines": 352
+  },
+  {
+    "source": "crates/rig-core/src/completion/options.rs",
+    "target": "crates/runtrell-protocol/src/completion/options.rs",
+    "source_sha256": "68baa207371bf9fba0dad74c6871e95e630646ef12ac3e96056b2d1b2772e79e",
+    "snapshot_sha256": "68baa207371bf9fba0dad74c6871e95e630646ef12ac3e96056b2d1b2772e79e",
+    "source_lines": 408,
+    "extracted_sha256": "c4a7dae19cbe512c04a6aa3210d57d353c4ab3d3c7fbbb482f0159d349dff414",
+    "extracted_lines": 383
+  },
+  {
+    "source": "crates/rig-core/src/completion/options/mapping.rs",
+    "target": "crates/runtrell-protocol/src/completion/options/mapping.rs",
+    "source_sha256": "67ccae7c9814cfe3048b318e58a71e67ae73821bfefdb647401132597629c945",
+    "snapshot_sha256": "67ccae7c9814cfe3048b318e58a71e67ae73821bfefdb647401132597629c945",
+    "source_lines": 169,
+    "extracted_sha256": "aabe770bbfd3200d9a07ff078a98ea2c27eae4b130a3d5277599bfc8c75d97b4",
+    "extracted_lines": 172
+  },
+  {
+    "source": "crates/rig-core/src/completion/options/merge.rs",
+    "target": "crates/runtrell-protocol/src/completion/options/merge.rs",
+    "source_sha256": "eb5a037d7ace7779388e34f8cb89481d0d92001d088a233c4dc3f4611153b2c9",
+    "snapshot_sha256": "eb5a037d7ace7779388e34f8cb89481d0d92001d088a233c4dc3f4611153b2c9",
+    "source_lines": 959,
+    "extracted_sha256": "08b0549eb778c7ab663c0f041eaacf717f1980c2904335f224967e277736b9b9",
+    "extracted_lines": 627
+  },
+  {
+    "source": "crates/rig-core/src/completion/options/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/options/tests.rs",
+    "source_sha256": "d36f6d4c9d39e48f7f1e0a8c826832a21c488385ed472d9e70c8da41358979ee",
+    "snapshot_sha256": "d36f6d4c9d39e48f7f1e0a8c826832a21c488385ed472d9e70c8da41358979ee",
+    "source_lines": 408,
+    "extracted_sha256": "7b31a1f6e8c5d7be1873aa8280ddd129d01c1b2be57c3918e70472f64bc267f8",
+    "extracted_lines": 441
+  },
+  {
+    "source": "crates/rig-core/src/completion/provider_options.rs",
+    "target": "crates/runtrell-protocol/src/completion/provider_options.rs",
+    "source_sha256": "7aeb88bc6461aa44050e3ac77960968d94454a7503a3a8cc42c098e5bac3a127",
+    "snapshot_sha256": "7aeb88bc6461aa44050e3ac77960968d94454a7503a3a8cc42c098e5bac3a127",
+    "source_lines": 463,
+    "extracted_sha256": "ac145e21f433d96da48d267ee3d95710bee78b9c4e94b8d33cf84870841d2c81",
+    "extracted_lines": 493
+  },
+  {
+    "source": "crates/rig-core/src/completion/provider_options/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/provider_options/tests.rs",
+    "source_sha256": "a9e118b95006990298f3e78bed11869a3f174969a924785ae872ba41a53c016a",
+    "snapshot_sha256": "a9e118b95006990298f3e78bed11869a3f174969a924785ae872ba41a53c016a",
+    "source_lines": 741,
+    "extracted_sha256": "d68f9038daafeca47d7265cab886b878306791b21bed6a6795b65528c1049839",
+    "extracted_lines": 742
+  },
+  {
+    "source": "crates/rig-core/src/completion/request.rs",
+    "target": "crates/runtrell-protocol/src/completion/request.rs",
+    "source_sha256": "c6ddea80679258ea178ec4bdb27db672269d78f3c5d2c54fcbeb86401a7703f0",
+    "snapshot_sha256": "c6ddea80679258ea178ec4bdb27db672269d78f3c5d2c54fcbeb86401a7703f0",
+    "source_lines": 1874,
+    "extracted_sha256": "c0836886b193ed6c74fee1dd3608c265ea7240f4be8541c2cfd7b6641479673f",
+    "extracted_lines": 1891
+  },
+  {
+    "source": "crates/rig-core/src/completion/request/plain_value_tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/request/plain_value_tests.rs",
+    "source_sha256": "572ec49f4a68d0d3e9c0798dab571ca5a07b6af76e83383c71b71488d8aa96ca",
+    "snapshot_sha256": "572ec49f4a68d0d3e9c0798dab571ca5a07b6af76e83383c71b71488d8aa96ca",
+    "source_lines": 266,
+    "extracted_sha256": "d049adaee8ba74f2af5739cf9644a886cc5c7772957cd734b082e5a09d15fc40",
+    "extracted_lines": 269
+  },
+  {
+    "source": "crates/rig-core/src/completion/request/response_identity_tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/request/response_identity_tests.rs",
+    "source_sha256": "50592350125a24f50012cb111ce4678f859ccd4c3755097834c58ccaccf055f5",
+    "snapshot_sha256": "50592350125a24f50012cb111ce4678f859ccd4c3755097834c58ccaccf055f5",
+    "source_lines": 18,
+    "extracted_sha256": "2f6449008ce5f0f354dc6e69e83f1e876a81391143d41e480802bff610ca86ea",
+    "extracted_lines": 21
+  },
+  {
+    "source": "crates/rig-core/src/completion/request/tests.rs",
+    "target": "crates/runtrell-protocol/src/completion/request/tests.rs",
+    "source_sha256": "c9c1b562f095f35a7ca8007849ad4c0105c2cf549cae656bc9429845a3619059",
+    "snapshot_sha256": "c9c1b562f095f35a7ca8007849ad4c0105c2cf549cae656bc9429845a3619059",
+    "source_lines": 884,
+    "extracted_sha256": "4318a11dea97a1735297f6f0f9bafb13a7be218bc75fc86d78843ea1f1bd4afb",
+    "extracted_lines": 788
+  },
+  {
+    "source": "crates/rig-core/src/conversation/aside.rs",
+    "target": "crates/runtrell-protocol/src/conversation/aside.rs",
+    "source_sha256": "6b33e90563e3e6cb4588df02788df2f716e17329af07472f76e49e574d48573a",
+    "snapshot_sha256": "6b33e90563e3e6cb4588df02788df2f716e17329af07472f76e49e574d48573a",
+    "source_lines": 101,
+    "extracted_sha256": "5840e5eb8f3a4a6f27981e61e1f9d2ffdcb626be5b041ee2a21f47edf7993adb",
+    "extracted_lines": 104
+  },
+  {
+    "source": "crates/rig-core/src/conversation/author.rs",
+    "target": "crates/runtrell-protocol/src/conversation/author.rs",
+    "source_sha256": "877156ba45697db777bbe4706be5faf2350c1d21fa72fa8ec830b3a510466f17",
+    "snapshot_sha256": "877156ba45697db777bbe4706be5faf2350c1d21fa72fa8ec830b3a510466f17",
+    "source_lines": 122,
+    "extracted_sha256": "94cf0f43610769e1206bfaccdfb8592feb72d2140266842f05240fb1524bac15",
+    "extracted_lines": 125
+  },
+  {
+    "source": "crates/rig-core/src/conversation/lineage.rs",
+    "target": "crates/runtrell-protocol/src/conversation/lineage.rs",
+    "source_sha256": "6d027682ca51315c606fcdd51ffbede6c9a1be12cc09f2c0ba8b1bfbb00d65fa",
+    "snapshot_sha256": "6d027682ca51315c606fcdd51ffbede6c9a1be12cc09f2c0ba8b1bfbb00d65fa",
+    "source_lines": 41,
+    "extracted_sha256": "e92d48f3d4293f0c1fdf1c2be52dd7dd1c7c81b9752003801e987452b80ccdbe",
+    "extracted_lines": 44
+  },
+  {
+    "source": "crates/rig-core/src/conversation/mod.rs",
+    "target": "crates/runtrell-protocol/src/conversation/mod.rs",
+    "source_sha256": "93587122558767b70683213c37def38a97e1506b58cfc55f5a921ff8989510a9",
+    "snapshot_sha256": "93587122558767b70683213c37def38a97e1506b58cfc55f5a921ff8989510a9",
+    "source_lines": 1362,
+    "extracted_sha256": "15898378e7088de0cabbf01dcf1c57837c9a357baba75107b86b7103df8f22b4",
+    "extracted_lines": 1365
+  },
+  {
+    "source": "crates/rig-core/src/conversation/note.rs",
+    "target": "crates/runtrell-protocol/src/conversation/note.rs",
+    "source_sha256": "7436e927ca889a1ccee6d49226b95857d6362a04f430eb2bfb05054e2cd9ae1f",
+    "snapshot_sha256": "7436e927ca889a1ccee6d49226b95857d6362a04f430eb2bfb05054e2cd9ae1f",
+    "source_lines": 57,
+    "extracted_sha256": "b19f52269708f5466bea77aca15c4bb569062e173f37b508f0b4938a4d0bcfc1",
+    "extracted_lines": 60
+  },
+  {
+    "source": "crates/rig-core/src/conversation/pairing.rs",
+    "target": "crates/runtrell-protocol/src/conversation/pairing.rs",
+    "source_sha256": "ff1dedaad983586f4ab1d9ff4872f0b02bcd7a03321946daf11a9436bc61f97a",
+    "snapshot_sha256": "ff1dedaad983586f4ab1d9ff4872f0b02bcd7a03321946daf11a9436bc61f97a",
+    "source_lines": 712,
+    "extracted_sha256": "59b7dfd4afa34f2f28c2177e11f42d0b8dcb0a810e952b60aa5e5c85b027deaa",
+    "extracted_lines": 715
+  },
+  {
+    "source": "crates/rig-core/src/conversation/pairing/tests.rs",
+    "target": "crates/runtrell-protocol/src/conversation/pairing/tests.rs",
+    "source_sha256": "dba9a33c7c2aebbac303692c5baaee8310baf24fe33af33f921ca30edae6fb4c",
+    "snapshot_sha256": "dba9a33c7c2aebbac303692c5baaee8310baf24fe33af33f921ca30edae6fb4c",
+    "source_lines": 423,
+    "extracted_sha256": "9f5dd1cd80269487778e1a8a8e11a6cb49052723577b590f267a2ae83b282b08",
+    "extracted_lines": 426
+  },
+  {
+    "source": "crates/rig-core/src/conversation/tests.rs",
+    "target": "crates/runtrell-protocol/src/conversation/tests.rs",
+    "source_sha256": "25f7812e0fa93227aaac2cd863cd29f90d63ba9ad8dcd785bbc2988b6a2b608a",
+    "snapshot_sha256": "25f7812e0fa93227aaac2cd863cd29f90d63ba9ad8dcd785bbc2988b6a2b608a",
+    "source_lines": 599,
+    "extracted_sha256": "c2b03d0c64016ee46a241aca6f30b8b2d10e9f0e2ecac443159dcd5a76bf5b14",
+    "extracted_lines": 602
+  },
+  {
+    "source": "crates/rig-core/src/conversation/turn.rs",
+    "target": "crates/runtrell-protocol/src/conversation/turn.rs",
+    "source_sha256": "37744289da54efbb24d7fad42332e29cf72caa55836dc0619d69721bdabe6dae",
+    "snapshot_sha256": "37744289da54efbb24d7fad42332e29cf72caa55836dc0619d69721bdabe6dae",
+    "source_lines": 103,
+    "extracted_sha256": "1dc4431a0864902a5840582af4aa882f1829a56d66a65ee09053054502478731",
+    "extracted_lines": 106
+  },
+  {
+    "source": "crates/rig-core/src/error.rs",
+    "target": "crates/runtrell-protocol/src/error.rs",
+    "source_sha256": "294c3f8ca2ac0d3cde5c19190d47685e5b4e91d3172bbedabc544b5310c42172",
+    "snapshot_sha256": "294c3f8ca2ac0d3cde5c19190d47685e5b4e91d3172bbedabc544b5310c42172",
+    "source_lines": 907,
+    "extracted_sha256": "9412994e57ecd08f0e97be953cf0f3145b9e12da9945e369aaaa0122baf88a5a",
+    "extracted_lines": 409
+  },
+  {
+    "source": "crates/rig-core/src/error/tests.rs",
+    "target": "crates/runtrell-protocol/src/error/tests.rs",
+    "source_sha256": "d9acede239fa7a06cd8026a8837e557485d3aa91ec60b6bbb6aca0b4fbe9b13c",
+    "snapshot_sha256": "d9acede239fa7a06cd8026a8837e557485d3aa91ec60b6bbb6aca0b4fbe9b13c",
+    "source_lines": 665,
+    "extracted_sha256": "548b91d2ad715ed5852e5dee824dfb9e3b6b053473b7df5a6ca54d4997f34118",
+    "extracted_lines": 201
+  },
+  {
+    "source": "crates/rig-core/src/id.rs",
+    "target": "crates/runtrell-protocol/src/id.rs",
+    "source_sha256": "f81fe35408f3d1ef554ca380ff703015ae492339931c7e2be011b442e3cee5ce",
+    "snapshot_sha256": "f81fe35408f3d1ef554ca380ff703015ae492339931c7e2be011b442e3cee5ce",
+    "source_lines": 130,
+    "extracted_sha256": "3a7648096d0ffd623feecdff4e6660952a6daf8616e1d1f148637a7c7711b210",
+    "extracted_lines": 133
+  },
+  {
+    "source": "crates/rig-core/src/id/tests.rs",
+    "target": "crates/runtrell-protocol/src/id/tests.rs",
+    "source_sha256": "292c607c4309c7c6a107c358c8e89953d71c029298a73c5dd1fe91d74a64fcb9",
+    "snapshot_sha256": "292c607c4309c7c6a107c358c8e89953d71c029298a73c5dd1fe91d74a64fcb9",
+    "source_lines": 21,
+    "extracted_sha256": "8101180a6457b6185fc22c05eb9a8ff5d4d468b5d8aa3e0f7adf50737767b228",
+    "extracted_lines": 24
+  },
+  {
+    "source": "crates/rig-core/src/json_utils.rs",
+    "target": "crates/runtrell-protocol/src/json_utils.rs",
+    "source_sha256": "95cb9fd4b14821e5c9f6f0738014da67a58c454bdd0170378501a7bb0277ef46",
+    "snapshot_sha256": "95cb9fd4b14821e5c9f6f0738014da67a58c454bdd0170378501a7bb0277ef46",
+    "source_lines": 448,
+    "extracted_sha256": "fdb709442c07427e4031e69905492c0eb3ce38b684847dcf00877b406df1d491",
+    "extracted_lines": 451
+  },
+  {
+    "source": "crates/rig-core/src/json_utils/tests.rs",
+    "target": "crates/runtrell-protocol/src/json_utils/tests.rs",
+    "source_sha256": "4f49d944255e463a8db193b60fcc271a19efed931a06794a4007ee6aa8d52b73",
+    "snapshot_sha256": "4f49d944255e463a8db193b60fcc271a19efed931a06794a4007ee6aa8d52b73",
+    "source_lines": 212,
+    "extracted_sha256": "e5debbfc5ddfb4020f065de3e297ca0dd45641d891ad4275b38041451723925a",
+    "extracted_lines": 215
+  },
+  {
+    "source": "crates/rig-core/src/streaming/event.rs",
+    "target": "crates/runtrell-protocol/src/streaming/event.rs",
+    "source_sha256": "1275d3b909b96ba79ad50eaf20cc248889d22c842ecfea513f97f3315fd06b8c",
+    "snapshot_sha256": "1275d3b909b96ba79ad50eaf20cc248889d22c842ecfea513f97f3315fd06b8c",
+    "source_lines": 339,
+    "extracted_sha256": "3dbd67d0a355b48f236c7d07b7157dcabc8ecedfd2bd8cf400d1cac841ff4b72",
+    "extracted_lines": 342
+  },
+  {
+    "source": "crates/rig-core/src/streaming/event/tests.rs",
+    "target": "crates/runtrell-protocol/src/streaming/event/tests.rs",
+    "source_sha256": "cc1223c18d95549f1544b12acaa495d3b92e15013e7f4738ed4f9c7f5757f73b",
+    "snapshot_sha256": "cc1223c18d95549f1544b12acaa495d3b92e15013e7f4738ed4f9c7f5757f73b",
+    "source_lines": 180,
+    "extracted_sha256": "6cc95a18771e50130a4c29d89aadc37466aeb99a9d2873db95d750ecf2dbc656",
+    "extracted_lines": 183
+  },
+  {
+    "source": "crates/rig-core/src/streaming/mod.rs",
+    "target": "crates/runtrell-protocol/src/streaming/mod.rs",
+    "source_sha256": "901c3beba59556e709512771da1ed628edbace8d0deea0ec038ac1b13349f4d6",
+    "snapshot_sha256": "901c3beba59556e709512771da1ed628edbace8d0deea0ec038ac1b13349f4d6",
+    "source_lines": 308,
+    "extracted_sha256": "5f56be594bfeebd9827ade2041ff007c216363b2687a1461abf9a6fcd3ebee77",
+    "extracted_lines": 42
+  },
+  {
+    "source": "crates/rig-core/src/streaming/unknown_payload_tests.rs",
+    "target": "crates/runtrell-protocol/src/streaming/unknown_payload_tests.rs",
+    "source_sha256": "cc22a906e70bba83affbfc7dcdd39a6246f6cf96693f64067fbed3107b0829d7",
+    "snapshot_sha256": "cc22a906e70bba83affbfc7dcdd39a6246f6cf96693f64067fbed3107b0829d7",
+    "source_lines": 26,
+    "extracted_sha256": "bde82e2a4f56a59b1e941159c3490f6dd10f98bbe9f1889f87bb2e1b9f95ce65",
+    "extracted_lines": 29
+  },
+  {
+    "source": "crates/rig-core/src/structured_output.rs",
+    "target": "crates/runtrell-protocol/src/structured_output.rs",
+    "source_sha256": "692f20953dd624cffadac54a3aa34322784ec808a661964b2e9d0b8fa17e7f84",
+    "snapshot_sha256": "692f20953dd624cffadac54a3aa34322784ec808a661964b2e9d0b8fa17e7f84",
+    "source_lines": 107,
+    "extracted_sha256": "f9a1ea0ce3cff8de722b60a722c60ff9815598e0295a9281eb6cbcf372db4609",
+    "extracted_lines": 110
+  },
+  {
+    "source": "crates/rig-core/src/test_utils/completion.rs",
+    "target": "crates/runtrell-protocol/src/test_utils/mod.rs",
+    "source_sha256": "a638693eb14911637b322eea6f7be1803b01463c53a003dae785c2a4dc9c7bc2",
+    "snapshot_sha256": "a638693eb14911637b322eea6f7be1803b01463c53a003dae785c2a4dc9c7bc2",
+    "source_lines": 583,
+    "extracted_sha256": "02ce5053e8dac7ee22150fa407087518298a3492ce5342be3050aefd6b12b2c7",
+    "extracted_lines": 69
+  },
+  {
+    "source": "crates/rig-core/src/test_utils/trace_capture.rs",
+    "target": "crates/runtrell-protocol/src/test_utils/trace_capture.rs",
+    "source_sha256": "5a43357f061c8981f992e27133706c756acfc82aeae44c8ebb683360e7bba642",
+    "snapshot_sha256": "5a43357f061c8981f992e27133706c756acfc82aeae44c8ebb683360e7bba642",
+    "source_lines": 283,
+    "extracted_sha256": "9f2e01c07a42b13fc0ee8a6d53586e68ce9d902427c80121f131dfc86d015bc6",
+    "extracted_lines": 287
+  },
+  {
+    "source": "crates/rig-core/src/tool/feedback.rs",
+    "target": "crates/runtrell-protocol/src/tool/feedback.rs",
+    "source_sha256": "c3777917f5c1296d51586af2f50b9233a87a19d04ef185e392ef9e550797f869",
+    "snapshot_sha256": "c3777917f5c1296d51586af2f50b9233a87a19d04ef185e392ef9e550797f869",
+    "source_lines": 213,
+    "extracted_sha256": "7e4386544cd486dab1e47fe9c85f71e30b06d53813c956668c253cb5e7dfb4db",
+    "extracted_lines": 216
+  },
+  {
+    "source": "crates/rig-core/src/tool/feedback/tests.rs",
+    "target": "crates/runtrell-protocol/src/tool/feedback/tests.rs",
+    "source_sha256": "a0205d7048f18cd7a3fb55ad74fcc26d9b70bcca1f66c69c82fe71593d988847",
+    "snapshot_sha256": "a0205d7048f18cd7a3fb55ad74fcc26d9b70bcca1f66c69c82fe71593d988847",
+    "source_lines": 139,
+    "extracted_sha256": "374eea3364a6b89875388fb4714f16283ce0a357fca32822f1cb41402fcd4290",
+    "extracted_lines": 142
+  },
+  {
+    "source": "crates/rig-core/src/tool/footprint.rs",
+    "target": "crates/runtrell-protocol/src/tool/footprint.rs",
+    "source_sha256": "08e2bdcf0b54862f3c5a0a472856c329b743aeaf11ff7b63d5d2be970e8cafa4",
+    "snapshot_sha256": "08e2bdcf0b54862f3c5a0a472856c329b743aeaf11ff7b63d5d2be970e8cafa4",
+    "source_lines": 169,
+    "extracted_sha256": "f5890f181fe05096baa3b747c192a2e371801108ff01b2cb9f1056d3148726c3",
+    "extracted_lines": 172
+  },
+  {
+    "source": "crates/rig-core/src/tool/footprint/tests.rs",
+    "target": "crates/runtrell-protocol/src/tool/footprint/tests.rs",
+    "source_sha256": "9ecd7474adb8a384c2e8c176c57078464c0dc343bbf35ec15d608e59735f7450",
+    "snapshot_sha256": "9ecd7474adb8a384c2e8c176c57078464c0dc343bbf35ec15d608e59735f7450",
+    "source_lines": 136,
+    "extracted_sha256": "25e4827f0a3ad0c3e4dabc5f83ba2c531df54c844e977a6fe8090d15e6db2f4c",
+    "extracted_lines": 116
+  },
+  {
+    "source": "crates/rig-core/src/tool/output.rs",
+    "target": "crates/runtrell-protocol/src/tool/output.rs",
+    "source_sha256": "c7130f3ead24b9eb275a902f7e8f50e1bf0fe7055abcc0c60d8c535d2d27c8dd",
+    "snapshot_sha256": "c7130f3ead24b9eb275a902f7e8f50e1bf0fe7055abcc0c60d8c535d2d27c8dd",
+    "source_lines": 243,
+    "extracted_sha256": "8440a7224ed1f17449f12828cdc69207f7d8bb253a48db5a3243f955880e6000",
+    "extracted_lines": 246
+  },
+  {
+    "source": "crates/rig-core/src/tool/output/debug_tests.rs",
+    "target": "crates/runtrell-protocol/src/tool/output/debug_tests.rs",
+    "source_sha256": "1d0f18922522cfc2ac7fe9f028a50eb1e8e757cee33a9369db9580ca54b8a983",
+    "snapshot_sha256": "1d0f18922522cfc2ac7fe9f028a50eb1e8e757cee33a9369db9580ca54b8a983",
+    "source_lines": 28,
+    "extracted_sha256": "a0beacbaf0b4c107c0fe13016dd12ab6b268706cbb66957955a76923fe7fe21d",
+    "extracted_lines": 31
+  },
+  {
+    "source": "crates/rig-core/src/tool/output/tests.rs",
+    "target": "crates/runtrell-protocol/src/tool/output/tests.rs",
+    "source_sha256": "73691961ad300562ba760885890f63fba61dfa67d793f5860392169dac2b3093",
+    "snapshot_sha256": "73691961ad300562ba760885890f63fba61dfa67d793f5860392169dac2b3093",
+    "source_lines": 68,
+    "extracted_sha256": "283ff0318074430acf4198abec856de7d306b67777d85f32fcd967a75c89e24f",
+    "extracted_lines": 71
+  },
+  {
+    "source": "crates/rig-core/src/tool/result.rs",
+    "target": "crates/runtrell-protocol/src/tool/result.rs",
+    "source_sha256": "1ddf4602f63a6ae73ae0e225c5236f03e5e66f690fd01cdd35dc5d421f70ee94",
+    "snapshot_sha256": "1ddf4602f63a6ae73ae0e225c5236f03e5e66f690fd01cdd35dc5d421f70ee94",
+    "source_lines": 566,
+    "extracted_sha256": "595e0ad6b2b5617e10e5eacb3ca1c72f5b6840639dd83c63b7c1c74a509a9b90",
+    "extracted_lines": 566
+  },
+  {
+    "source": "crates/rig-core/src/tool/result/tests.rs",
+    "target": "crates/runtrell-protocol/src/tool/result/tests.rs",
+    "source_sha256": "35f6db2275090bf8c7d4c6f7d3f27e38bd089698e79b51f578c27e1df6ec84d4",
+    "snapshot_sha256": "35f6db2275090bf8c7d4c6f7d3f27e38bd089698e79b51f578c27e1df6ec84d4",
+    "source_lines": 104,
+    "extracted_sha256": "6779f82781e41213023d696f27dc26795f9980f8e29614c5f558186d8ad34651",
+    "extracted_lines": 107
+  },
+  {
+    "source": "crates/rig-core/src/tool/schema.rs",
+    "target": "crates/runtrell-protocol/src/tool/schema.rs",
+    "source_sha256": "400573aa036c97701da16ff9c60f3946270a5bd2e02562d6b832109ea98d3cdf",
+    "snapshot_sha256": "400573aa036c97701da16ff9c60f3946270a5bd2e02562d6b832109ea98d3cdf",
+    "source_lines": 89,
+    "extracted_sha256": "167da07ad54feb96e9488a0d5c2999cc668c799e5fb1a749aba025fabdf95787",
+    "extracted_lines": 92
+  },
+  {
+    "source": "crates/rig-core/src/tool/validate.rs",
+    "target": "crates/runtrell-protocol/src/tool/validate.rs",
+    "source_sha256": "ad1ccc39671801f44d5b7527e91d9994617371edd7514181a864fe487208db21",
+    "snapshot_sha256": "ad1ccc39671801f44d5b7527e91d9994617371edd7514181a864fe487208db21",
+    "source_lines": 460,
+    "extracted_sha256": "09a911198401d1eb7f0b6670e4b7d8d63b03f2ee05ffc6db9904fe8dc1de60b1",
+    "extracted_lines": 464
+  },
+  {
+    "source": "crates/rig-core/src/tool/validate/tests.rs",
+    "target": "crates/runtrell-protocol/src/tool/validate/tests.rs",
+    "source_sha256": "d271e3bb017a28a1c86d3735a778d2314f8ee6cd3332e4766fdc9bb290d34485",
+    "snapshot_sha256": "d271e3bb017a28a1c86d3735a778d2314f8ee6cd3332e4766fdc9bb290d34485",
+    "source_lines": 159,
+    "extracted_sha256": "bf3fb75020326bf7a29348f12f1b940aea64b213ca82cbccc570c783d95a3bc2",
+    "extracted_lines": 162
+  },
+  {
+    "source": "crates/rig-core/src/wire/citation.rs",
+    "target": "crates/runtrell-protocol/src/completion/message/citation/input.rs",
+    "source_sha256": "2c184f4eb14c1ab2d223d893ae009e4f2a2b5083358e7bf299a70091b3059024",
+    "snapshot_sha256": "2c184f4eb14c1ab2d223d893ae009e4f2a2b5083358e7bf299a70091b3059024",
+    "source_lines": 68,
+    "extracted_sha256": "30bd7ec01f9fbb9415a5beb25af786f2f68052242d0f4e82429ba68e6fc0b109",
+    "extracted_lines": 71
+  }
+]

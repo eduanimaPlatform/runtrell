@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/tool/schema.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! A tool's parameters derived from its arguments type, so the schema the
 //! model sees and the type its arguments are parsed into cannot disagree:
 //!
@@ -11,7 +14,7 @@
 //!     limit: Option<u32>,
 //! }
 //!
-//! let schema = rig_core::tool::args_schema::<Args>();
+//! let schema = runtrell_protocol::tool::args_schema::<Args>();
 //! let limit = serde_json::json!({"type": "integer", "minimum": 0,
 //!     "description": "How many lines to read."});
 //! assert_eq!(schema["properties"]["limit"], limit);

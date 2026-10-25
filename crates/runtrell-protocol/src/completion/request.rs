@@ -1,7 +1,10 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/request.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Completion requests, normalized responses, and provider model contracts.
 //!
 //! ```
-//! use rig_core::completion::CompletionRequest;
+//! use runtrell_protocol::completion::CompletionRequest;
 //!
 //! let request = CompletionRequest::new("Who are you?")
 //!     .preamble("You are a concise assistant.")
@@ -113,7 +116,7 @@ impl ToolDefinition {
 /// idempotent, open world.
 ///
 /// ```
-/// use rig_core::completion::ToolAnnotations;
+/// use runtrell_protocol::completion::ToolAnnotations;
 ///
 /// let read = ToolAnnotations::default().with_read_only(true).with_open_world(false);
 /// assert!(read.read_only() && !read.destructive() && !read.open_world());
@@ -565,7 +568,15 @@ impl CompletionResponse {
                 if self.choice.contains(&block) {
                     block
                 } else {
-                    crate::operation::completion::canonical(block)
+                    match block {
+                        AssistantContent::Opaque(opaque) => {
+                            AssistantContent::Opaque(crate::message::Opaque {
+                                replay: false,
+                                ..opaque
+                            })
+                        }
+                        block => block.into_canonical(),
+                    }
                 }
             })
             .collect();
@@ -638,7 +649,9 @@ impl From<CompletionResponseRepr> for CompletionResponse {
             unfinished_calls,
             raw,
         } = repr;
-        use crate::provider_response::reported;
+        fn reported(id: Option<String>) -> Option<String> {
+            id.filter(|id| !id.is_empty())
+        }
         origin.response_id = reported(origin.response_id);
         origin.response_model = reported(origin.response_model);
         let mut response =
@@ -668,7 +681,7 @@ impl From<CompletionResponseRepr> for CompletionResponse {
 /// `Some(0)`. Serialized as the same keys, absent when `None`.
 ///
 /// ```
-/// use rig_core::completion::Usage;
+/// use runtrell_protocol::completion::Usage;
 ///
 /// let usage = Usage::new().input_tokens(12).output_tokens(3).total_tokens(15);
 /// assert_eq!(usage.input_tokens, Some(12));
@@ -703,7 +716,7 @@ pub struct Usage {
     /// What the turn cost in USD, when known. Never derived from the token
     /// counters here, and none of them is derived from it. A cost the
     /// provider reports is its figure. One priced from the model's catalog
-    /// spec ([`Pricing::cost`](crate::catalog::Pricing::cost), from the
+    /// spec (the host adapter, from the
     /// facts the wire was connected with) is the
     /// standard-tier list price of the counted tokens: it leaves out the
     /// service tier, long-context price tiers and hosted-tool fees (web
@@ -802,7 +815,7 @@ impl Usage {
 /// A part is `None` when its source does not give it: a provider that
 /// reports only a total leaves every part `None`, and one that reports
 /// input and output leaves the cache parts `None`. A cost computed from
-/// the catalog ([`Pricing::cost`](crate::catalog::Pricing::cost)) leaves a
+/// the catalog (the host adapter) leaves a
 /// cache part `None` when the catalog lists no rate for it and the usage
 /// has such tokens; its `total` then sums the known parts only, and it is
 /// not complete. A part is never filled with a placeholder `0.0`. Summing
@@ -843,7 +856,7 @@ impl Cost {
     /// A cost from the catalog's prices, where `None` marks a part whose
     /// tokens had no price: `total` sums the known parts, and the cost is
     /// complete only when no part is `None`.
-    pub(crate) fn priced(
+    pub fn priced(
         input: f64,
         output: f64,
         cache_read: Option<f64>,
@@ -991,7 +1004,7 @@ impl AddAssign for Usage {
 /// were not fully priced.
 ///
 /// ```
-/// use rig_core::completion::{Usage, UsageTotals};
+/// use runtrell_protocol::completion::{Usage, UsageTotals};
 ///
 /// let mut totals = UsageTotals::default();
 /// totals.record(&Usage::new().input_tokens(100).output_tokens(20).total_tokens(120));
@@ -1320,13 +1333,7 @@ impl CompletionRequest {
     /// `String` and is not checked. A tool result holding one empty text
     /// block is not empty.
     ///
-    /// [`Model::call`](crate::driver::Model::call),
-    /// [`Model::stream`](crate::driver::Model::stream) and their `_observed`
-    /// twins run it before encoding, so it covers
-    /// [`DynModel`](crate::DynModel), every model a handler serves and the
-    /// agent runtimes built on them. The OpenAI Responses websocket session
-    /// sends without the driver and runs it on each send. Code that encodes
-    /// a request some other way should call it first.
+    /// Hosts call this before sending the request through their adapter.
     pub fn validate_message_content(&self) -> Result<(), ProviderError> {
         if self.chat_history.is_empty() {
             return Err(ProviderError::request(
@@ -1469,7 +1476,7 @@ impl CompletionRequest {
     /// provider tools added before it. Set `additional_params` first.
     ///
     /// ```
-    /// use rig_core::completion::CompletionRequest;
+    /// use runtrell_protocol::completion::CompletionRequest;
     ///
     /// let request = CompletionRequest::new("Who are you?")
     ///     .preamble("You are a concise assistant.")
@@ -1657,7 +1664,7 @@ impl CompletionRequest {
     /// called after it sets its one field on top.
     ///
     /// ```
-    /// use rig_core::completion::{CompletionRequest, Effort, GenerationOptions};
+    /// use runtrell_protocol::completion::{CompletionRequest, Effort, GenerationOptions};
     ///
     /// let shared = GenerationOptions::new().reasoning(Effort::High).seed(1);
     /// let request = CompletionRequest::new("hi").seed(7).options(shared.clone()).seed(2);
@@ -1773,15 +1780,25 @@ impl CompletionRequest {
     /// wire never reads them.
     ///
     /// ```
-    /// use rig_core::completion::{CompletionRequest, ProviderOptions};
-    /// use rig_core::providers::openrouter::extension::{
-    ///     OpenRouterExt, OpenRouterOptions, ProviderPreferences,
-    /// };
-    ///
-    /// let request = CompletionRequest::new("hi").provider_option(
-    ///     OpenRouterOptions::new().provider(ProviderPreferences::new().allow_fallbacks(false)),
-    /// );
-    /// assert!(request.provider_options.contains::<OpenRouterExt>());
+    /// use runtrell_protocol::completion::{ProviderOptions, ProviderExtension, ExtensionOptions, ReplyExtras};
+    /// use runtrell_protocol::message::Api;
+    /// use serde::{Serialize, Deserialize};
+    /// struct Host;
+    /// #[derive(Clone, Debug, Serialize)]
+    /// struct Options { #[serde(rename = "*")] shared: serde_json::Value }
+    /// impl ExtensionOptions for Options { type Ext = Host; }
+    /// #[derive(Deserialize)]
+    /// struct Extras { receipt: String }
+    /// impl ReplyExtras for Extras {
+    ///     fn from_reply(_: &Api, raw: &serde_json::Value) -> Result<Self, serde_json::Error> { serde_json::from_value(raw.clone()) }
+    /// }
+    /// impl ProviderExtension for Host {
+    ///     const PROVIDER: &'static str = "host";
+    ///     type Options = Options;
+    ///     type Extras = Extras;
+    /// }
+    /// let options = ProviderOptions::new().set(Options { shared: serde_json::json!({"session_id":"s-1"}) });
+    /// assert!(options.contains::<Host>());
     /// ```
     pub fn provider_option<O: ExtensionOptions>(mut self, options: O) -> Self {
         self.provider_options = std::mem::take(&mut self.provider_options).set(options);

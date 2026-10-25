@@ -1,0 +1,5 @@
+runtrell-postgres (Runtrell)
+Copyright 2026 Runtrell contributors
+Licensed under Apache License, Version 2.0.
+State transition rules are adapted from runtrell's Apache-2.0 MemoryStore.
+No schema or implementation from the previous internal runtime is included.

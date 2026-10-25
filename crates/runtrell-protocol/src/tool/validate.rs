@@ -1,9 +1,12 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/tool/validate.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Whether a value fits a JSON schema, and where it does not: the check a
 //! tool call's arguments pass before the tool runs
 //! ([`arguments_refusal`](crate::tool::feedback::arguments_refusal)).
 //!
 //! ```
-//! use rig_core::tool::validate::{Problem, validate};
+//! use runtrell_protocol::tool::validate::{Problem, validate};
 //! use serde_json::json;
 //!
 //! let schema = json!({
@@ -345,7 +348,8 @@ fn bounds(schema: &Map<String, Value>, number: &Number, at: &str) -> Vec<Problem
     let Some(n) = number.as_f64() else {
         return Vec::new();
     };
-    let checks: [(&str, &str, fn(f64, f64) -> bool); 4] = [
+    type BoundCheck = (&'static str, &'static str, fn(f64, f64) -> bool);
+    let checks: [BoundCheck; 4] = [
         ("minimum", "at least", |n, bound| n >= bound),
         ("maximum", "at most", |n, bound| n <= bound),
         ("exclusiveMinimum", "more than", |n, bound| n > bound),

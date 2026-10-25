@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/history/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use serde_json::json;
 
 use super::*;
@@ -636,17 +639,8 @@ fn a_current_call_item_carries_the_wire_id_its_result_gets() {
     let AssistantContent::ToolCall(tool_call) = &call else {
         panic!("a call");
     };
-    let history = vec![
-        turn(Some(same()), vec![call.clone()]),
-        Message::User {
-            content: vec![UserContent::ToolResult(
-                tool_call.result(vec![ToolResultContent::text("ok")]),
-            )],
-        },
-    ];
-    let ids =
-        crate::providers::internal::wire_ids::WireIds::for_target(&history, &Slotted, "model-a");
-    assert_eq!(ids.of(&tool_call.id), Some("tool-0"));
+    let ids = std::collections::HashMap::from([(tool_call.id.clone(), "tool-0".to_owned())]);
+    assert_eq!(ids.get(&tool_call.id).map(String::as_str), Some("tool-0"));
     assert_eq!(
         call.replay(&Slotted, &ids),
         Replay::Item(std::borrow::Cow::Owned(

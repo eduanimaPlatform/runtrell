@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/policy/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
 
 /// Every decision type a host may cache in serializable state round-trips.
@@ -76,7 +79,7 @@ fn tool_names(names: &[&str]) -> BTreeSet<String> {
 fn resolve_specific_rejects_missing_tools() {
     let executable = tool_names(&["add"]);
     let choice = ToolChoice::Specific {
-        function_names: vec![rig_core::message::ToolName::new("missing").expect("tool name")],
+        function_names: vec![crate::message::ToolName::new("missing").expect("tool name")],
     };
 
     let err = TurnPolicy::resolve(executable, Some(choice), None, None)
@@ -146,7 +149,7 @@ fn specific_typo_is_not_blamed_on_active_tools() {
     // because the filter never had that tool to drop.
     let executable = tool_names(&["add"]);
     let choice = ToolChoice::Specific {
-        function_names: vec![rig_core::message::ToolName::new("nonexistent").expect("tool name")],
+        function_names: vec![crate::message::ToolName::new("nonexistent").expect("tool name")],
     };
     let err = TurnPolicy::resolve(executable, Some(choice), None, Some(&tool_names(&["add"])))
         .expect_err("Specific naming a non-existent tool must fail locally");
@@ -175,7 +178,7 @@ fn the_allowed_set_follows_the_choice() {
 #[test]
 fn a_persisted_policy_re_derives_its_allowed_set() {
     let choice = ToolChoice::Specific {
-        function_names: vec![rig_core::message::ToolName::new("add").expect("tool name")],
+        function_names: vec![crate::message::ToolName::new("add").expect("tool name")],
     };
     let policy = TurnPolicy::new(tool_names(&["add", "sub"]), Some(choice), None).expect("policy");
     let json = serde_json::to_value(&policy).expect("serialize");
@@ -193,10 +196,10 @@ fn a_persisted_policy_re_derives_its_allowed_set() {
 #[test]
 fn the_context_reports_the_policy_it_was_built_from() {
     let policy = TurnPolicy::new(tool_names(&["add"]), Some(ToolChoice::None), None).expect("none");
-    let call = rig_core::message::ToolCall::from_wire(
+    let call = crate::message::ToolCall::from_wire(
         "c1",
-        rig_core::message::ToolFunction::new(
-            rig_core::message::ToolName::new("add").expect("tool name"),
+        crate::message::ToolFunction::new(
+            crate::message::ToolName::new("add").expect("tool name"),
             serde_json::json!({}),
         ),
     );

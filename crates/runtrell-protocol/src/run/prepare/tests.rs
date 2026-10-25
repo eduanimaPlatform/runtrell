@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/prepare/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
 
 /// A prepared request produced by `prepare_request` survives a JSON round
@@ -15,7 +18,7 @@ fn prepared_request_round_trips_through_serde() {
         &ProviderCapabilities::default(),
         &[Message::user("hi").into()],
         vec![std::sync::Arc::new(ToolDefinition {
-            name: rig_core::message::ToolName::new("add").expect("tool name"),
+            name: crate::message::ToolName::new("add").expect("tool name"),
             description: "adds".to_string(),
             parameters: serde_json::json!({"type": "object"}),
             annotations: Default::default(),

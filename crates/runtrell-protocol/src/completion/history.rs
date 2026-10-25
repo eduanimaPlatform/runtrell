@@ -1,13 +1,16 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/completion/history.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Shaping a conversation for the model it is sent to. [`adapt`] is the one
 //! place history meets its target: a turn the same model produced keeps its
 //! provider items, any other turn replays from its canonical fields, failed
 //! turns are skipped, and every tool call gets an answer.
 //!
 //! ```
-//! use rig_core::completion::CompletionRequest;
-//! use rig_core::completion::history::{Accepts, ReplayTarget, adapt};
-//! use rig_core::completion::options::{Mapping, OptionFields, OptionMap};
-//! use rig_core::message::{Api, Message};
+//! use runtrell_protocol::completion::CompletionRequest;
+//! use runtrell_protocol::completion::history::{Accepts, ReplayTarget, adapt};
+//! use runtrell_protocol::completion::options::{Mapping, OptionFields, OptionMap};
+//! use runtrell_protocol::message::{Api, Message};
 //!
 //! #[derive(Debug)]
 //! struct Target;
@@ -72,7 +75,6 @@ use crate::message::{
     DocumentSourceKind, ImageMediaType, Message, Origin, Text, ToolResult, ToolResultContent,
     UserContent,
 };
-use crate::wasm_compat::WasmCompatSync;
 
 /// What replaces a user image for a model without image input.
 pub const USER_IMAGE_OMITTED: &str = "(image omitted: model does not support images)";
@@ -175,7 +177,7 @@ pub enum Media<'a> {
 
 /// The model a request is sent to, as replay sees it. Every completion wire
 /// implements it.
-pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
+pub trait ReplayTarget: std::fmt::Debug + Sync {
     /// The wire format.
     fn api(&self) -> Api;
 
@@ -203,13 +205,6 @@ pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
         request: &crate::completion::CompletionRequest,
         fields: crate::completion::options::OptionFields<'_>,
     ) -> crate::completion::options::OptionMap;
-
-    /// The model facts this wire encodes with: the spec it was connected
-    /// to and the catalog that answers for other models. `None`, the
-    /// default, answers from the built-in catalog.
-    fn facts(&self) -> Option<&crate::catalog::ModelFacts> {
-        None
-    }
 
     /// Whether the encoder carries `media` to `model`: its source (data,
     /// URL, file id or string), its media type, and where it sits. [`adapt`]
@@ -407,13 +402,13 @@ impl AssistantContent {
     pub fn replay(
         &self,
         target: &dyn ReplayTarget,
-        ids: &crate::providers::internal::wire_ids::WireIds,
+        ids: &std::collections::HashMap<CallId, String>,
     ) -> Replay<'_> {
         if let Some(item) = self.native_item() {
             return match (self, target.call_id_slot()) {
                 (AssistantContent::ToolCall(call), Some(slot)) => {
                     let mut item = item.clone();
-                    if let Some(id) = ids.of(&call.id) {
+                    if let Some(id) = ids.get(&call.id) {
                         set_pointer(&mut item, slot, serde_json::Value::String(id.to_owned()));
                     }
                     Replay::Item(std::borrow::Cow::Owned(item))
@@ -493,7 +488,7 @@ pub fn adapt(history: &[Message], target: &dyn ReplayTarget) -> Vec<Message> {
 /// so a history that starts with the same messages (the same `Arc`s, or
 /// equal ones) is adapted from that turn on.
 #[derive(Debug, Default)]
-pub(crate) struct Memo {
+pub struct Memo {
     shape: Option<Shape>,
     given: Vec<Arc<Message>>,
     shaped: Vec<Option<Arc<Message>>>,
@@ -513,21 +508,21 @@ struct Shape {
 
 /// What `adapt` reads of the request a history is sent with.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     /// The model it names in place of the wire's own.
-    pub(crate) model: Option<&'a str>,
+    pub model: Option<&'a str>,
     /// Whether it continues a conversation the provider stores.
-    pub(crate) stored: bool,
+    pub stored: bool,
     /// Whether it carries tools ([`ReplayTarget::declares_tools`]): a
     /// request with none gets calls and results as text.
-    pub(crate) tools: bool,
+    pub tools: bool,
     /// The fingerprint of its tools and system prompt ([`context_of`]).
-    pub(crate) context: Option<crate::message::Fingerprint>,
+    pub context: Option<crate::message::Fingerprint>,
     /// Whether it asks for other models' reasoning as reasoning
     /// ([`CompletionRequest::foreign_reasoning`]).
     ///
     /// [`CompletionRequest::foreign_reasoning`]: field@crate::completion::CompletionRequest::foreign_reasoning
-    pub(crate) foreign_reasoning: bool,
+    pub foreign_reasoning: bool,
 }
 
 impl Default for Request<'_> {
@@ -547,7 +542,7 @@ impl Default for Request<'_> {
 /// context-bound item was made under. The prompt is the leading non-blank
 /// system messages, or every one when the target folds them into one, so
 /// the request before `adapt` and after it give the same fingerprint.
-pub(crate) fn context_of(
+pub fn context_of(
     request: &crate::completion::CompletionRequest,
     target: &dyn ReplayTarget,
     model: &str,
@@ -598,7 +593,7 @@ pub(crate) fn raw_tools(request: &crate::completion::CompletionRequest) -> &[ser
 }
 
 /// [`adapt`] for `request`.
-pub(crate) fn adapt_for(
+pub fn adapt_for(
     history: Vec<Arc<Message>>,
     target: &dyn ReplayTarget,
     request: &Request<'_>,
@@ -840,7 +835,7 @@ fn reshaped(
 /// never covers what follows the prefix, however the adaption dropped,
 /// added or joined messages around it. A point past the end of `written`
 /// goes.
-pub(crate) fn cache_points(
+pub fn cache_points(
     points: &[crate::completion::CachePoint],
     written: &[Arc<Message>],
     documents: Option<&Message>,
@@ -1112,9 +1107,8 @@ impl<'a> Renamed<'a> {
     /// an earlier call took it, the same id with its tail replaced by a
     /// counter until it is free. A counter of lowercase alphanumerics keeps
     /// the id's length and is legal on every wire. An id rig issued stays
-    /// as it is: [`WireIds`] spells it.
+    /// as it is: the host-supplied call ID map spells it.
     ///
-    /// [`WireIds`]: crate::providers::internal::wire_ids::WireIds
     fn claim(&mut self, source: Cow<'a, CallId>, wanted: Cow<'a, str>) -> Cow<'a, CallId> {
         let id = match &*source {
             CallId::Local(_) => source.clone(),

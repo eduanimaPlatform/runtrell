@@ -1,9 +1,12 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/structured_output.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Model-facing structured-output policy shared by the agent runtimes: the
 //! synthetic output tool's name and description, the instructions and reprompts
 //! the model sees, and the required-field check on an answer.
 //!
 //! ```
-//! use rig_core::structured_output::{output_tool_augmentation, output_tool_name};
+//! use runtrell_protocol::structured_output::{output_tool_augmentation, output_tool_name};
 //! let name = output_tool_name(|taken| taken == "final_result");
 //! assert_eq!(name, "final_result_1");
 //! assert!(output_tool_augmentation(&name).contains("`final_result_1`"));

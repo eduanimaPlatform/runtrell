@@ -1,12 +1,15 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/spec/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
 
 #[test]
 fn spec_round_trips_through_json() {
     let spec = RunSpec {
         preamble: Some("be brief".into()),
-        max_turns: Some(3),
+
         temperature: Some(0.2),
-        output_schema: Some(rig_core::schemars::json_schema!({"type": "object"})),
+        output_schema: Some(crate::schemars::json_schema!({"type": "object"})),
         ..RunSpec::new()
     };
     let json = serde_json::to_string(&spec).expect("serialize");
@@ -68,5 +71,4 @@ fn run_requests_stay_unwind_safe() {
     fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
     unwind_safe::<crate::run::RunSpec>();
     unwind_safe::<crate::run::PreparedRequest>();
-    unwind_safe::<crate::agent::hook::DispatchAction>();
 }

@@ -1,3 +1,6 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-core/src/conversation/turn.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Turn records: where each turn of a conversation began and how it ended,
 //! kept as asides, so a saved session tells a stopped or failed turn from
 //! an answered one without the app that ran it.

@@ -1,13 +1,16 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/tests.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 use super::*;
-use rig_core::conversation::Author;
-use rig_core::message::ToolChoice;
-use rig_core::message::{StopReason, ToolFunction, ToolResultContent};
+use crate::conversation::Author;
+use crate::message::ToolChoice;
+use crate::message::{StopReason, ToolFunction, ToolResultContent};
 use serde_json::json;
 use std::sync::Arc;
 
 #[test]
 fn initial_prompt_is_rewritable_only_before_the_run_starts() {
-    let mut run = AgentRun::new("original").max_turns(2);
+    let mut run = AgentRun::new("original");
     assert!(run.initial_prompt().is_some());
     run.rewrite_initial_prompt("rewritten")
         .expect("rewrite before start");
@@ -137,7 +140,7 @@ fn text_turn(text: &str) -> ModelTurn {
 
 fn text_turn_with_raw(text: &str, raw: serde_json::Value) -> ModelTurn {
     ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
+        crate::message::AssistantMessage::default(),
         vec![AssistantContent::text(text)],
         Usage::default(),
         policy(&["add"]),
@@ -152,7 +155,7 @@ fn tool_call(id: &str, name: &str) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall::from_wire(
         id,
         ToolFunction::new(
-            rig_core::message::ToolName::new(name.to_string()).expect("tool name"),
+            crate::message::ToolName::new(name.to_string()).expect("tool name"),
             json!({"x": 1}),
         ),
     ))
@@ -164,7 +167,7 @@ fn tool_call_turn(id: &str, name: &str) -> ModelTurn {
 
 fn tool_call_turn_with_raw(id: &str, name: &str, raw: serde_json::Value) -> ModelTurn {
     ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
+        crate::message::AssistantMessage::default(),
         vec![tool_call(id, name)],
         Usage::default(),
         policy(&["add"]),
@@ -176,8 +179,8 @@ fn tool_result(id: &str, output: &str) -> UserContent {
     // Every result in these tests answers a call to the `add` tool; the
     // executed tool's name is required data on a result.
     UserContent::tool_result(
-        rig_core::message::CallId::from_wire(id),
-        rig_core::message::ToolName::new("add").expect("tool name"),
+        crate::message::CallId::from_wire(id),
+        crate::message::ToolName::new("add").expect("tool name"),
         vec![ToolResultContent::text(output)],
     )
 }
@@ -197,8 +200,8 @@ fn exec_call(call: PendingToolCall) -> ExecCall {
     }
 }
 
-fn success(output: &str) -> rig_core::tool::ToolResult {
-    rig_core::tool::ToolResult::success(rig_core::tool::ToolOutput::text(output))
+fn success(output: &str) -> crate::tool::ToolResult {
+    crate::tool::ToolResult::success(crate::tool::ToolOutput::text(output))
 }
 
 /// Answer an open call: an executable one with `output`, a malformed one
@@ -236,7 +239,7 @@ fn expect_call_tools(run: &mut AgentRun) -> Vec<PendingToolCall> {
 
 fn expect_done(run: &mut AgentRun) -> PromptResponse {
     match run.next_step().expect("next_step should succeed") {
-        AgentRunStep::Done(response) => response,
+        AgentRunStep::Done(response) => *response,
         step => panic!("expected Done, got {step:?}"),
     }
 }
@@ -261,7 +264,7 @@ fn expect_needs_resolution(outcome: ModelTurnOutcome) -> InvalidToolCallContext 
 fn repeated_model_turn_reuses_prompt_without_recording_rejected_response() {
     let first_usage = usage(10, 3);
     let second_usage = usage(7, 2);
-    let mut run = AgentRun::new("question").max_turns(2);
+    let mut run = AgentRun::new("question");
 
     let (first_prompt, first_history, first_turn) = expect_call_model(&mut run);
     assert_eq!(*first_prompt, Message::user("question"));
@@ -295,7 +298,7 @@ fn repeated_model_turn_reuses_prompt_without_recording_rejected_response() {
 
 #[test]
 fn model_turn_retry_rejects_tool_calls_without_advancing_to_execution() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
 
     expect_call_model(&mut run);
     expect_continue(
@@ -321,7 +324,7 @@ fn model_turn_retry_rejects_tool_calls_without_advancing_to_execution() {
 
 #[test]
 fn tool_roundtrip_threads_history_and_usage() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
 
     expect_call_model(&mut run);
     expect_continue(
@@ -377,7 +380,7 @@ fn ended_call_turn(stop: StopReason, finish: FinishReason) -> ModelTurn {
 /// with the turn's stop reason, and the turn stays in the run's messages.
 #[test]
 fn a_failed_turn_runs_no_tools_and_ends_the_run() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     let reason = "Provider finish_reason: pause_turn_unmapped";
     expect_continue(
@@ -405,7 +408,7 @@ fn a_failed_turn_runs_no_tools_and_ends_the_run() {
 /// A turn the token limit ended is finished, so its complete call runs.
 #[test]
 fn a_length_turn_with_a_complete_call_runs_it() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ended_call_turn(StopReason::Length, FinishReason::Length))
@@ -442,7 +445,7 @@ fn invalid_tool_call_fail_returns_unknown_tool_call() {
 
 #[test]
 fn no_answers_leave_the_calls_open() {
-    let mut run = AgentRun::new("call something").max_turns(2);
+    let mut run = AgentRun::new("call something");
 
     expect_call_model(&mut run);
     expect_continue(
@@ -457,7 +460,7 @@ fn no_answers_leave_the_calls_open() {
 
 /// An executable call from another run at the `CallTools` step.
 fn call_from_another_run(id: &str) -> ExecCall {
-    let mut other = AgentRun::new("add things").max_turns(2);
+    let mut other = AgentRun::new("add things");
     expect_call_model(&mut other);
     expect_continue(
         other
@@ -521,7 +524,7 @@ fn done_step_is_idempotent() {
 
 #[test]
 fn serialized_run_alone_carries_pending_tool_calls() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(tool_call_turn("call_1", "add"))
@@ -559,7 +562,7 @@ fn serialized_run_alone_carries_pending_tool_calls() {
 #[test]
 fn answers_validate_against_pending_calls() {
     let drive_to_pending_tools = || {
-        let mut run = AgentRun::new("add things").max_turns(2);
+        let mut run = AgentRun::new("add things");
         expect_call_model(&mut run);
         expect_continue(
             run.model_response(tool_call_turn("call_1", "add"))
@@ -592,7 +595,7 @@ fn answers_validate_against_pending_calls() {
 /// answer is refused and nothing is committed.
 #[test]
 fn an_answer_from_an_earlier_turn_is_refused_when_ids_repeat() {
-    let mut run = AgentRun::new("add things").max_turns(3);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(tool_call_turn("c1", "add"))
@@ -629,7 +632,7 @@ fn an_answer_from_an_earlier_turn_is_refused_when_ids_repeat() {
 
 #[test]
 fn projection_start_reprojects_only_a_pending_tool_batch() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     assert_eq!(run.projection_start(), run.messages().len());
     expect_call_model(&mut run);
     expect_continue(
@@ -659,7 +662,7 @@ fn agent_run_deserializes_suspended_state() {
     // A suspended run persisted mid-`ExecutingTools` restores and resumes:
     // the recorded call's usage loads, the pending tool call is re-issued,
     // and the run advances to the next model call after results arrive.
-    let mut suspended = AgentRun::new("add things").max_turns(2);
+    let mut suspended = AgentRun::new("add things");
     expect_call_model(&mut suspended);
     expect_continue(
         suspended
@@ -685,15 +688,15 @@ fn agent_run_deserializes_suspended_state() {
     // The call's identity is its own id.
     assert_eq!(
         pending(&calls[0]).id,
-        rig_core::message::CallId::from_wire("call_1")
+        crate::message::CallId::from_wire("call_1")
     );
     answer_calls(&mut restored, "2").expect("the answer should be accepted");
     expect_call_model(&mut restored);
 }
 
 #[test]
-fn serde_round_trip_at_exhausted_budget_preserves_boundary() {
-    let mut run = AgentRun::new("add things").max_turns(1);
+fn serde_round_trip_continues_without_a_turn_limit() {
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(tool_call_turn("call_1", "add"))
@@ -706,17 +709,14 @@ fn serde_round_trip_at_exhausted_budget_preserves_boundary() {
     let mut restored: AgentRun =
         serde_json::from_str(&serialized).expect("exhausted run should deserialize");
     assert_eq!(restored.completion_calls().len(), 1);
-    let err = restored
-        .next_step()
-        .expect_err("restored run must not emit a second model call");
-    assert!(matches!(err, PromptError::MaxTurns { max_turns: 1, .. }));
-    assert_eq!(restored.turn(), 1);
+    expect_call_model(&mut restored);
+    assert_eq!(restored.turn(), 2);
 }
 
 #[test]
 fn serde_round_trip_mid_run_resumes_identically() {
     let drive_to_pending_tools = || {
-        let mut run = AgentRun::new("add things").max_turns(2);
+        let mut run = AgentRun::new("add things");
         expect_call_model(&mut run);
         expect_continue(
             run.model_response(tool_call_turn("call_1", "add").with_usage_for_test(usage(10, 5)))
@@ -795,7 +795,7 @@ fn assert_no_orphan_tool_use(messages: &[Message]) {
     let mut pending = Vec::new();
     for message in messages {
         match message {
-            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+            Message::Assistant(crate::message::AssistantMessage { content, .. }) => {
                 pending.extend(content.iter().filter_map(|item| match item {
                     AssistantContent::ToolCall(call) => Some(&call.id),
                     _ => None,
@@ -824,11 +824,11 @@ fn assert_no_orphan_tool_use(messages: &[Message]) {
 /// A turn calling the output tool with arguments that are not a JSON object.
 fn malformed_output_tool_turn() -> ModelTurn {
     ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
+        crate::message::AssistantMessage::default(),
         vec![AssistantContent::ToolCall(ToolCall::from_wire(
             "call_1",
             ToolFunction::parse(
-                rig_core::message::ToolName::new("final_result").expect("tool name"),
+                crate::message::ToolName::new("final_result").expect("tool name"),
                 "{\"x\":",
             ),
         ))],
@@ -856,7 +856,6 @@ fn a_malformed_output_tool_call_is_not_the_runs_output() {
 #[test]
 fn tool_mode_reprompts_when_output_args_are_not_a_json_object() {
     let mut run = AgentRun::new("summarize")
-        .max_turns(2)
         .with_output_tool_name("final_result")
         .with_output_validation(None, 1);
 
@@ -882,7 +881,6 @@ fn tool_mode_reprompts_when_output_args_are_not_a_json_object() {
 #[test]
 fn a_text_answer_is_not_reprompted_for_an_output_tool_the_turn_did_not_advertise() {
     let mut run = AgentRun::new("summarize")
-        .max_turns(2)
         .with_output_tool_name("final_result")
         .with_output_validation(None, 1);
     expect_call_model(&mut run);
@@ -898,9 +896,7 @@ fn a_text_answer_is_not_reprompted_for_an_output_tool_the_turn_did_not_advertise
 /// name it is an ordinary skipped call, not the run's answer.
 #[test]
 fn a_skipped_call_to_an_unadvertised_output_tool_does_not_finalize_the_run() {
-    let mut run = AgentRun::new("summarize")
-        .max_turns(2)
-        .with_output_tool_name("final_result");
+    let mut run = AgentRun::new("summarize").with_output_tool_name("final_result");
     expect_call_model(&mut run);
     let context = expect_needs_resolution(
         run.model_response(tool_call_turn("c1", "final_result"))
@@ -925,13 +921,13 @@ impl ModelTurn {
 
 /// Durable human-in-the-loop: the run is serialized while tool calls are
 /// pending, reconstructed from JSON (as a separate process / request would),
-/// and only then does the human decision land — approve one call, deny the
+/// and only then does the host policy decision land — accept one call, refuse the
 /// other. The resumed-from-bytes run accepts those results and continues to
 /// completion, proving approval can happen out-of-process / arbitrarily later.
 /// This is the state-machine foundation for `examples/agent_with_durable_approval`.
 #[test]
 fn durable_human_in_the_loop_approval_survives_serialize_resume() {
-    let mut run = AgentRun::new("pay two invoices").max_turns(3);
+    let mut run = AgentRun::new("pay two invoices");
     let (_, _, turn) = expect_call_model(&mut run);
     assert_eq!(turn, 1);
 
@@ -939,7 +935,7 @@ fn durable_human_in_the_loop_approval_survives_serialize_resume() {
     let two_calls = vec![tool_call("c1", "add"), tool_call("c2", "add")];
     let outcome = run
         .model_response(ModelTurn::new(
-            rig_core::message::AssistantMessage::default(),
+            crate::message::AssistantMessage::default(),
             two_calls,
             Usage::default(),
             policy(&["add"]),
@@ -980,7 +976,7 @@ fn durable_human_in_the_loop_approval_survives_serialize_resume() {
     resumed
         .answer_all([
             approved.answer(success("approved-result")),
-            denied.answer(rig_core::tool::ToolResult::skipped(
+            denied.answer(crate::tool::ToolResult::skipped(
                 "denied by reviewer: second payment not authorized",
             )),
         ])
@@ -1031,7 +1027,7 @@ fn raw_payload(attempt: &str) -> serde_json::Value {
 #[test]
 fn recorded_raw_survives_serde_round_trip() {
     let raw = raw_payload("suspended");
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(tool_call_turn_with_raw("call_1", "add", raw.clone()))
@@ -1102,7 +1098,7 @@ fn a_run_of_another_format_or_with_an_unknown_key_is_refused() {
     assert_eq!(
         error.to_string(),
         format!(
-            "resume refused: the run is format {}, this rig reads format {RUN_FORMAT}",
+            "resume refused: the run is format {}, this runtrell protocol reads format {RUN_FORMAT}",
             RUN_FORMAT + 1
         )
     );
@@ -1114,7 +1110,7 @@ fn a_run_of_another_format_or_with_an_unknown_key_is_refused() {
 }
 
 fn assistant(content: Vec<AssistantContent>) -> Message {
-    Message::Assistant(rig_core::message::AssistantMessage::new(content))
+    Message::Assistant(crate::message::AssistantMessage::new(content))
 }
 
 #[test]
@@ -1135,9 +1131,9 @@ fn with_validated_history_gates_construction() {
 /// selection hook is shown it as `previous_model`, as a fresh run's is.
 #[test]
 fn serde_round_trip_keeps_the_previous_model() {
-    let mut run = AgentRun::new("add things").max_turns(3);
+    let mut run = AgentRun::new("add things");
     assert!(run.previous_model().is_none());
-    run.set_previous_model(rig_core::completion::ModelRef::new("fast"));
+    run.set_previous_model(crate::completion::ModelRef::new("fast"));
     let state = serde_json::to_string(&run).expect("the run serializes");
     let restored: AgentRun = serde_json::from_str(&state).expect("the run restores");
     assert_eq!(
@@ -1153,10 +1149,10 @@ fn a_truncated_reasoning_only_turn_commits_nothing() {
     let mut run = AgentRun::new("solve this");
     let _ = expect_call_model(&mut run);
     let turn = ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
-        vec![AssistantContent::Reasoning(
-            rig_core::message::Reasoning::new("thinking, never answering"),
-        )],
+        crate::message::AssistantMessage::default(),
+        vec![AssistantContent::Reasoning(crate::message::Reasoning::new(
+            "thinking, never answering",
+        ))],
         Usage::default(),
         policy(&["add"]),
         hand_raw(),
@@ -1185,17 +1181,17 @@ fn a_truncated_reasoning_only_turn_commits_nothing() {
 #[test]
 fn transcript_helpers_build_no_message_from_nothing() {
     assert_eq!(
-        transcript::assistant_message(rig_core::message::AssistantMessage::default(), Vec::new()),
+        transcript::assistant_message(crate::message::AssistantMessage::default(), Vec::new()),
         None
     );
     assert_eq!(
-        transcript::assistant_turn(rig_core::message::AssistantMessage::default(), Vec::new()),
+        transcript::assistant_turn(crate::message::AssistantMessage::default(), Vec::new()),
         None
     );
     assert_eq!(
         transcript::invalid_tool_retry_user_message(
             &[AssistantContent::text("no calls here")],
-            &rig_core::message::CallId::from_wire("call_1"),
+            &crate::message::CallId::from_wire("call_1"),
             "feedback",
         ),
         None
@@ -1205,11 +1201,11 @@ fn transcript_helpers_build_no_message_from_nothing() {
 /// A turn calling `add` with arguments that are not a JSON object.
 fn malformed_call_turn(id: &str) -> ModelTurn {
     ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
+        crate::message::AssistantMessage::default(),
         vec![AssistantContent::ToolCall(ToolCall::from_wire(
             id,
             ToolFunction::parse(
-                rig_core::message::ToolName::new("add").expect("tool name"),
+                crate::message::ToolName::new("add").expect("tool name"),
                 "{\"x\":",
             ),
         ))],
@@ -1234,9 +1230,7 @@ fn tool_step(run: &mut AgentRun, turn: ModelTurn) -> Result<(), PromptError> {
 
 #[test]
 fn malformed_turns_past_the_limit_fail_the_run() {
-    let mut run = AgentRun::new("go")
-        .max_turns(10)
-        .max_consecutive_malformed_tool_calls(2);
+    let mut run = AgentRun::new("go").max_consecutive_malformed_tool_calls(2);
     tool_step(&mut run, malformed_call_turn("c1")).expect("first malformed turn");
     tool_step(&mut run, malformed_call_turn("c2")).expect("second malformed turn");
     let error = tool_step(&mut run, malformed_call_turn("c3")).expect_err("past the limit");
@@ -1250,9 +1244,7 @@ fn malformed_turns_past_the_limit_fail_the_run() {
 
 #[test]
 fn a_well_formed_tool_step_resets_the_malformed_count() {
-    let mut run = AgentRun::new("go")
-        .max_turns(10)
-        .max_consecutive_malformed_tool_calls(1);
+    let mut run = AgentRun::new("go").max_consecutive_malformed_tool_calls(1);
     tool_step(&mut run, malformed_call_turn("c1")).expect("malformed");
     tool_step(&mut run, tool_call_turn("c2", "add")).expect("well formed");
     tool_step(&mut run, malformed_call_turn("c3")).expect("malformed after the reset");
@@ -1260,21 +1252,19 @@ fn a_well_formed_tool_step_resets_the_malformed_count() {
 }
 
 #[test]
-fn without_a_limit_malformed_turns_are_answered_until_max_turns() {
-    let mut run = AgentRun::new("go").max_turns(4);
+fn without_a_limit_malformed_turns_continue_until_host_cancellation() {
+    let mut run = AgentRun::new("go");
     for id in ["c1", "c2", "c3", "c4"] {
         tool_step(&mut run, malformed_call_turn(id)).expect("answered");
     }
-    assert!(
-        run.next_step().is_err(),
-        "the turn budget, not a malformed limit, ends the run"
-    );
+    expect_call_model(&mut run);
+    let error = run.cancel_error("host budget exhausted");
+    assert!(matches!(error, PromptError::Cancelled { .. }));
 }
 
 #[test]
 fn ignore_does_not_lift_the_malformed_limit() {
     let mut run = AgentRun::new("go")
-        .max_turns(10)
         .max_consecutive_malformed_tool_calls(0)
         .with_unhandled_invalid_tool_call(UnhandledInvalidToolCall::Ignore);
     let error = tool_step(&mut run, malformed_call_turn("c1")).expect_err("past the limit");
@@ -1288,9 +1278,7 @@ fn ignore_does_not_lift_the_malformed_limit() {
 
 #[test]
 fn the_malformed_count_survives_serde() {
-    let mut run = AgentRun::new("go")
-        .max_turns(10)
-        .max_consecutive_malformed_tool_calls(1);
+    let mut run = AgentRun::new("go").max_consecutive_malformed_tool_calls(1);
     tool_step(&mut run, malformed_call_turn("c1")).expect("malformed");
     let saved = serde_json::to_string(&run).expect("serialize");
     let mut restored: AgentRun = serde_json::from_str(&saved).expect("deserialize");
@@ -1299,7 +1287,7 @@ fn the_malformed_count_survives_serde() {
 
 #[test]
 fn a_malformed_call_has_a_context_naming_its_tools() {
-    let mut run = AgentRun::new("go").max_turns(2);
+    let mut run = AgentRun::new("go");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(malformed_call_turn("c1"))
@@ -1323,7 +1311,7 @@ fn a_malformed_call_has_a_context_naming_its_tools() {
 
 #[test]
 fn a_malformed_call_context_history_ends_at_the_turn_carrying_the_call() {
-    let mut run = AgentRun::new("go").max_turns(2);
+    let mut run = AgentRun::new("go");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(malformed_call_turn("c1"))
@@ -1362,15 +1350,13 @@ fn invalid_call_contexts_name_why_the_name_was_rejected() {
     expect_call_model(&mut run);
     let context = expect_needs_resolution(
         run.model_response(ModelTurn::new(
-            rig_core::message::AssistantMessage::default(),
+            crate::message::AssistantMessage::default(),
             vec![tool_call("c1", "sub")],
             Usage::default(),
             TurnPolicy::new(
                 tool_names(&["add", "sub"]),
                 Some(ToolChoice::Specific {
-                    function_names: vec![
-                        rig_core::message::ToolName::new("add").expect("tool name"),
-                    ],
+                    function_names: vec![crate::message::ToolName::new("add").expect("tool name")],
                 }),
                 None,
             )
@@ -1389,7 +1375,7 @@ fn invalid_call_contexts_name_why_the_name_was_rejected() {
 /// `output` as the output tool.
 fn output_policy_turn(id: &str, name: &str, output: &str) -> ModelTurn {
     ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
+        crate::message::AssistantMessage::default(),
         vec![tool_call(id, name)],
         Usage::default(),
         TurnPolicy::new(tool_names(&["add"]), None, Some(output.to_string())).expect("policy"),
@@ -1399,7 +1385,7 @@ fn output_policy_turn(id: &str, name: &str, output: &str) -> ModelTurn {
 
 #[test]
 fn the_first_turn_policy_pins_the_output_tool() {
-    let mut run = AgentRun::new("go").max_turns(3);
+    let mut run = AgentRun::new("go");
     assert_eq!(run.output_tool_name(), None);
 
     expect_call_model(&mut run);
@@ -1438,16 +1424,16 @@ fn the_first_turn_policy_pins_the_output_tool() {
 #[test]
 fn a_provider_error_retry_still_pins_and_intercepts_the_output_tool() {
     let spec = RunSpec {
-        output_schema: Some(rig_core::schemars::json_schema!({
+        output_schema: Some(crate::schemars::json_schema!({
             "type": "object",
             "properties": {"x": {"type": "integer"}},
             "required": ["x"],
         })),
-        max_turns: Some(2),
+
         ..RunSpec::new()
     };
     let tools = vec![Arc::new(ToolDefinition {
-        name: rig_core::message::ToolName::new("add").expect("tool name"),
+        name: crate::message::ToolName::new("add").expect("tool name"),
         description: "adds".to_string(),
         parameters: json!({"type": "object"}),
         annotations: Default::default(),
@@ -1479,7 +1465,7 @@ fn a_provider_error_retry_still_pins_and_intercepts_the_output_tool() {
         .to_string();
     expect_continue(
         run.model_response(ModelTurn::new(
-            rig_core::message::AssistantMessage::default(),
+            crate::message::AssistantMessage::default(),
             vec![tool_call("c1", &output_tool)],
             Usage::default(),
             prepared.policy.clone(),
@@ -1494,20 +1480,18 @@ fn a_provider_error_retry_still_pins_and_intercepts_the_output_tool() {
     assert_eq!(response.output(), r#"{"x":1}"#);
 }
 
-/// Every older envelope is refused by name rather than resumed with its
-/// fields dropped: format 3 kept in-flight flags beside the state, format 4
-/// was the last before the memory path went.
+/// Foreign and unsupported envelopes are refused, including every Rig format.
 #[test]
 fn an_older_format_run_is_refused_by_name() {
     let run = AgentRun::new("go");
-    for format in 2..RUN_FORMAT {
+    for format in [0, 2, 3, 4, 5] {
         let mut value = serde_json::to_value(&run).expect("serialize");
         value["format"] = json!(format);
         let error =
             serde_json::from_value::<AgentRun>(value).expect_err("an old format is refused");
         assert!(
             error.to_string().contains(&format!(
-                "the run is format {format}, this rig reads format {RUN_FORMAT}"
+                "the run is format {format}, this runtrell protocol reads format {RUN_FORMAT}"
             )),
             "{error}"
         );
@@ -1531,7 +1515,7 @@ fn assert_resumable(history: Vec<Message>) {
 /// must still be accepted.
 #[test]
 fn a_history_with_a_failed_tool_turn_can_be_resumed() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ended_call_turn(
@@ -1548,7 +1532,7 @@ fn a_history_with_a_failed_tool_turn_can_be_resumed() {
 /// history it commits must be resumable.
 #[test]
 fn a_history_with_duplicate_call_ids_can_be_resumed() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ModelTurn::new(
@@ -1578,7 +1562,7 @@ fn a_history_with_duplicate_call_ids_can_be_resumed() {
 /// must be resumable.
 #[test]
 fn a_history_cancelled_while_tools_run_can_be_resumed() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(tool_call_turn("call_1", "add"))
@@ -1603,13 +1587,12 @@ fn every_step_of_a_run_leaves_a_canonical_full_history() {
     fn check_error(error: PromptError) {
         let history = match error {
             PromptError::Cancelled { chat_history, .. } => chat_history,
-            PromptError::MaxTurns { chat_history, .. } => chat_history,
             error => panic!("expected an error carrying history, got {error:?}"),
         };
         assert_eq!(validate(&history), Ok(()), "history: {history:#?}");
     }
     let to_tools = |calls: Vec<AssistantContent>| {
-        let mut run = AgentRun::new("add things").max_turns(2);
+        let mut run = AgentRun::new("add things");
         check(&run);
         expect_call_model(&mut run);
         check(&run);
@@ -1636,7 +1619,7 @@ fn every_step_of_a_run_leaves_a_canonical_full_history() {
         ]
     };
 
-    // A round trip with a repeated id, to the end of the budget.
+    // A round trip with a repeated id, continuing without a turn cap.
     let mut run = to_tools(pair());
     answer_calls(&mut run, "1").expect("one answer per occurrence is accepted");
     check(&run);
@@ -1650,7 +1633,9 @@ fn every_step_of_a_run_leaves_a_canonical_full_history() {
     check(&run);
     check_error(run.cancel_error("reload"));
     answer_calls(&mut run, "4").expect("the answer is accepted");
-    check_error(run.next_step().expect_err("the budget is spent"));
+    expect_call_model(&mut run);
+    check(&run);
+    check_error(run.cancel_error("host budget exhausted"));
 
     // A rejected answer while tools run carries a closed history.
     let mut run = to_tools(pair());
@@ -1661,7 +1646,7 @@ fn every_step_of_a_run_leaves_a_canonical_full_history() {
     check(&run);
 
     // A failed tool-bearing turn stays in history, answered by nothing.
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ended_call_turn(
@@ -1674,9 +1659,7 @@ fn every_step_of_a_run_leaves_a_canonical_full_history() {
     check(&run);
 
     // A skipped call's pre-resolved result closes it.
-    let mut run = AgentRun::new("summarize")
-        .max_turns(2)
-        .with_output_tool_name("final_result");
+    let mut run = AgentRun::new("summarize").with_output_tool_name("final_result");
     expect_call_model(&mut run);
     expect_needs_resolution(
         run.model_response(tool_call_turn("c1", "final_result"))
@@ -1697,7 +1680,7 @@ fn every_step_of_a_run_leaves_a_canonical_full_history() {
 /// after a resume reads the same as one sent from the live run.
 #[test]
 fn full_history_closes_pending_calls_as_replay_does() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ModelTurn::new(
@@ -1716,10 +1699,10 @@ fn full_history_closes_pending_calls_as_replay_does() {
     assert!(history[..2].iter().eq(run.messages().iter().map(|m| &**m)));
     assert_eq!(
         history[2],
-        rig_core::conversation::pairing::close_pending(calls.iter().map(pending))
+        crate::conversation::pairing::close_pending(calls.iter().map(pending))
     );
     assert_eq!(
-        rig_core::conversation::pairing::repair(
+        crate::conversation::pairing::repair(
             run.messages().iter().map(|m| Message::clone(m)).collect()
         )
         .messages,
@@ -1737,7 +1720,7 @@ fn run_persisted_mid_model_call_resumes_by_reissuing_the_call() {
     // The host emitted CallModel and started the request; the process died
     // before the response arrived. The persisted run must re-issue the same
     // model call after a restart rather than dead-end.
-    let mut run = AgentRun::new("hi").max_turns(2);
+    let mut run = AgentRun::new("hi");
     let (prompt, history, turn) = expect_call_model(&mut run);
     assert_eq!(turn, 1);
 
@@ -1767,7 +1750,7 @@ fn run_persisted_mid_stream_resumes_by_reissuing_the_call() {
     // Streamed variant: the driver recorded the stream's terminal usage, then
     // the process died before the assembled turn was fed. The provider
     // connection is gone, so the only way forward is to re-issue the call.
-    let mut run = AgentRun::new("hi").max_turns(2);
+    let mut run = AgentRun::new("hi");
     let (prompt, _, turn) = expect_call_model(&mut run);
     run.record_streamed_completion_call(
         usage(10, 5),
@@ -1799,7 +1782,7 @@ fn cancel_mid_tool_batch_yields_canonical_history() {
     // A sans-IO host (Ctrl-C or /reload while tools run) cancels via
     // cancel_error. PromptError::Cancelled documents its history as
     // canonical; it must not end in an unanswered tool call.
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(tool_call_turn("call_1", "add"))
@@ -1811,7 +1794,7 @@ fn cancel_mid_tool_batch_yields_canonical_history() {
         panic!("cancel_error must build a Cancelled error");
     };
     assert_eq!(
-        rig_core::conversation::pairing::validate(&chat_history),
+        crate::conversation::pairing::validate(&chat_history),
         Ok(()),
         "cancelled mid-batch history must be canonical: {chat_history:?}"
     );
@@ -1819,7 +1802,7 @@ fn cancel_mid_tool_batch_yields_canonical_history() {
 
 fn two_call_turn() -> ModelTurn {
     ModelTurn::new(
-        rig_core::message::AssistantMessage::default(),
+        crate::message::AssistantMessage::default(),
         vec![tool_call("call_1", "add"), tool_call("call_2", "add")],
         Usage::default(),
         policy(&["add"]),
@@ -1828,7 +1811,7 @@ fn two_call_turn() -> ModelTurn {
 }
 
 fn drive_to_two_pending_calls() -> AgentRun {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(two_call_turn())
@@ -1876,7 +1859,7 @@ fn a_run_persisted_mid_batch_resumes_with_only_the_unanswered_calls() {
 
 #[test]
 fn reissuing_a_pending_model_call_consumes_no_turn() {
-    let mut run = AgentRun::new("hi").max_turns(1);
+    let mut run = AgentRun::new("hi");
     let issued = expect_call_model(&mut run);
     assert_eq!(expect_call_model(&mut run), issued);
     assert_eq!(run.turn(), 1);
@@ -1889,7 +1872,7 @@ fn reissuing_a_pending_model_call_consumes_no_turn() {
 
 #[test]
 fn a_reissued_stream_may_record_its_own_completion_call() {
-    let mut run = AgentRun::new("hi").max_turns(1);
+    let mut run = AgentRun::new("hi");
     expect_call_model(&mut run);
     let record = |run: &mut AgentRun| {
         run.record_streamed_completion_call(
@@ -1950,9 +1933,7 @@ fn cancel_mid_batch_keeps_the_answered_results_and_aborts_the_rest() {
 /// a later cancellation's history is canonical.
 #[test]
 fn a_failed_malformed_limit_leaves_a_canonical_cancel_history() {
-    let mut run = AgentRun::new("go")
-        .max_turns(10)
-        .max_consecutive_malformed_tool_calls(0);
+    let mut run = AgentRun::new("go").max_consecutive_malformed_tool_calls(0);
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(malformed_call_turn("c1"))
@@ -1969,7 +1950,7 @@ fn a_failed_malformed_limit_leaves_a_canonical_cancel_history() {
 /// stay as they are in any later cancellation's history.
 #[test]
 fn a_failed_turn_leaves_a_canonical_cancel_history() {
-    let mut run = AgentRun::new("add things").max_turns(2);
+    let mut run = AgentRun::new("add things");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ended_call_turn(
@@ -1995,7 +1976,7 @@ fn a_failed_turn_leaves_a_canonical_cancel_history() {
 fn a_canonical_history_closes_an_unchecked_input_history() {
     let open = vec![
         Message::user("q"),
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![tool_call(
+        Message::Assistant(crate::message::AssistantMessage::new(vec![tool_call(
             "x", "add",
         )])),
     ];
@@ -2016,7 +1997,7 @@ fn truncated_write_turn(id: &str) -> ModelTurn {
         vec![AssistantContent::ToolCall(ToolCall::from_wire(
             id,
             ToolFunction::parse(
-                rig_core::message::ToolName::new("write_file").expect("tool name"),
+                crate::message::ToolName::new("write_file").expect("tool name"),
                 r#"{"path":"a.rs","content":"fn ma"#,
             ),
         ))],
@@ -2068,7 +2049,7 @@ fn forge_exec_call(step: &AgentRunStep) -> ExecCall {
 /// would write the salvaged prefix `fn ma` to `a.rs`.
 #[test]
 fn a_resumed_truncated_call_is_not_offered_as_executable() {
-    let mut run = AgentRun::new("write a.rs").max_turns(2);
+    let mut run = AgentRun::new("write a.rs");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(truncated_write_turn("c1"))
@@ -2094,7 +2075,7 @@ fn a_resumed_truncated_call_is_not_offered_as_executable() {
 /// and an `ExecCall` forged from its serialized form is refused at the run.
 #[test]
 fn an_executed_answer_for_a_malformed_call_is_rejected() {
-    let mut run = AgentRun::new("write a.rs").max_turns(2);
+    let mut run = AgentRun::new("write a.rs");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(truncated_write_turn("c1"))
@@ -2121,7 +2102,7 @@ fn an_executed_answer_for_a_malformed_call_is_rejected() {
 /// offered as a `CallTools` call, and a forged executed answer is refused.
 #[test]
 fn a_skipped_call_is_never_offered_and_cannot_be_answered() {
-    let mut run = AgentRun::new("look around").max_turns(2);
+    let mut run = AgentRun::new("look around");
     expect_call_model(&mut run);
     let context = expect_needs_resolution(
         run.model_response(ModelTurn::new(
@@ -2131,9 +2112,7 @@ fn a_skipped_call_is_never_offered_and_cannot_be_answered() {
             TurnPolicy::new(
                 tool_names(&["read", "shell"]),
                 Some(ToolChoice::Specific {
-                    function_names: vec![
-                        rig_core::message::ToolName::new("read").expect("tool name"),
-                    ],
+                    function_names: vec![crate::message::ToolName::new("read").expect("tool name")],
                 }),
                 None,
             )
@@ -2182,7 +2161,7 @@ fn a_skipped_call_is_never_offered_and_cannot_be_answered() {
 /// A batch whose answers include one the run refuses stores none of them.
 #[test]
 fn answer_all_stores_nothing_when_one_answer_is_refused() {
-    let mut run = AgentRun::new("add twice").max_turns(2);
+    let mut run = AgentRun::new("add twice");
     expect_call_model(&mut run);
     expect_continue(run.model_response(two_call_turn()).expect("model_response"));
     let first = exec_call(expect_call_tools(&mut run).remove(0));
@@ -2198,7 +2177,7 @@ fn answer_all_stores_nothing_when_one_answer_is_refused() {
 /// before the batch.
 #[test]
 fn a_malformed_call_answered_with_stop_cancels_the_run() {
-    let mut run = AgentRun::new("write a.rs").max_turns(2);
+    let mut run = AgentRun::new("write a.rs");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(truncated_write_turn("c1"))
@@ -2225,7 +2204,7 @@ fn a_malformed_call_answered_with_stop_cancels_the_run() {
 /// and the error's, not closed as unanswered.
 #[test]
 fn a_malformed_stop_keeps_an_answer_applied_with_it() {
-    let mut run = AgentRun::new("add").max_turns(2);
+    let mut run = AgentRun::new("add");
     expect_call_model(&mut run);
     expect_continue(
         run.model_response(ModelTurn::new(
@@ -2235,7 +2214,7 @@ fn a_malformed_stop_keeps_an_answer_applied_with_it() {
                 AssistantContent::ToolCall(ToolCall::from_wire(
                     "c2",
                     ToolFunction::parse(
-                        rig_core::message::ToolName::new("add").expect("tool name"),
+                        crate::message::ToolName::new("add").expect("tool name"),
                         "{\"x\":",
                     ),
                 )),
@@ -2267,7 +2246,7 @@ fn a_malformed_stop_keeps_an_answer_applied_with_it() {
             content.first(),
             Some(UserContent::ToolResult(result)) if result.content.iter().any(|part| matches!(
                 part,
-                rig_core::message::ToolResultContent::Text(text) if text.text == "executed"
+                crate::message::ToolResultContent::Text(text) if text.text == "executed"
             ))
         ),
         _ => false,

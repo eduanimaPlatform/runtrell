@@ -1,14 +1,17 @@
+// Derived from Rig v0.45.0 (98ed06d7f1c911e6e4c7fdb5d690093bc964c514), crates/rig-agent/src/run/policy.rs.
+// Copyright (c) 2024, Playgrounds Analytics Inc.
+// Modified for runtrell; inherited code: MIT (LICENSES/MIT-Rig.txt); changes: Apache-2.0.
 //! Invalid tool-call diagnostics and recovery decisions exchanged with drivers.
 //!
 //! ```
-//! use rig_agent::run::policy::InvalidToolCallAction;
+//! use runtrell_protocol::run::policy::InvalidToolCallAction;
 //! let action = InvalidToolCallAction::retry("Use an advertised tool name.");
 //! assert!(matches!(action, InvalidToolCallAction::Retry { .. }));
 //! ```
 
 use std::collections::BTreeSet;
 
-use rig_core::message::{Message, ToolCall, ToolChoice, ToolName};
+use crate::message::{Message, ToolCall, ToolChoice, ToolName};
 use serde::{Deserialize, Serialize};
 
 use super::prepare::PrepareError;
@@ -71,7 +74,7 @@ pub struct InvalidToolCallContext {
     pub tool_name: String,
     /// Durable tool-call id: the provider's when it issued one, else rig's
     /// minted handle. Absent only when no call object exists at all.
-    pub tool_call_id: Option<rig_core::message::CallId>,
+    pub tool_call_id: Option<crate::message::CallId>,
     /// Emitted JSON arguments, when present. For
     /// [`InvalidToolCallReason::MalformedArguments`] this is the raw text the
     /// model sent.
