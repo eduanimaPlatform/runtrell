@@ -56,14 +56,27 @@ impl PgStore {
         f: impl FnOnce(&mut Ledger) -> Result<R>,
     ) -> Result<R> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
-            .await.map_err(storage)?;
-        let mut state = self.load(&mut tx, scope, true).await?;
-        let before = state.clone();
-        let value = f(&mut state)?;
-        self.save(&mut tx, &before, &state).await?;
-        self.commit(tx).await?;
-        Ok(value)
+        let result = async {
+            sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
+                .await.map_err(storage)?;
+            let mut state = self.load(&mut tx, scope, true).await?;
+            let before = state.clone();
+            let value = f(&mut state)?;
+            self.save(&mut tx, &before, &state).await?;
+            Ok(value)
+        }.await;
+        match result {
+            Ok(value) => {
+                self.commit(tx).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                // Drop only queues a rollback in SQLx. Release partial permits
+                // before the caller can attempt another allocation on this pool.
+                tx.rollback().await.map_err(storage)?;
+                Err(error)
+            }
+        }
     }
     pub(crate) async fn commit(&self, mut tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
@@ -526,8 +539,15 @@ impl PgStore {
     ) -> Result<()> {
         for (scope, limit) in scopes {
             self.seed_permits(conn, &scope, limit).await?;
-            let ordinal: Option<i64> = sqlx::query_scalar(&format!("SELECT ordinal FROM {}.capacity_slots WHERE scope=$1 AND holder IS NULL ORDER BY ordinal FOR UPDATE SKIP LOCKED LIMIT 1",self.schema))
+            let mut ordinal: Option<i64> = sqlx::query_scalar(&format!("SELECT ordinal FROM {}.capacity_slots WHERE scope=$1 AND holder IS NULL ORDER BY ordinal FOR UPDATE SKIP LOCKED LIMIT 1",self.schema))
                 .bind(&scope).fetch_optional(&mut *conn).await.map_err(storage)?;
+            if ordinal.is_none() {
+                // A skipped free row is contention, not proof of exhaustion.
+                // PostgreSQL rechecks holder after waiting for a concurrent
+                // updater; lock_timeout bounds the wait and maps to Storage.
+                ordinal = sqlx::query_scalar(&format!("SELECT ordinal FROM {}.capacity_slots WHERE scope=$1 AND holder IS NULL ORDER BY ordinal FOR UPDATE LIMIT 1",self.schema))
+                    .bind(&scope).fetch_optional(&mut *conn).await.map_err(storage)?;
+            }
             let ordinal = ordinal.ok_or(Error::Backpressure)?;
             sqlx::query(&format!(
                 "UPDATE {}.capacity_slots SET holder=$1 WHERE scope=$2 AND ordinal=$3",

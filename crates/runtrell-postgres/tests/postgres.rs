@@ -761,6 +761,151 @@ async fn every_slot_kind_enforces_global_tenant_and_run_limits() {
 }
 
 #[tokio::test]
+async fn locked_free_permits_wait_instead_of_reporting_backpressure() {
+    let (pool, _, _, _, _) = setup().await;
+    let mut cap = Capacity::default();
+    cap.global.insert(OperationKind::Tool, 1);
+    cap.tenant.insert(OperationKind::Tool, 1);
+    cap.run.insert(OperationKind::Tool, 1);
+    let schema = format!("permit_test_{}", uuid::Uuid::new_v4().simple());
+    let s = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+    let slot = SlotRequest {
+        key: "waiting".into(),
+        tenant: "t".into(),
+        run: "r".into(),
+        kind: OperationKind::Tool,
+    };
+    // Initialize tenant/Run scopes, then leave every permit free.
+    s.acquire(slot.clone()).await.unwrap();
+    s.release_slot(&slot.key).await.unwrap();
+    for scope in ["g:Tool", "t:\"t\":Tool", "r:[\"t\",\"r\"]:Tool"] {
+        for commit in [false, true] {
+            let mut blocker = pool.begin().await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *blocker)
+                .await
+                .unwrap();
+            let locked: Vec<i64> = sqlx::query_scalar(&format!(
+                "SELECT ordinal FROM \"{schema}\".capacity_slots WHERE scope=$1 AND holder IS NULL FOR UPDATE"
+            )).bind(scope).fetch_all(&mut *blocker).await.unwrap();
+            assert_eq!(locked.len(), 1);
+            let store = s.clone();
+            let request = slot.clone();
+            let task = tokio::spawn(async move { store.acquire(request).await });
+            // Observe an actual database lock wait, rather than relying on a sleep.
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    assert!(!task.is_finished(), "locked free {scope} was treated as unavailable");
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))"
+                    ).bind(pid).fetch_one(&pool).await.unwrap();
+                    if waiting { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            if commit {
+                blocker.commit().await.unwrap();
+            } else {
+                blocker.rollback().await.unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(s.slot_count(OperationKind::Tool).await.unwrap(), 1);
+            s.release_slot(&slot.key).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn permit_lock_timeout_is_storage_and_rolls_back_partial_allocation() {
+    let (pool, _, _, _, _) = setup().await;
+    let mut cap = Capacity::default();
+    cap.global.insert(OperationKind::Tool, 1);
+    cap.tenant.insert(OperationKind::Tool, 1);
+    cap.run.insert(OperationKind::Tool, 1);
+    let schema = format!("timeout_test_{}", uuid::Uuid::new_v4().simple());
+    let s = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+    let slot = SlotRequest {
+        key: "timeout".into(),
+        tenant: "t".into(),
+        run: "r".into(),
+        kind: OperationKind::Tool,
+    };
+    s.acquire(slot.clone()).await.unwrap();
+    s.release_slot(&slot.key).await.unwrap();
+    let mut blocker = pool.begin().await.unwrap();
+    let ordinal: i64 = sqlx::query_scalar(&format!(
+        "SELECT ordinal FROM \"{schema}\".capacity_slots WHERE scope='r:[\"t\",\"r\"]:Tool' AND holder IS NULL FOR UPDATE"
+    )).fetch_one(&mut *blocker).await.unwrap();
+    assert_eq!(ordinal, 1);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), s.acquire(slot.clone()))
+            .await
+            .unwrap(),
+        Err(Error::Storage)
+    );
+    // The failed transaction must release earlier scopes before returning,
+    // even while the original blocker remains active on the Run permit.
+    let mut check = pool.begin().await.unwrap();
+    let free: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT scope FROM \"{schema}\".capacity_slots WHERE scope IN ('g:Tool','t:\"t\":Tool') AND holder IS NULL FOR UPDATE NOWAIT"
+    )).fetch_all(&mut *check).await.unwrap();
+    assert_eq!(free.len(), 2);
+    check.rollback().await.unwrap();
+    assert_eq!(s.slot_count(OperationKind::Tool).await.unwrap(), 0);
+    blocker.rollback().await.unwrap();
+    s.acquire(slot).await.unwrap();
+    assert_eq!(s.slot_count(OperationKind::Tool).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_slot_acquisitions_never_exceed_any_scope_limit() {
+    let (pool, _, _, _, _) = setup().await;
+    for limits in [[3, 64, 64], [64, 3, 64], [64, 64, 3]] {
+        let mut cap = Capacity::default();
+        cap.global.insert(OperationKind::Tool, limits[0]);
+        cap.tenant.insert(OperationKind::Tool, limits[1]);
+        cap.run.insert(OperationKind::Tool, limits[2]);
+        let schema = format!("limit_test_{}", uuid::Uuid::new_v4().simple());
+        let s = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(48));
+        let mut tasks = Vec::new();
+        for i in 0..48 {
+            let (store, barrier) = (s.clone(), barrier.clone());
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .acquire(SlotRequest {
+                        key: format!("slot-{i}"),
+                        tenant: "t".into(),
+                        run: "r".into(),
+                        kind: OperationKind::Tool,
+                    })
+                    .await
+            }));
+        }
+        let mut accepted = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(()) => accepted += 1,
+                Err(Error::Backpressure) => {}
+                other => panic!("unexpected slot outcome: {other:?}"),
+            }
+        }
+        assert_eq!(accepted, 3, "limits={limits:?}");
+        assert_eq!(s.slot_count(OperationKind::Tool).await.unwrap(), 3);
+        let counts: Vec<(String, i64)> = sqlx::query_as(&format!(
+            "SELECT scope,count(*) FROM \"{schema}\".capacity_slots WHERE holder IS NOT NULL GROUP BY scope ORDER BY scope"
+        )).fetch_all(&pool).await.unwrap();
+        assert_eq!(counts.len(), 3);
+        assert!(counts.iter().all(|(_, held)| *held == 3));
+    }
+}
+
+#[tokio::test]
 async fn terminal_run_slot_left_by_crashed_worker_is_rediscoverable() {
     use runtrell_testkit::{DecisionFinalizer, DecisionValidator};
     let (pool, schema, s, _, c) = setup().await;

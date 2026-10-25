@@ -36,7 +36,7 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 
 checkpoint/renewは口座・容量のlockを取らない。全Run共通の更新lockは存在しない。schemaのadvisory lockはopenのDDL初期化時だけ使う。
 
-容量割当はglobal→tenant→Runの各**空きpermit**を`FOR UPDATE SKIP LOCKED`で取得し、足りなければtransaction全体をrollbackする。占有permitや共通カウンタ行を待たない。global permitは初回利用時の初期化競合も避けるためopenで作る。tenant/Runのpermitは必要なscopeだけ作る。解放は該当holderのpermitだけをscope/ordinal順でlockする。lease失効だけではpermitを解放しない。
+容量割当はglobal→tenant→Runの各**空きpermit**を`FOR UPDATE SKIP LOCKED`で取得する。見つからなければ同じ空き条件を`FOR UPDATE`で再検索し、一時的にlockされた空きpermitを有限に待つ（既存のlock_timeout=5秒）。lock待ち後も空きがなければBackpressure、timeout・SQL失敗はStorageとする。更新処理の失敗は明示的な`rollback().await`の完了後に返し、途中までのpermit割当ても取り消す。占有permitや共通カウンタ行を待たない。global permitは初回利用時の初期化競合も避けるためopenで作る。tenant/Runのpermitは必要なscopeだけ作る。解放は該当holderのpermitだけをscope/ordinal順でlockする。lease失効だけではpermitを解放しない。
 
 queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。既存契約のtenant round-robinと**tenantをまたぐ**優先連続数を厳密に保つため、通常dispatchには専用の`queue_policy`行を使う。これも`SKIP LOCKED`で取得し、他dispatcherが保持中なら待たずNoneを返す。host workerは一時的な候補なしとしてpollする。**queueの順序決定だけは短いtransactionで一つずつ行う**。Run更新・受付・予算・slot操作はこの行を取得せず、全Runのstore処理を直列化しない。entryを別transactionが保持中でも、空いている別entryを取得できる。
 

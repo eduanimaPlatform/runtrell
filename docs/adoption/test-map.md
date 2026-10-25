@@ -4,6 +4,13 @@
 
 今回の最終実行件数・コマンドは[initial-build.md](initial-build.md)。以下は原本の関数名と移行先の対応。import変更・formatting・帰属headerは全体に適用。testsのskip/ignore追加やassertion弱体化はない。
 
+## rt-3g：PostgreSQL容量permitの一時lock
+
+- `locked_free_permits_wait_instead_of_reporting_backpressure`：別connectionで空きglobal・tenant・Run permitをlockし、DB上の待機を確認してからCOMMIT/ROLLBACKする。修正前はglobalの一時lockを空きなしと扱って失敗。修正後は全6条件で取得成功。
+- `permit_lock_timeout_is_storage_and_rolls_back_partial_allocation`：Run permitを保持したまま既存5秒timeoutを発生させ、Storage・slot未保存・先に取得したglobal/tenant permitの即時解放と再取得を確認する。
+- `concurrent_slot_acquisitions_never_exceed_any_scope_limit`：global・tenant・Runの各上限を個別に3として48件同時取得。各条件で成功3件、Backpressure45件、slotと各scopeの占有permitも3件を要求する。
+- 既存`every_slot_kind_enforces_global_tenant_and_run_limits`を含むassertionは変更しない。意図した変更は、一時lockされた空きpermitを有限に待ち、真の上限到達だけをBackpressureとすること。更新失敗のrollbackは呼出し元へ返る前に完了する。上限・原子性・Unknown保持・owner fenceの契約は維持する。
+
 ## 意図した変更
 
 - `max_turns` API/保存field/MaxTurns errorを削除。通常tool反復に総回数上限はない。再開とmalformed継続の新期待を先に失敗させた。既存104件を維持し、上限依存の3ケースを更新。
