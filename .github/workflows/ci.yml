@@ -134,7 +134,9 @@ jobs:
         run: |
           mapfile -t required < <(target/debug/xtask isolation-tests linux '${{ matrix.feature }}')
           test "${#required[@]}" -gt 0
+          failed=0
           for test_name in "${required[@]}"; do
+            # Run every required test even after a failure; the named-result check decides.
             sudo env \
               PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
               CARGO_TARGET_DIR="$PWD/target" CARGO_TERM_COLOR=never \
@@ -144,8 +146,9 @@ jobs:
               RUNTRELL_PYTHON_VERSION="$RUNTRELL_PYTHON_VERSION" \
               cargo test -p runtrell --locked ${{ matrix.args }} --test linux_execution -- \
                 --exact "$test_name" --include-ignored --test-threads=1 --color never \
-              2>&1 | tee "$RUNNER_TEMP/isolation-results/$test_name.log"
+              2>&1 | tee "$RUNNER_TEMP/isolation-results/$test_name.log" || failed=1
           done
+          exit "$failed"
       - name: Require every named result to be ok, none skipped
         if: always()
         run: target/debug/xtask isolation-results linux '${{ matrix.feature }}' "$RUNNER_TEMP/isolation-results"

@@ -257,7 +257,8 @@ async fn linux_backend_process_crash() {
     assert_eq!(
         output.status.code(),
         Some(23),
-        "child stderr: {}",
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let b = backend(root.path());
