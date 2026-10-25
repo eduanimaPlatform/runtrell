@@ -110,54 +110,18 @@ host は固定絶対 path、正確な `major.minor.patch`、実行 file SHA-256 
 
 `PreparedOnly` が既定で network deny、資格情報なし、事前に用意した package／環境だけを使う。wheel の取得・pip install は実装しない。`Fetch { network_allow, credential_scopes, budget_micro_usd, deadline_ms }` は将来の方針型であり、現実装は必ず `PYTHON_DEPENDENCY_FETCH` で拒否する。後続実装にも通常の予約・network・資格情報・資源・期限・費用管理を適用する。
 
-### Claude が行う Linux 実試験
+### GitHub-hosted CIの受入境界
 
-本 macOS sandbox では Linux／Docker を実行していない。Linux 専用 integration は `cfg(target_os="linux")` と `#[ignore]` を併用し、環境変数がない場合に成功扱いで return しない。明示実行時に条件不足なら失敗する。通常の macOS 試験を削除／弱体化していない。
+[公開CI](../../.github/workflows/ci.yml)は標準`ubuntu-24.04` VMの独立した実隔離jobを使う。通常の契約jobは使い捨てPostgreSQL 18 serviceを使い、Python feature有無でunit/integration/doctest・公開example・trace/hashを確認する。macOSは標準`macos-latest`上のSeatbelt実隔離jobを使う。Self-hosted、larger runner、有料cache拡張、private接続・秘密情報は使わない。
 
-必要 OS は cgroup v2 の `cgroup.kill`・`memory.peak` を備える Linux（推奨 kernel 6.1 以上）、bubblewrap は `--disable-userns` 対応版。例は Ubuntu 24.04。最初に `bwrap --help` と cgroup control file の存在を確認する。Docker は Claude が次の条件で起動する（公開 checkout の root で実行）。Docker Desktop の Linux VM 側に cgroup v2 と書込み可能な委譲元が必要で、満たさなければ当該環境は試験不適合と記録する。
+Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り、親と専用subtreeの`cpu memory pids` controllerを有効化する。専用subtreeには管理processを置かず、backendがoperation単位の子groupへhelperを参加させる。管理supervisorとhelperにはhost mount namespaceのCAP_SYS_ADMINが必要で、backendが要求disk枠のtmpfsをmount/unmountする。Rustのbuildは通常userで行い、実試験の管理処理だけsudoで実行する。
 
-```sh
-docker run --rm -it --privileged --cgroupns=host \
-  --security-opt apparmor=unconfined \
-  --mount type=bind,src="$(pwd)",dst=/work \
-  --workdir /work ubuntu:24.04 bash
-```
+payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須とし、uid/gid 65534、`--cap-drop ALL`、追加userns禁止、read-only runtime、network分離を適用する。管理領域・資格情報・cgroup FSは公開しない。`linux_payload_has_no_privileges`はpayloadの実行、uid/gid、全5種のcapability集合が0、管理側と異なるuser namespaceを照合する。共有kernelの脆弱性に対するVM相当の防御を意味しない。
 
-`--privileged --cgroupns=host` で container に提供される `/sys/fs/cgroup` が cgroup v2・書込み可能であることを確認する。Docker Desktop の VM 設定によって読取り専用や controller 不足なら、その構成での実試験は未実行として記録する。Linux host では必要に応じ `--mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup` を追加できる。macOS 側の同 path を bind しない。既存 mount を上書きせず、cgroup v1 や無制限実行へ fallback しない。
+`xtask isolation-tests linux default|python`が必須名の正本。現在default 6件、Python有効7件（既存の環境拒否・遅延helper拒否2件を含む）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
 
-container 内で（これらは手順であり Codex は未実行）：
+既存のbaseline実行・CPU閾値・OOM・PID quota・ENOSPC・出力上限・network/書込み拒否・子孫停止・別process停止後の再発見・冪等回収・Python成果物保存のassertionは維持する。環境変数不足は成功returnせず失敗する。CIの結果照合だけでは将来追加される早期returnを検出できないため、payload実行と制限発動のassertionも必須条件である。
 
-```sh
-apt-get update
-apt-get install -y --no-install-recommends bubblewrap python3 build-essential pkg-config libssl-dev ca-certificates curl ripgrep
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.98.0
-. "$HOME/.cargo/env"
-export CARGO_TARGET_DIR=/tmp/runtrell-linux-target
-```
+この変更時点ではHosted runは未実行・未確認。固定commit、workflow run URL、runner image/version、feature別の実行名と結果をpush後に確認するまでHosted成功とは記録しない。本macOS sandboxでLinux実隔離は実行できず、Dockerも操作しない。Seatbeltは入れ子sandboxで適用拒否となる制約がある。実環境の不足が判明した場合は、該当test・必要controller/kernel機能・userns/AppArmor・mount権限と実際の失敗を記録し、その試験だけを同じ条件を満たす専用Linux VMで補完する案を検討する。Hosted全体をSelf-hostedへ戻さない。現時点でHosted上の具体的な失敗は未観測であり、代替試験が必要だとは断定しない。
 
-container と GitHub-hosted Linux runner の双方で、以下を専用 root 権限 shell から実行する。runner は checkout・Rust 1.98.0・上記 apt package を準備し、`sudo env PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" bash` などで同じ toolchain を使う。既存 application の cgroup を試験用として使わない。
-
-```sh
-set -eu
-bwrap --help | rg -- --disable-userns
-test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
-# 専用 test host/VM で、親の controller を有効化できること。
-printf '+cpu +memory +pids' > /sys/fs/cgroup/cgroup.subtree_control
-export RUNTRELL_CGROUP_ROOT="/sys/fs/cgroup/runtrell-rt3b-$$"
-mkdir "$RUNTRELL_CGROUP_ROOT"
-printf '+cpu +memory +pids' > "$RUNTRELL_CGROUP_ROOT/cgroup.subtree_control"
-export RUNTRELL_LINUX_TEST=1
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/runtrell-linux-target}"
-export RUNTRELL_LINUX_STATE_ROOT="$(mktemp -d /tmp/runtrell-state.XXXXXX)"
-chmod 700 "$RUNTRELL_LINUX_STATE_ROOT"
-export RUNTRELL_PYTHON_VERSION="$(/usr/bin/python3 -c 'import platform; print(platform.python_version())')"
-cargo build --workspace --locked
-cargo test -p runtrell --features python --test linux_execution -- --include-ignored --test-threads=1
-# 失敗時は state root・cgroup subtree を証拠ごと保持して調査する。
-# 成功時も管理 record は残す。全 child cgroup が削除済みなら専用 subtree のみ削除可。
-rmdir "$RUNTRELL_CGROUP_ROOT"
-```
-
-指定テスト DB は Docker 内 localhost と host の localhost が異なるため、この専用 Linux suite は DB を使用しない。全 workspace の Pg 契約検証は、別途使い捨て DB に到達する `RUNTRELL_TEST_DATABASE_URL` を設定して行う。
-
-実試験は正常実行 baseline、CPU 閾値停止、cgroup OOM、PID quota 到達、disk ENOSPC、大量出力、越境書込み、network deny、取消・子孫停止、別 client／別 process 終了後の pending 照合・停止・冪等回収、Python→Workspace 保存を含む。単に payload が全部起動失敗する状態を合格にしない。CPU/RAM/PID の kernel 使用量・イベントも照合する。Docker と GitHub-hosted runner のそれぞれの結果を記録するまでは、Linux 主力構成の実証済み／本番受入完了とはしない。
+Hosted成功後も、本番構成のkernel・immutable runtime・委譲設定・tmpfs権限・耐久管理FS・mount namespace・別管理processからの回収、実provider usage/費用との整合は別途受入が必要。DB kill・電源断・failover・長時間負荷も未検証。公開CI成功は利用側の統合受入や有料操作の実行許可を意味しない。

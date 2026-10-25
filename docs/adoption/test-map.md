@@ -459,3 +459,14 @@ Rigの104 run unit/13 run doctestを含む既存試験は除外も弱体化も�
 - `testkit/tests/repair.rs`: 不合格候補・診断のcheckpoint、Worker交代、再検証、別operation予約/精算、修正中のtool再使用、入力diagnosticsのAgent返却、host回数/時間制限、修正不能、予算/期限、権限・保存・証跡エラーの非修正扱い。
 - `testkit::budget_contracts::driver_policies`: Memory/Pg共通でWait中のstore再操作、予約/operationが残らないことを追加。既存の全祖先原子性、重複精算、不明予約、認可、技術的下限/品質下限の試験を維持。
 - `local_reopen_preserves_unpublished_staging`: 旧試験の未公開stagingをread/finalizeできないassertionを維持し、stagingからの継続を追加。メモリ内だけだったstagingを永続化する意図した変更。
+
+
+## rt-3d：分類とHosted CIの受入範囲
+
+- catalogの134 IDに`classification`（core/optional/host）と責任範囲を追加。traceの分類は実装状態と独立する。共通の予算・保存・復旧・owner fence・認可をhostへ移さず、方針型と共通実装を公開側、具体値と業務判定をhost側に置く。
+- U01/U02/U03/U04/U06/U09は、fake hostで共通機構を確認済みでも利用側の業務条件全体を達成した証拠ではないため、状態を検証済みから設計済みへ保守的に変更した。既存試験・assertionは削除・変更しない。
+- `xtask`のcatalog試験は分類欠落・未知値・責任範囲欠落を拒否する。`isolation`試験は必須名のfeature差、異なる試験名、失敗、ignored、0件、重複結果、子processのstderrを区別する。
+- `linux_payload_has_no_privileges`を実隔離の必須名に追加。payloadが実行され、uid/gid 65534・capabilityなし・管理側と異なるusernsであることを確認する。Linux既存試験の環境不足時の失敗、baseline、制限発動、停止・回収assertionはそのまま維持する。
+- CIはdefault/Pythonを別jobとし、Linux実隔離は各試験名のlibtest結果と一覧を照合。macOS Seatbeltも名前を照合する。Hostedの成功はpush後のrunで確認し、本番構成と利用側の統合試験の成功とは分ける。
+
+Crash子processと遅延helperの起動を`status()`から`output()`へ変更し、子のstdout/stderrを親のlibtest結果行から分離した。子の実終了コード23、停止marker後の失敗、cgroup.procsが不変という既存assertionは維持する。

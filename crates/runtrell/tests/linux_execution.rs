@@ -248,12 +248,18 @@ async fn linux_backend_process_crash() {
         .insert(ExecutionRecord::intent(&c, r.clone()))
         .await
         .unwrap();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "linux_backend_process_crash"])
         .env("RUNTRELL_CRASH_CHILD_DIR", root.path())
-        .status()
+        // Keep nested libtest progress separate from the parent's named result.
+        .output()
         .unwrap();
-    assert_eq!(status.code(), Some(23));
+    assert_eq!(
+        output.status.code(),
+        Some(23),
+        "child stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let b = backend(root.path());
     let pending = ledger.pending().await.unwrap();
     assert_eq!(pending[0].context_operation, c.operation);
@@ -366,7 +372,7 @@ fn linux_late_helper_cannot_join_after_stop_marker() {
     let group = tempfile::tempdir().unwrap();
     std::fs::write(control.path().join("cancel"), b"").unwrap();
     std::fs::write(group.path().join("cgroup.procs"), b"untouched").unwrap();
-    let status = std::process::Command::new(env!("CARGO_BIN_EXE_runtrell-exec-limit"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_runtrell-exec-limit"))
         .arg(u64::MAX.to_string())
         .arg(u64::MAX.to_string())
         .arg("--cgroup")
@@ -375,11 +381,46 @@ fn linux_late_helper_cannot_join_after_stop_marker() {
         .arg(control.path())
         .arg("/usr/bin/false")
         .env_clear()
-        .status()
+        // Expected CANCELLED_BEFORE_JOIN stderr is not a libtest result.
+        .output()
         .unwrap();
-    assert!(!status.success());
+    assert!(!output.status.success());
     assert_eq!(
         std::fs::read(group.path().join("cgroup.procs")).unwrap(),
         b"untouched"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires privileged Linux test environment; verifies payload privilege separation"]
+async fn linux_payload_has_no_privileges() {
+    let root = root();
+    let b = backend(root.path());
+    let c = context("privileges");
+    let r = request(
+        r#"/usr/bin/python3 -c 'import json,os; print(json.dumps({"uid":os.getuid(),"gid":os.getgid(),"userns":os.readlink("/proc/self/ns/user"),"caps":{k:v.strip() for k,v in (line.split(":",1) for line in open("/proc/self/status") if line.startswith("Cap"))}}))'"#,
+    );
+    let e = b.acquire(&c, &r).await.unwrap();
+    b.start(&c, &e).await.unwrap();
+    let o = stopped(&b, &c).await;
+    assert!(o.failure.is_none(), "payload must execute: {o:?}");
+    let stdout: Vec<u8> = serde_json::from_value(o.result.unwrap()["stdout"].clone()).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(result["uid"], 65534);
+    assert_eq!(result["gid"], 65534);
+    assert_ne!(
+        result["userns"].as_str().unwrap(),
+        std::fs::read_link("/proc/self/ns/user")
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+        assert_eq!(
+            u64::from_str_radix(result["caps"][name].as_str().unwrap(), 16).unwrap(),
+            0,
+            "{name}"
+        );
+    }
+    destroyed(&b, &c).await;
 }

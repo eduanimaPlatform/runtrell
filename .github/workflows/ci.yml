@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: '1'
+
+defaults:
+  run:
+    shell: bash
+    working-directory: source
+
+jobs:
+  contracts:
+    name: Linux contracts (${{ matrix.feature }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: default
+            args: ''
+          - feature: python
+            args: --features runtrell/python
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: runtrell-ci-disposable
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      RUNTRELL_TEST_DATABASE_URL: postgres://postgres:runtrell-ci-disposable@127.0.0.1:5432/postgres
+      RIG_SNAPSHOT: ${{ github.workspace }}/rig-snapshot
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: 0xPlaygrounds/rig
+          ref: 98ed06d7f1c911e6e4c7fdb5d690093bc964c514
+          path: rig-snapshot
+          persist-credentials: false
+      - name: Pinned Rust and components
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --locked --all-targets ${{ matrix.args }} -- -D warnings
+      - name: Build
+        run: cargo build --workspace --locked ${{ matrix.args }}
+      - name: Unit, integration and doctests
+        run: cargo test --workspace --locked ${{ matrix.args }}
+      - name: Public examples
+        run: |
+          cargo run -p runtrell-testkit --locked ${{ matrix.args }} --example support_decision
+          cargo run -p runtrell-testkit --locked ${{ matrix.args }} --example alternate_host
+      - name: Trace and pinned source hashes
+        run: |
+          cargo run -p xtask --locked -- trace
+          cargo run -p xtask --locked -- hashes
+          git diff --exit-code -- README.md docs/design/requirements-trace.md
+      - name: Package inventory
+        if: matrix.feature == 'default'
+        run: cargo package --workspace --list --locked
+
+  linux-isolation:
+    name: Linux isolation (${{ matrix.feature }})
+    runs-on: ubuntu-24.04 # Full VM: mounts, namespaces and cgroup v2 are required.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: default
+            args: ''
+          - feature: python
+            args: --features python
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: source
+          persist-credentials: false
+      - name: Pinned Rust
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Host administration prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap python3 build-essential pkg-config libssl-dev
+          bwrap --help | grep -F -- --disable-userns
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          test "$(cat /proc/sys/user/max_user_namespaces)" -gt 0
+          # Administrative supervisor needs CAP_SYS_ADMIN for bounded tmpfs mounts.
+          # No payload runs until the helper joins the limited cgroup, bwrap
+          # requires userns, switches to uid/gid 65534 and drops ALL capabilities.
+          sudo sh -eu -c '
+            printf "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
+            mkdir /sys/fs/cgroup/runtrell-ci
+            printf "+cpu +memory +pids" > /sys/fs/cgroup/runtrell-ci/cgroup.subtree_control
+          '
+          sudo install -d -m 0700 "$RUNNER_TEMP/runtrell-state"
+          echo "RUNTRELL_CGROUP_ROOT=/sys/fs/cgroup/runtrell-ci" >> "$GITHUB_ENV"
+          echo "RUNTRELL_LINUX_STATE_ROOT=$RUNNER_TEMP/runtrell-state" >> "$GITHUB_ENV"
+          echo "RUNTRELL_PYTHON_VERSION=$(/usr/bin/python3 -c 'import platform; print(platform.python_version())')" >> "$GITHUB_ENV"
+      - name: Build unprivileged and list required tests
+        run: |
+          cargo build -p xtask --locked
+          cargo test -p runtrell --locked ${{ matrix.args }} --test linux_execution --no-run
+          mkdir -p "$RUNNER_TEMP/isolation-results"
+          cargo test -p runtrell --locked ${{ matrix.args }} --test linux_execution -- --list --color never > "$RUNNER_TEMP/isolation-results/list.txt"
+      - name: Run each required test with privileged administration and isolated payload
+        env:
+          RUNTRELL_LINUX_TEST: '1'
+        run: |
+          mapfile -t required < <(target/debug/xtask isolation-tests linux '${{ matrix.feature }}')
+          test "${#required[@]}" -gt 0
+          for test_name in "${required[@]}"; do
+            sudo env \
+              PATH="$PATH" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+              CARGO_TARGET_DIR="$PWD/target" CARGO_TERM_COLOR=never \
+              RUNTRELL_LINUX_TEST="$RUNTRELL_LINUX_TEST" \
+              RUNTRELL_CGROUP_ROOT="$RUNTRELL_CGROUP_ROOT" \
+              RUNTRELL_LINUX_STATE_ROOT="$RUNTRELL_LINUX_STATE_ROOT" \
+              RUNTRELL_PYTHON_VERSION="$RUNTRELL_PYTHON_VERSION" \
+              cargo test -p runtrell --locked ${{ matrix.args }} --test linux_execution -- \
+                --exact "$test_name" --include-ignored --test-threads=1 --color never \
+              2>&1 | tee "$RUNNER_TEMP/isolation-results/$test_name.log"
+          done
+      - name: Require every named result to be ok, none skipped
+        if: always()
+        run: target/debug/xtask isolation-results linux '${{ matrix.feature }}' "$RUNNER_TEMP/isolation-results"
+      - name: Confirm all execution groups were reclaimed
+        run: sudo rmdir "$RUNTRELL_CGROUP_ROOT"
+
+  macos-isolation:
+    name: macOS Seatbelt isolation
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: source
+          persist-credentials: false
+      - name: Pinned Rust
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: List Seatbelt tests
+        run: |
+          cargo build -p xtask --locked
+          mkdir -p "$RUNNER_TEMP/isolation-results"
+          cargo test -p runtrell --locked --test execution -- --ignored --list --color never > "$RUNNER_TEMP/isolation-results/list.txt"
+      - name: Real Seatbelt execution
+        run: |
+          cargo test -p runtrell --locked --test execution -- --ignored --test-threads=1 --color never \
+            2>&1 | tee "$RUNNER_TEMP/isolation-results/real_isolation_loop_output_fork_env_and_workspace_boundaries.log"
+      - name: Require Seatbelt result to be ok
+        if: always()
+        run: target/debug/xtask isolation-results macos default "$RUNNER_TEMP/isolation-results"

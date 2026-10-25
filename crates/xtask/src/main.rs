@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
+mod isolation;
 use std::{collections::BTreeMap, fs, path::PathBuf};
-fn read_catalog(text: &str) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
+struct Requirement {
+    text: String,
+    classification: String,
+    scope: String,
+}
+fn classification_label(value: &str) -> Result<&'static str, Box<dyn std::error::Error>> {
+    match value {
+        "core" => Ok("共通基盤"),
+        "optional" => Ok("公開の任意機能"),
+        "host" => Ok("利用側の責任"),
+        _ => Err(format!("unknown classification: {value}").into()),
+    }
+}
+fn read_catalog(text: &str) -> Result<BTreeMap<String, Requirement>, Box<dyn std::error::Error>> {
     let catalog: serde_json::Value = serde_json::from_str(text)?;
     let mut rows = BTreeMap::new();
     for row in catalog.as_array().ok_or("catalog must be an array")? {
@@ -8,8 +22,25 @@ fn read_catalog(text: &str) -> Result<BTreeMap<String, String>, Box<dyn std::err
         let requirement = row["requirement"]
             .as_str()
             .ok_or("missing requirement text")?;
+        let classification = row["classification"]
+            .as_str()
+            .ok_or("missing classification")?;
+        classification_label(classification)?;
+        let scope = row["scope"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or("missing classification scope")?;
         if requirement.trim().is_empty()
-            || rows.insert(id.to_owned(), requirement.to_owned()).is_some()
+            || rows
+                .insert(
+                    id.to_owned(),
+                    Requirement {
+                        text: requirement.to_owned(),
+                        classification: classification.to_owned(),
+                        scope: scope.to_owned(),
+                    },
+                )
+                .is_some()
         {
             return Err(format!("empty or duplicate requirement: {id}").into());
         }
@@ -48,6 +79,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("../..")
         .canonicalize()?;
     match std::env::args().nth(1).as_deref() {
+        Some("isolation-tests") | Some("isolation-results") => {
+            let args: Vec<_> = std::env::args().collect();
+            let suite = args.get(2).ok_or("missing suite")?;
+            let feature = args.get(3).ok_or("missing feature")?;
+            if args[1] == "isolation-tests" {
+                for name in isolation::names(suite, feature)? {
+                    println!("{name}");
+                }
+            } else {
+                isolation::verify(
+                    suite,
+                    feature,
+                    std::path::Path::new(args.get(4).ok_or("missing result directory")?),
+                )?;
+            }
+        }
         Some("api-doc") => {
             let source = fs::read_to_string(root.join("crates/runtrell/src/api.rs"))?;
             let path = root.join("docs/design/api.md");
@@ -99,18 +146,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ];
             let unstarted = ["OPS-05", "F06"];
             let mut counts = BTreeMap::new();
+            let mut classified = BTreeMap::new();
             let mut out = String::from(
-                "# 要件追跡（134件）\n\n[要件正本](../requirements/catalog.json)の基本要件81件、FORK 10件、受入シナリオA 28件、採用条件F 6件、利用シナリオU 9件。状態は**要件全体**の最も保守的な到達点。設計済みの行にも部分実装/試験があるが、未検証の全件達成を意味しない。検証済みはfake/in-memory・local FS・指定テストDBの契約試験の範囲。実サービス・Linux実Sandbox・電源断の耐久保証ではない。未着手行にも次段階のtrait設計がある。\n\n生成: `cargo run -p xtask -- trace`。同一仕様を複製する目的ではなく、repo内の要件正本の全IDを欠落なく追跡する。\n\n| ID | 要件/受入条件 | 設計箇所 | 実装 | テスト/残課題 | 状態 |\n|---|---|---|---|---|---|\n",
+                "# 要件追跡（134件）\n\n[要件正本](../requirements/catalog.json)の基本要件81件、FORK 10件、受入シナリオA 28件、採用条件F 6件、利用シナリオU 9件。状態は**要件全体**の最も保守的な到達点。設計済みの行にも部分実装/試験があるが、未検証の全件達成を意味しない。検証済みはfake/in-memory・local FS・指定テストDBの契約試験の範囲。分類と責任範囲はcatalogの正本から表示する。共通機構を利用側へ移す分類ではない。実サービス・Linux実Sandbox・電源断の耐久保証ではない。未着手行にも次段階のtrait設計がある。\n\n生成: `cargo run -p xtask -- trace`。同一仕様を複製する目的ではなく、repo内の要件正本の全IDを欠落なく追跡する。\n\n| ID | 要件/受入条件 | 分類 | 責任範囲 | 設計箇所 | 実装 | テスト/残課題 | 状態 |\n|---|---|---|---|---|---|---|---|\n",
             );
-            for (id, text) in rows {
-                let status = if verified.contains(&id.as_str()) {
-                    "検証済み"
-                } else if unstarted.contains(&id.as_str()) {
-                    "未着手"
-                } else {
-                    "設計済み"
-                };
+            for (id, requirement) in rows {
+                let text = requirement.text;
+                let class = classification_label(&requirement.classification)?;
+                let scope = requirement.scope;
+                let status =
+                    if verified.contains(&id.as_str()) && requirement.classification != "host" {
+                        "検証済み"
+                    } else if unstarted.contains(&id.as_str()) {
+                        "未着手"
+                    } else {
+                        "設計済み"
+                    };
                 *counts.entry(status).or_insert(0usize) += 1;
+                *classified.entry((class, status)).or_insert(0usize) += 1;
                 let data_scope = id.starts_with("DATA")
                     || [
                         "TOOL-07", "TOOL-08", "VAL-01", "VAL-02", "VAL-04", "VAL-05", "RUN-06",
@@ -144,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "[api](api.md), [state](state.md)"
                 };
                 let (implementation, tests) = if status == "未着手" {
-                    ("traitのみ/次段階", "本実装・対応試験は未着手")
+                    ("利用側の配布・適合確認", "公開build/package手段を利用した実利用先への反映・業務適合は未検証")
                 } else if budget_scope {
                     (
                         "budget.rs / driver.rs / memory.rs / postgres engine・persistence",
@@ -153,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else if execution_scope {
                     (
                         "execution/{mod,controller,process}.rs; postgres/src/execution.rs; runtrell-exec-limit",
-                        "runtrell/tests/execution.rs; testkit/tests/execution.rs; Memory/Pg共通execution_contracts。Pg台帳再open・新backend client回収/冪等性、registry喪失Unknown、拒否/予約/CAS/CPU。macOS実隔離はsandbox外の明示実行時のみ確認との過去報告。Linux/実体再識別は未検証。execution.md参照",
+                        "runtrell/tests/execution.rs; testkit/tests/execution.rs; Memory/Pg共通execution_contracts。Pg台帳再open・新backend client回収/冪等性、registry喪失Unknown、拒否/予約/CAS/CPU。macOS実隔離はsandbox外の過去報告のみ。LinuxBackend実装・実体再識別の実隔離試験はHosted実行未確認。execution.md参照",
                     )
                 } else if data_scope {
                     (
@@ -203,14 +256,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 };
                 out.push_str(&format!(
-                    "| {id} | {text} | {design} | {implementation} | {tests} | {status} |\n"
+                    "| {id} | {text} | {class} | {scope} | {design} | {implementation} | {tests} | {status} |\n"
                 ));
             }
+            let mut summary = String::from(
+                "分類は責任の配置、状態は要件全体の到達点であり独立した軸。公開ソースに存在することや試験件数は、134要件の全達成を意味しない。利用側の責任のfake接続試験は、実hostでの業務受入の証明ではない。\n\n| 分類 | 検証済み | 設計済み | 未着手 | 合計 |\n|---|---:|---:|---:|---:|\n",
+            );
+            for class in ["共通基盤", "公開の任意機能", "利用側の責任"] {
+                let values: Vec<usize> = ["検証済み", "設計済み", "未着手"]
+                    .iter()
+                    .map(|status| *classified.get(&(class, *status)).unwrap_or(&0))
+                    .collect();
+                summary.push_str(&format!(
+                    "| {class} | {} | {} | {} | {} |\n",
+                    values[0],
+                    values[1],
+                    values[2],
+                    values.iter().sum::<usize>()
+                ));
+            }
+            summary.push_str(&format!("| 全体 | {} | {} | {} | 134 |\n", counts["検証済み"], counts["設計済み"], counts["未着手"]));
+            summary.push_str("\n公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。\n\n試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 6件／python 7件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。現時点ではHosted実行未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。\n");
+            out.push_str("\n## 分類と受入範囲の集計\n\n");
+            out.push_str(&summary);
+            let readme_path = root.join("README.md");
+            let readme = fs::read_to_string(&readme_path)?;
+            let (before, rest) = readme
+                .split_once("<!-- requirement-summary -->")
+                .ok_or("missing README summary start")?;
+            let (_, after) = rest
+                .split_once("<!-- /requirement-summary -->")
+                .ok_or("missing README summary end")?;
+            fs::write(
+                readme_path,
+                format!(
+                    "{before}<!-- requirement-summary -->\n{summary}<!-- /requirement-summary -->{after}"
+                ),
+            )?;
             out.push_str("\n## 状態別集計\n\n");
             for (status, count) in counts {
                 out.push_str(&format!("- {status}: {count}\n"));
             }
-            out.push_str("- 実装済み（未検証のみ）: 0\n\n次段階: ExecutionBackendのLinux実隔離・backend別の安全な実体再識別、実プロセス障害・stream/隔離試験、保存運用・業務owner接続・配布適合。Workspaceの提供範囲と制約はworkspace.md参照。2aのin-memory試験を耐久DBの検証済みへ読み替えない。\n");
+            out.push_str("- 実装済み（未検証のみ）: 0\n\n次段階: LinuxBackendの実隔離・耐久的な実体再識別と回収のHosted実証、実プロセス障害・stream/隔離試験、保存運用・業務owner接続・配布適合。Workspaceの提供範囲と制約はworkspace.md参照。2aのin-memory試験を耐久DBの検証済みへ読み替えない。\n");
             let path = root.join("docs/design/requirements-trace.md");
             // Keep independently maintained evidence beyond the generated table.
             if let Ok(previous) = fs::read_to_string(&path)
@@ -273,7 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Verified {checked} adopted-file provenance/license headers, {sources} Rig source hashes (set RIG_SNAPSHOT to check them), and the Rig MIT license; no manifests rewritten."
             );
         }
-        _ => return Err("usage: cargo run -p xtask -- trace|hashes|api-doc".into()),
+        _ => return Err("usage: cargo run -p xtask -- trace|hashes|api-doc|isolation-tests <linux|macos> <default|python>|isolation-results <suite> <feature> <directory>".into()),
     }
     Ok(())
 }
@@ -283,10 +370,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn catalog_rejects_missing_or_unknown_classification_and_empty_scope() {
+        let valid = include_str!("../../../docs/requirements/catalog.json");
+        let mut rows: serde_json::Value = serde_json::from_str(valid).unwrap();
+        rows[0].as_object_mut().unwrap().remove("classification");
+        assert!(read_catalog(&rows.to_string()).is_err());
+        rows[0]["classification"] = "business".into();
+        assert!(read_catalog(&rows.to_string()).is_err());
+        rows[0]["classification"] = "core".into();
+        rows[0]["scope"] = "".into();
+        assert!(read_catalog(&rows.to_string()).is_err());
+    }
+
+    #[test]
     fn catalog_has_exactly_the_required_ids() {
         let rows = read_catalog(include_str!("../../../docs/requirements/catalog.json")).unwrap();
         assert_eq!(rows.len(), 134);
-        assert!(rows.values().all(|text| !text.trim().is_empty()));
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/requirements/catalog.json")).unwrap();
+        assert!(
+            catalog
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["classification"].is_string())
+        );
+        assert!(rows.values().all(|r| !r.text.trim().is_empty()));
     }
 
     #[test]
