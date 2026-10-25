@@ -984,8 +984,14 @@ impl<
                     }
                 }
                 AgentRunStep::Done(candidate) => {
-                    let output: Value = serde_json::from_str(&candidate.output())
-                        .map_err(|e| Error::Invalid(e.to_string()))?;
+                    let raw = candidate.output();
+                    let parsed = schema::parse_json(raw.as_bytes());
+                    // Bind syntax failures to the exact raw string, never to a
+                    // fabricated object. A valid JSON string remains a normal value.
+                    let output = parsed
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|_| Value::String(raw));
                     let current = self.store.check(c, self.clock.now(), true).await?;
                     self.policy.authorize(&current, "finalize", "finalize")?;
                     // No call-count gate: only current budget, deadline and trusted receipts.
@@ -993,8 +999,17 @@ impl<
                     let validator = self.validator.clone();
                     let validation_run = current.clone();
                     let validation_output = output.clone();
-                    let receipt = tokio::task::spawn_blocking(move || {
-                        validator.validate(&validation_run, &validation_output)
+                    let receipt = tokio::task::spawn_blocking(move || match parsed {
+                        Ok(_) => validator.validate(&validation_run, &validation_output),
+                        Err(diagnostics) => Ok(ValidationReceipt {
+                            hash: digest(&validation_output),
+                            basis_revision: validation_run.spec.basis_revision,
+                            config_version: validation_run.spec.config_version,
+                            validator: validation_run.spec.validator,
+                            validator_version: validation_run.spec.validator_version,
+                            passed: false,
+                            diagnostics,
+                        }),
                     })
                     .await
                     .map_err(|_| Error::Storage)??;

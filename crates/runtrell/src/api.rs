@@ -706,6 +706,14 @@ pub struct ModelReply {
     pub complete: bool,
     pub metadata: Value,
 }
+/// JSON parser coordinates: one-based line/byte column (column 0 for empty input),
+/// zero-based byte offset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonPosition {
+    pub line: usize,
+    pub column: usize,
+    pub byte_offset: usize,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub code: String,
@@ -719,6 +727,7 @@ pub struct Diagnostic {
     pub field: Option<String>,
     /// Half-open byte span in the diagnostic target.
     pub span: Option<(u64, u64)>,
+    pub position: Option<JsonPosition>,
     pub cause: String,
     pub hint: String,
 }
@@ -841,9 +850,10 @@ pub trait Validator: Send + Sync {
     }
     fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
         !diagnostics.is_empty()
-            && diagnostics
-                .iter()
-                .all(|d| d.severity == "error" && d.code == "SCHEMA_VALIDATION")
+            && diagnostics.iter().all(|d| {
+                d.severity == "error"
+                    && matches!(d.code.as_str(), "SCHEMA_VALIDATION" | "JSON_SYNTAX")
+            })
     }
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt>;
 }
@@ -1078,10 +1088,13 @@ pub trait ControlStore: RunStore + BudgetAuthority + OperationStore + Scheduler 
 impl<T: RunStore + BudgetAuthority + OperationStore + Scheduler> ControlStore for T {}
 
 /// Content identity for structured decisions and validation receipts.
+/// Object key order is not semantic and may change through durable JSON stores.
 pub fn digest(value: &Value) -> String {
     use sha2::{Digest, Sha256};
+    let mut value = value.clone();
+    value.sort_all_objects();
     format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(value).expect("JSON value serializes"))
+        Sha256::digest(serde_json::to_vec(&value).expect("JSON value serializes"))
     )
 }

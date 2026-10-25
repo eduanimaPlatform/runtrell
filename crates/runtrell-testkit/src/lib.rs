@@ -351,3 +351,5 @@ pub mod execution_contracts;
 pub use execution::{FakeExecutionBackend, FakeExecutionRegistry};
 pub mod budget_contracts;
 pub mod recovery_contracts;
+
+pub mod repair_contracts;

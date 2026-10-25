@@ -109,3 +109,12 @@ fn external_job_preparation() {
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
+
+#[test]
+fn json_artifact_syntax_repairs_with_new_runtime() {
+    support::block_on(
+        runtrell_testkit::repair_contracts::json_artifact_repair_contract(std::sync::Arc::new(
+            support::TestPg::default(),
+        )),
+    );
+}

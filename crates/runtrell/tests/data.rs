@@ -687,6 +687,7 @@ impl TargetValidator for RejectRules {
             file: Some("a".into()),
             field: Some("reason".into()),
             span: Some((0, 2)),
+            position: None,
             cause: "Evidence reference is absent".into(),
             hint: "Attach an existing source".into(),
         }])

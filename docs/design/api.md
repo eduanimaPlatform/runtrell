@@ -40,7 +40,13 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 公開async traitはSend futureを返す静的dispatch契約。RegisteredToolのerased futureもSendであり、所有したRuntime/claimをmulti-thread Tokioのtokio::spawnへ渡せる。ホストはsupervisor・blocking taskの完了までTokio runtimeを維持する。blocking taskのFuture取消は物理I/Oの取消・保存失敗を意味しない。
 
-JSON構文エラーは現時点では修正経路の対象外。構造化出力をValueへparseする前にInvalidで終了し、位置付きDiagnosticによるAgentへの再入力は未実装。既にparse済み候補のSchema/business診断は保存・修正・再検証できる。成果物bytesの構文判定と診断はhostのTargetValidatorが供給する。RUN-07/VAL-06の未完了範囲として追跡する。
+最終候補のJSON構文エラーは`JSON_SYNTAX` diagnosticとして既存の自律修正経路へ返す。`schema::parse_json`は原因・hint、1起算の行/byte列、0起算のbyte offset、半開区間spanを返す（EOFのspanは末尾の空区間）。不正JSONには信頼できるinstance treeがないためpathはroot pointerとし、近傍の項目を推測しない。元の候補はJSON文字列Valueとしてreceiptのhashへ結び付け、protocol・候補・診断・修正回数・開始時刻をcheckpointへ保存する。構文エラーのときはSchema/business validatorとfinalizerを実行しない。正常なJSON文字列は通常のValueとして検証する。
+
+JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postgres JSONB再読取りのキー順変更でもreceiptを同じ候補へ照合する。array順と値の違いは保持する。Artifactのraw bytes hashは従来どおりbytesそのものに結び付ける。
+
+修正可否のcodeと回数・時間はhostのValidator/RepairPolicyが供給する。既定ValidatorはJSON_SYNTAXとSCHEMA_VALIDATIONを修正可能とし、ValidationChainはhostがrepairable_codesへ明示する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validationへ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。
+
+成果物bytesはhostが保存adapterで取得し、TargetValidator等から`schema::json_artifact_diagnostics`を利用する。同じ構文診断にArtifact IDを付け、参照のhash/bytesと不一致ならConflictで拒否する。対象選択・保存先・検証基準はhostの責任、構文判定と修正機構は共通基盤。試験の成果物保存はMemory DataStoreで、Postgresは制御checkpoint/操作台帳を担う。
 
 <!-- generated-contracts -->
 ## Rust契約定義
@@ -151,6 +157,29 @@ pub struct ValidationReceipt {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+pub struct Diagnostic {
+    pub code: String,
+    pub severity: String,
+    /// Instance JSON Pointer (or business diagnostic location).
+    pub path: String,
+    /// Schema JSON Pointer for schema diagnostics.
+    pub schema_path: Option<String>,
+    pub artifact: Option<String>,
+    pub file: Option<String>,
+    pub field: Option<String>,
+    /// Half-open byte span in the diagnostic target.
+    pub span: Option<(u64, u64)>,
+    pub position: Option<JsonPosition>,
+    pub cause: String,
+    pub hint: String,
+}
+
+pub struct JsonPosition {
+    pub line: usize,
+    pub column: usize,
+    pub byte_offset: usize,
+}
+
 pub trait Clock: Send + Sync {
     fn now(&self) -> u64;
     fn wait_until(&self, deadline: u64) -> impl std::future::Future<Output = ()> + Send;
@@ -244,9 +273,10 @@ pub trait Validator: Send + Sync {
     }
     fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
         !diagnostics.is_empty()
-            && diagnostics
-                .iter()
-                .all(|d| d.severity == "error" && d.code == "SCHEMA_VALIDATION")
+            && diagnostics.iter().all(|d| {
+                d.severity == "error"
+                    && matches!(d.code.as_str(), "SCHEMA_VALIDATION" | "JSON_SYNTAX")
+            })
     }
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt>;
 }
@@ -481,23 +511,3 @@ pub trait ControlStore: RunStore + BudgetAuthority + OperationStore + Scheduler 
 impl<T: RunStore + BudgetAuthority + OperationStore + Scheduler> ControlStore for T {}
 
 ```
-
-`ArtifactStore::stage_named(access, ArtifactSpec { id, media_type, class }, bytes, now)`と`save(access, staged, now)`はraw bytesの安定ID保存契約。`staged(access, id)`は未公開stagingを再取得する。DataStoreは同名の同期stage/stagedと非同期saveを提供し、trait経路はblocking I/Oを退避する。再送・所有境界・metadata不一致・schema 3の詳細は[workspace](workspace.md)を参照する。
-
-```rust
-use runtrell::{ArtifactRef, ArtifactSpec, ArtifactStore, Result};
-use runtrell::data::{Access, DataClass};
-
-async fn save_job_result<S: ArtifactStore>(
-    store: &S, access: &Access, stable_id: String, bytes: &[u8], now: u64,
-) -> Result<ArtifactRef> {
-    let staged = store.stage_named(access, ArtifactSpec {
-        id: stable_id,
-        media_type: "image/png".into(),
-        class: DataClass::Intermediate,
-    }, bytes, now).await?;
-    store.save(access, staged, now).await
-}
-```
-
-IDの具体的な生成規則とmedia typeはhostが供給する。再開時も同じIDとmetadataを使い、bytesをJSONへ変換する必要はない。

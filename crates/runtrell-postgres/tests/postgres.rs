@@ -1422,3 +1422,141 @@ fn repair_checkpoint_reopens_with_independent_pool_and_runtime() {
         pool.close().await;
     });
 }
+
+#[test]
+fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
+    use runtrell::assembly::ValidationChain;
+    use runtrell_testkit::{BusinessTool, DecisionFinalizer, FakeModel, FakePolicy, TestClock};
+    use serde_json::json;
+    use std::{collections::BTreeSet, sync::Arc};
+    fn validator() -> ValidationChain {
+        ValidationChain {
+            validators: vec![],
+            schema: json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer","minimum":1}}}),
+            repair: RepairPolicy::default(),
+            repairable_codes: BTreeSet::from(["JSON_SYNTAX".into()]),
+        }
+    }
+    fn executor() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+    let schema = format!("repair_{}", uuid::Uuid::new_v4().simple());
+    let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("disposable database required");
+    let first = executor();
+    let (h, account, checkpoint) = first.block_on(async {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .unwrap();
+        let store = Arc::new(
+            PgStore::open(pool.clone(), &schema, Capacity::default())
+                .await
+                .unwrap(),
+        );
+        let account = store
+            .create_account("t", Amount::new(1000, 1000), None)
+            .await
+            .unwrap();
+        let h = store
+            .start(RunSpec::new(
+                "t",
+                "repair-reopen",
+                account.clone(),
+                "answer",
+            ))
+            .await
+            .unwrap();
+        let claim = store.claim(&h, "first", 0, 100).await.unwrap();
+        let rt = Runtime {
+            store: store.clone(),
+            model: FakeModel::scripted(vec![ModelReply {
+                text: "{\n  \"answer\": }".into(),
+                ..FakeModel::decision(serde_json::Value::Null)
+            }]),
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(validator()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let waiting = rt.drive(&claim).await.unwrap();
+        assert_eq!(waiting.state, RunState::Waiting("validation repair".into()));
+        let cp = waiting.checkpoint.unwrap();
+        assert_eq!(
+            cp.payload["repair"]["candidate"],
+            json!("{\n  \"answer\": }")
+        );
+        assert_eq!(
+            cp.payload["repair"]["receipt"]["diagnostics"][0]["path"],
+            ""
+        );
+        assert_eq!(store.account(&account).await.unwrap().used.tokens, 4);
+        let operations = store.list_operations(&h).await.unwrap();
+        assert_eq!(operations.len(), 1);
+        assert!(operations[0].settled);
+        assert_eq!(
+            cp.payload["repair"]["receipt"]["diagnostics"][0]["position"],
+            json!({"line":2,"column":13,"byte_offset":14})
+        );
+        drop(rt);
+        drop(store);
+        pool.close().await;
+        (h, account, cp)
+    });
+    drop(first);
+    let second = executor();
+    second.block_on(async {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .unwrap();
+        let store = Arc::new(
+            PgStore::open(pool.clone(), &schema, Capacity::default())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(store.get(&h).await.unwrap().checkpoint, Some(checkpoint));
+        assert_eq!(store.account(&account).await.unwrap().used.tokens, 4);
+        let claim = store.claim(&h, "second", 101, 100).await.unwrap();
+        let clock = TestClock::default();
+        clock.set(101);
+        let model = FakeModel::scripted(vec![FakeModel::decision(json!({"answer":2}))]);
+        let rt = Runtime {
+            store: store.clone(),
+            model: model.clone(),
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock,
+            validator: Arc::new(validator()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let done = rt.drive(&claim).await.unwrap();
+        assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded));
+        assert_eq!(done.output, Some(json!({"answer":2})));
+        assert!(done.receipt.as_ref().unwrap().passed);
+        assert_eq!(rt.drive(&claim).await.unwrap(), done);
+        let ops = store.list_operations(&h).await.unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(
+            ops.iter()
+                .all(|op| op.settled && op.request.reserve.tokens > 0)
+        );
+        assert_eq!(store.account(&account).await.unwrap().used.tokens, 8);
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert!(
+            model.requests.lock().unwrap()[0]
+                .messages
+                .iter()
+                .any(|m| m.text.contains("JSON_SYNTAX"))
+        );
+        drop(rt);
+        drop(store);
+        pool.close().await;
+    });
+}

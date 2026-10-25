@@ -3,6 +3,63 @@
 use crate::*;
 use serde_json::Value;
 
+/// Parse candidate or artifact bytes with the same structured syntax diagnostics.
+/// `path` is the root pointer: malformed JSON has no trustworthy instance tree.
+/// EOF points just past the last byte; other errors point at the offending byte.
+pub fn parse_json(bytes: &[u8]) -> std::result::Result<Value, Vec<Diagnostic>> {
+    serde_json::from_slice(bytes).map_err(|error| {
+        let line = error.line();
+        let column = error.column();
+        let start = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b == b'\n')
+            .take(line.saturating_sub(1))
+            .last()
+            .map_or(0, |(i, _)| i + 1);
+        let offset = if error.is_eof() {
+            bytes.len()
+        } else {
+            start
+                .saturating_add(column.saturating_sub(1))
+                .min(bytes.len())
+        };
+        vec![Diagnostic {
+            code: "JSON_SYNTAX".into(),
+            severity: "error".into(),
+            path: String::new(),
+            schema_path: None,
+            artifact: None,
+            file: None,
+            field: None,
+            span: Some((
+                offset as u64,
+                (offset + usize::from(offset < bytes.len())) as u64,
+            )),
+            position: Some(JsonPosition {
+                line,
+                column,
+                byte_offset: offset,
+            }),
+            cause: error.to_string(),
+            hint: "Correct JSON syntax at the byte position and submit again".into(),
+        }]
+    })
+}
+
+/// Hosts resolve bytes through their storage adapter. Reject stale/mismatched
+/// bytes as a storage conflict, not as agent-repairable syntax feedback.
+pub fn json_artifact_diagnostics(bytes: &[u8], artifact: &ArtifactRef) -> Result<Vec<Diagnostic>> {
+    if data::content_digest(bytes) != artifact.hash || bytes.len() as u64 != artifact.bytes {
+        return Err(Error::Conflict);
+    }
+    let mut diagnostics = parse_json(bytes).err().unwrap_or_default();
+    for diagnostic in &mut diagnostics {
+        diagnostic.artifact = Some(artifact.id.clone());
+    }
+    Ok(diagnostics)
+}
+
 fn inspect(schema: &Value) -> Result<()> {
     let Some(obj) = schema.as_object() else {
         return if schema.is_boolean() {
@@ -89,6 +146,7 @@ pub fn schema_diagnostics(value: &Value, schema: &Value) -> Result<Vec<Diagnosti
             artifact: None,
             file: None,
             span: None,
+            position: None,
             cause: e.to_string(),
             hint: "Correct the candidate at the instance pointer".into(),
         })

@@ -8,7 +8,7 @@ fn chain() -> ValidationChain {
         validators: vec![],
         schema: json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer","minimum":1}}}),
         repair: RepairPolicy::default(),
-        repairable_codes: BTreeSet::from(["SCHEMA_VALIDATION".into()]),
+        repairable_codes: BTreeSet::from(["SCHEMA_VALIDATION".into(), "JSON_SYNTAX".into()]),
     }
 }
 async fn setup(budget: u64, deadline: Option<u64>) -> (Arc<MemoryStore>, Claim, String) {
@@ -102,6 +102,72 @@ fn candidate_and_diagnostics_survive_worker_loss_and_revalidation() {
     });
 }
 #[test]
+fn json_syntax_candidate_survives_worker_loss_and_revalidation() {
+    block_on(async {
+        let (store, claim, account) = setup(1000, None).await;
+        let model = FakeModel::scripted(vec![
+            ModelReply {
+                text: "{\n  \"answer\": }".into(),
+                ..FakeModel::decision(Value::Null)
+            },
+            FakeModel::decision(json!({"answer":2})),
+        ]);
+        let rt = runtime_with(store.clone(), model.clone(), chain());
+        let waiting = rt.drive(&claim).await.unwrap();
+        assert_eq!(waiting.state, RunState::Waiting("validation repair".into()));
+        assert_eq!(store.slot_count(OperationKind::Run).await, 0);
+        assert_eq!(store.slot_count(OperationKind::Model).await, 0);
+        let cp = waiting.checkpoint.unwrap();
+        assert_eq!(
+            cp.payload["repair"]["candidate"],
+            json!("{\n  \"answer\": }")
+        );
+        assert_eq!(
+            cp.payload["repair"]["receipt"]["diagnostics"][0]["path"],
+            ""
+        );
+        let diagnostic = &cp.payload["repair"]["receipt"]["diagnostics"][0];
+        assert_eq!(diagnostic["code"], "JSON_SYNTAX");
+        assert_eq!(
+            diagnostic["position"],
+            json!({"line":2,"column":13,"byte_offset":14})
+        );
+        assert_eq!(diagnostic["span"], json!([14, 15]));
+        assert!(
+            diagnostic["cause"]
+                .as_str()
+                .unwrap()
+                .contains("expected value")
+        );
+        drop(rt);
+        let claim = store
+            .claim(&claim.run, "new-worker", 101, 100)
+            .await
+            .unwrap();
+        let rt = runtime_with(store.clone(), model.clone(), chain());
+        rt.clock.set(101);
+        let done = rt.drive(&claim).await.unwrap();
+        assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded));
+        assert_eq!(done.output, Some(json!({"answer":2})));
+        assert!(done.receipt.unwrap().passed);
+        let operations = store.list_operations(&claim.run).await.unwrap();
+        assert_eq!(operations.len(), 2);
+        assert!(
+            operations
+                .iter()
+                .all(|op| op.settled && op.request.reserve.tokens > 0)
+        );
+        assert_eq!(store.account(&account).await.unwrap().used.tokens, 8);
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
+        assert!(
+            model.requests.lock().unwrap()[1]
+                .messages
+                .iter()
+                .any(|m| m.text.contains("JSON_SYNTAX"))
+        );
+    });
+}
+#[test]
 fn host_limits_unrepairable_budget_and_deadline_stop_without_extra_calls() {
     block_on(async {
         for mode in [
@@ -157,6 +223,84 @@ fn host_limits_unrepairable_budget_and_deadline_stop_without_extra_calls() {
                 if mode == "budget" {
                     store.exhaust(&claim, 0).await.unwrap();
                     store.finalization_allowed(&claim, 0).await.unwrap();
+                }
+                let result = rt.drive(&claim).await;
+                if mode == "budget" {
+                    assert!(matches!(
+                        result.unwrap().state,
+                        RunState::Terminal(Terminal::BudgetReached(_))
+                    ));
+                } else if mode == "deadline" {
+                    assert_eq!(
+                        result.unwrap().state,
+                        RunState::Terminal(Terminal::DeadlineReached)
+                    );
+                } else {
+                    assert!(matches!(
+                        result.unwrap().state,
+                        RunState::Terminal(Terminal::Failed(_))
+                    ));
+                }
+            }
+            assert_eq!(model.requests.lock().unwrap().len(), 1, "{mode}");
+        }
+    });
+}
+#[test]
+fn json_syntax_host_limits_stop_without_extra_calls() {
+    block_on(async {
+        for mode in [
+            "count",
+            "time",
+            "unrepairable",
+            "budget",
+            "deadline",
+            "elapsed-after-wait",
+        ] {
+            let (store, claim, _) = setup(
+                if mode == "budget" { 22 } else { 1000 },
+                if mode == "deadline" { Some(10) } else { None },
+            )
+            .await;
+            let model = FakeModel::scripted(vec![
+                ModelReply {
+                    text: "{\n  \"answer\": }".into(),
+                    ..FakeModel::decision(Value::Null)
+                },
+                FakeModel::decision(json!({"answer":3})),
+            ]);
+            let mut validator = chain();
+            if mode == "count" {
+                validator.repair.max_repairs = Some(0);
+            }
+            if mode == "time" {
+                validator.repair.max_elapsed = Some(0);
+            }
+            if mode == "elapsed-after-wait" {
+                validator.repair.max_elapsed = Some(5);
+            }
+            if mode == "unrepairable" {
+                validator.repairable_codes.clear();
+            }
+            let rt = runtime_with(store.clone(), model.clone(), validator);
+            let first = rt.drive(&claim).await.unwrap();
+            if matches!(mode, "count" | "time" | "unrepairable") {
+                assert!(matches!(
+                    first.state,
+                    RunState::Terminal(Terminal::Failed(_))
+                ));
+                assert_eq!(
+                    first.checkpoint.unwrap().payload["last_validation"]["receipt"]["diagnostics"]
+                        [0]["path"],
+                    ""
+                );
+            } else {
+                assert!(matches!(first.state, RunState::Waiting(_)));
+                if mode == "deadline" {
+                    rt.clock.set(10);
+                }
+                if mode == "elapsed-after-wait" {
+                    rt.clock.set(5);
                 }
                 let result = rt.drive(&claim).await;
                 if mode == "budget" {
@@ -319,4 +463,46 @@ impl Tool for StrictTool {
     async fn lookup(&self, c: &ToolContext, v: Value) -> Result<Lookup> {
         self.0.lookup(c, v).await
     }
+}
+
+#[test]
+fn json_artifact_syntax_repairs_with_new_runtime() {
+    block_on(repair_contracts::json_artifact_repair_contract(Arc::new(
+        MemoryStore::default(),
+    )));
+}
+
+#[test]
+fn repeated_json_syntax_failure_stops_at_host_repair_count() {
+    block_on(async {
+        let (store, claim, account) = setup(1000, None).await;
+        let bad = ModelReply {
+            text: "{".into(),
+            ..FakeModel::decision(Value::Null)
+        };
+        let model = FakeModel::scripted(vec![bad.clone(), bad]);
+        let mut validator = chain();
+        validator.repair.max_repairs = Some(1);
+        let rt = runtime_with(store.clone(), model.clone(), validator);
+        assert_eq!(
+            rt.drive(&claim).await.unwrap().state,
+            RunState::Waiting("validation repair".into())
+        );
+        let stopped = rt.drive(&claim).await.unwrap();
+        assert_eq!(
+            stopped.state,
+            RunState::Terminal(Terminal::Failed(
+                "invalid input: VALIDATION_REPAIR_LIMIT".into()
+            ))
+        );
+        let cp = stopped.checkpoint.unwrap();
+        assert_eq!(cp.payload["repair"]["count"], 1);
+        assert_eq!(cp.payload["last_validation"]["candidate"], "{");
+        assert_eq!(
+            cp.payload["last_validation"]["receipt"]["diagnostics"][0]["code"],
+            "JSON_SYNTAX"
+        );
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
+        assert_eq!(store.account(&account).await.unwrap().used.tokens, 8);
+    });
 }
