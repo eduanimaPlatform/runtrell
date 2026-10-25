@@ -154,7 +154,7 @@
 
 公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。
 
-試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 7件／python 8件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
+試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はdefault 8件／python 9件、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
 
 ## 状態別集計
 
@@ -219,7 +219,7 @@ RES-01/02/03/05/07、RUN-05、U09: `api.rs`のUsage.total、Price.cost/estimate�
 | SBX-07、REC-05/06、RES-04 | Linux fixtureのnative Unix `--no-run`は成功。停止直後のMemory未解放とunmount/cgroup削除後の解放をassert。`linux_concurrent_runs_reclaim_independently`を追加し必須CI名へ登録 | Linux実行は未実施。cgroup/mount作成後・識別情報保存前のcrashからの孤立実体自動再発見/回収は未実装・未検証。Unknown隔離と予約保持を維持 |
 | SBX-07（macOS能力） | `real_isolation_loop_output_fork_env_and_workspace_boundaries`の必須契約を明示拒否へ変更。requires_descendantsは取得前Unsupported、Seatbeltのfork禁止を維持 | 本改訂のSeatbelt実行は未確認。macOSの子孫一括回収は提供せず、成功を主張しない |
 
-Linux targetのcross-checkはtarget未導入（E0463: core/std不在）で失敗し、インストールは行っていない。Unixでfixtureを型検査できてもLinux固有実装のtarget build成功ではない。Linux必須一覧はdefault 7件／python 8件、macOS必須一覧は上記Seatbelt 1件。新しいHosted結果・privileged実行結果を得るまでLinux試験を検証済みにしない。最小権限の本番管理サービスは[execution](execution.md)の条件で別途受入する。
+Linux targetのcross-checkはtarget未導入（E0463: core/std不在）で失敗し、インストールは行っていない。Unixでfixtureを型検査できてもLinux固有実装のtarget build成功ではない。Linux必須一覧はdefault 8件／python 9件、macOS必須一覧は上記Seatbelt 1件。新しいHosted結果・privileged実行結果を得るまでLinux試験を検証済みにしない。最小権限の本番管理サービスは[execution](execution.md)の条件で別途受入する。
 
 
 ローカルDB環境の追加記録: 通常条件のworkspace試験は成功したが、その後の再実行ではPostgres契約試験32件がStorageで失敗した。単独再実行でも、PostgreSQLの`could not resize shared memory segment ... to 33554432 bytes: No space left on device`を確認した。Docker操作・DB初期化・schema削除は行わず、接続ごとの`PGOPTIONS='-c max_parallel_workers_per_gather=0 -c max_parallel_maintenance_workers=0'`でDB内部の並列workerを無効化した単独再検証は成功。これは同じ使い捨てDBへの接続設定であり、アプリ側の複数Run/clientの並行試験やtransactionのassertionは変更していない。通常環境での失敗を成功扱いにしない。

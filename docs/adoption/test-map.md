@@ -11,6 +11,13 @@
 - `concurrent_slot_acquisitions_never_exceed_any_scope_limit`：global・tenant・Runの各上限を個別に3として48件同時取得。各条件で成功3件、Backpressure45件、slotと各scopeの占有permitも3件を要求する。
 - 既存`every_slot_kind_enforces_global_tenant_and_run_limits`を含むassertionは変更しない。意図した変更は、一時lockされた空きpermitを有限に待ち、真の上限到達だけをBackpressureとすること。更新失敗のrollbackは呼出し元へ返る前に完了する。上限・原子性・Unknown保持・owner fenceの契約は維持する。
 
+## rt-3h：Linuxの停止未確認と並行実行
+
+- `stop_timeout_is_durable_and_later_recovery_confirms_only_cpu_pid`：通常fileでcgroupを模擬し、30msの停止期限超過、Unknown/STOP_UNCONFIRMEDの耐久保存、解放receiptなし、別clientでの再読取り、I/Oエラーの保存、後の空判定によるCPU/PIDだけの解放を検証する。修正前は固定1秒待機で失敗。macOSでも実行する。
+- `linux_stop_unconfirmed_is_durable_and_recoverable`（ignore）：payload参加後にjoin barrierの競合を注入し、supervisorの停止確認失敗がUnknownとして保存され、別clientのstopとdestroyで回収できることを要求する。Linux実環境での実行待ち。xtaskの必須一覧にも登録し、default 8件／Python 9件を照合する。
+- `linux_concurrent_runs_reclaim_independently`：8環境の並行数・payload・10秒の停止bound・全解放assertionを維持。各環境のacquire/start/stop/destroyの所要時間を出力する。共通のstopped/destroyed helperはtimeout時に最後のstate・failure・released_resourcesを表示する。
+- 意図した状態記録の修正は、停止未確認をRunningのまま放置せずUnknownにすること。停止・回収条件、controllerの予約保持、owner fence、原子精算の要件と既存assertionは弱めない。Linuxでの間欠失敗解消と所要時間改善は実行証拠を別途必要とする。
+
 ## 意図した変更
 
 - `max_turns` API/保存field/MaxTurns errorを削除。通常tool反復に総回数上限はない。再開とmalformed継続の新期待を先に失敗させた。既存104件を維持し、上限依存の3ケースを更新。

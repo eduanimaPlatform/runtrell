@@ -1,5 +1,20 @@
 # Runtrellの必要時実行（2e）
 
+## rt-3h：Linuxの停止未確認と並行実行
+
+Linux supervisorの停止確認は固定回数ではなくrequestの`stop_ms`で有界に待つ。
+kill・空判定・使用量読取りの失敗や期限超過は、operation lockを保持したまま
+`Unknown` / `STOP_UNCONFIRMED`をfsync付きで保存する。CPU/PIDを含む未確認資源の
+receiptは発行せず、後の`stop`で同じcgroup inodeとjoin barrierを再照合する。
+保存自体が失敗した場合は耐久記録を保証できず、既存のRunning等を未回収として保持する。
+controllerは従来どおり全資源のreceiptを待つ。
+
+supervisorのprocess spawn、cancel/cgroup監視、kill・空判定待機・使用量読取り・
+出力回収・record fsyncはblocking workerで実行し、Tokio workerを同期I/Oで占有しない。
+processとpipeの非同期待機はTokio側に残す。lockはoperation別で、全環境の直列化は追加しない。
+取得・開始準備・照会・unmount/削除は既存のblocking worker経路を維持する。
+同期syscallそのものの強制中断やLinux上の所要時間改善の実証は、この変更の単体試験では保証しない。
+
 ## 目的と受入境界
 
 Run受付・検索だけでは環境を作らない。コード要求は既存dispatchのSandbox操作として、階層予算と共有slotを先に予約する。RunStore / OperationStore / BudgetAuthority / Schedulerは変更しない。新しいExecutionLedgerは取得intent、固定入力、取消、停止、資源別回収、費用を別に保存する。Memory adapterは共有instance内のみ、PgStoreのExecutionLedgerはDBへのCOMMIT後の耐久保存を提供する。台帳の耐久性とbackend実体の再発見能力は別契約とする。
@@ -120,7 +135,7 @@ Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り�
 
 payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須とし、uid/gid 65534、`--cap-drop ALL`、helperの`no_new_privs`、追加userns禁止、read-only runtime、network分離を適用する。管理領域・資格情報・cgroup FSは公開しない。`linux_payload_has_no_privileges`はpayloadの実行、uid/gid、全5種のcapability集合が0、NoNewPrivs=1、管理側と異なるuser namespaceを照合する。共有kernelの脆弱性に対するVM相当の防御を意味しない。
 
-`xtask isolation-tests linux default|python`が必須名の正本。現在default 7件、Python有効8件（既存の環境拒否・遅延helper拒否2件を含む）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
+`xtask isolation-tests linux default|python`が必須名の正本。現在default 8件、Python有効9件（既存の環境拒否・遅延helper拒否2件を含む）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
 
 既存のbaseline実行・CPU閾値・OOM・PID quota・ENOSPC・出力上限・network/書込み拒否・子孫停止・別process停止後の再発見・冪等回収・Python成果物保存のassertionは維持する。環境変数不足は成功returnせず失敗する。CIの結果照合だけでは将来追加される早期returnを検出できないため、payload実行と制限発動のassertionも必須条件である。
 

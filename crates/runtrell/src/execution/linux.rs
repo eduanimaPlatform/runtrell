@@ -471,19 +471,30 @@ impl LinuxBackend {
         self.save(id, r)?;
         Ok(Progress::Confirmed)
     }
-    async fn run(self, id: String, mut r: Record, _lock: File, mut cmd: Command, wall: u64) {
+    async fn run(
+        self,
+        id: String,
+        mut r: Record,
+        lock: File,
+        mut cmd: Command,
+        wall: u64,
+    ) -> Result<()> {
+        let wall_deadline = tokio::time::Instant::now() + Duration::from_millis(wall);
         let cpu = r
             .request
             .limits
             .cpu_millis
             .unwrap_or(0)
             .saturating_mul(1000);
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        let mut child = match tokio::task::spawn_blocking(move || cmd.spawn()).await {
+            Ok(Ok(c)) => c,
             Err(e) => {
                 r.observation.failure = Some(format!("START_FAILED: {e}"));
-                let _ = self.finish(&id, &mut r, None).await;
-                return;
+                return self.finish(&id, &mut r, None, lock).await;
+            }
+            Ok(Err(e)) => {
+                r.observation.failure = Some(format!("START_FAILED: {e}"));
+                return self.finish(&id, &mut r, None, lock).await;
             }
         };
         let stdout = child.stdout.take().expect("piped stdout");
@@ -491,12 +502,18 @@ impl LinuxBackend {
         let limit = r.request.limits.output_bytes / 3;
         let monitor = async {
             loop {
-                if self.dir(&id).join("cancel").exists() {
-                    return Err(std::io::Error::other("CANCELLED"));
-                }
-                let usage = read_usage(&self.group(&id))
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                if usage.cpu_usec >= cpu {
+                let b = self.clone();
+                let id = id.clone();
+                let usage = tokio::task::spawn_blocking(move || {
+                    if b.dir(&id).join("cancel").exists() {
+                        return Err(Error::Invalid("CANCELLED".into()));
+                    }
+                    read_cpu_usec(&b.group(&id))
+                })
+                .await
+                .map_err(std::io::Error::other)?
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                if usage >= cpu {
                     return Err(std::io::Error::other("CPU_LIMIT"));
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -505,14 +522,30 @@ impl LinuxBackend {
         let result = tokio::select! {
             result = async { let (out,err,status)=tokio::try_join!(bounded(stdout,limit),bounded(stderr,limit),child.wait())?; Ok::<_,std::io::Error>((out,err,status)) } => result,
             result = monitor => result,
-            _ = tokio::time::sleep(Duration::from_millis(wall)) => Err(std::io::Error::other("DEADLINE_EXCEEDED")),
+            _ = tokio::time::sleep_until(wall_deadline) => Err(std::io::Error::other("DEADLINE_EXCEEDED")),
         };
         let _ = child.start_kill();
-        if child.wait().await.is_err() {
-            r.observation.state = ExecutionState::Unknown;
-            r.observation.failure = Some("STOP_UNCONFIRMED".into());
-            let _ = self.save(&id, &r);
-            return;
+        let stop_deadline =
+            std::time::Instant::now() + Duration::from_millis(r.request.limits.stop_ms);
+        // Reaping the direct child is also bounded; cgroup confirmation below
+        // remains authoritative for the entire descendant tree.
+        let reaped = tokio::time::timeout(
+            Duration::from_millis(r.request.limits.stop_ms),
+            child.wait(),
+        )
+        .await;
+        if !matches!(reaped, Ok(Ok(_))) {
+            let b = self.clone();
+            return tokio::task::spawn_blocking(move || {
+                let _lock = lock;
+                let kill = b.kill(&id, &r);
+                r.observation.state = ExecutionState::Unknown;
+                r.observation.failure =
+                    Some(format!("STOP_UNCONFIRMED: child wait; kill={kill:?}"));
+                b.save(&id, &r)
+            })
+            .await
+            .map_err(|_| Error::Storage)?;
         }
         let value = match result {
             Ok((out, err, status)) => {
@@ -526,19 +559,67 @@ impl LinuxBackend {
                 None
             }
         };
-        let _ = self.finish(&id, &mut r, value).await;
+        self.finish_before(&id, &mut r, value, stop_deadline, lock)
+            .await
     }
-    async fn finish(&self, id: &str, r: &mut Record, value: Option<Value>) -> Result<()> {
+    async fn finish(
+        &self,
+        id: &str,
+        r: &mut Record,
+        value: Option<Value>,
+        lock: File,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(r.request.limits.stop_ms);
+        self.finish_before(id, r, value, deadline, lock).await
+    }
+    async fn finish_before(
+        &self,
+        id: &str,
+        r: &mut Record,
+        value: Option<Value>,
+        deadline: std::time::Instant,
+        lock: File,
+    ) -> Result<()> {
+        let b = self.clone();
+        let id = id.to_owned();
+        let mut row = r.clone();
+        let (row, result) = tokio::task::spawn_blocking(move || {
+            // The writer, rather than its awaiting Future, owns the OS lock.
+            // Runtime shutdown/drop must not allow another record writer in.
+            let _lock = lock;
+            let result = b.finish_blocking(&id, &mut row, value, deadline);
+            if let Err(e) = &result {
+                row.observation.state = ExecutionState::Unknown;
+                row.observation.failure = Some(format!("STOP_UNCONFIRMED: {e}"));
+                // Never silently leave Running when stop confirmation fails.
+                // A failed durable write is still an error, never a receipt.
+                b.save(&id, &row)?;
+            }
+            Ok::<_, Error>((row, result))
+        })
+        .await
+        .map_err(|_| Error::Storage)??;
+        *r = row;
+        result
+    }
+    fn finish_blocking(
+        &self,
+        id: &str,
+        r: &mut Record,
+        value: Option<Value>,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
         self.kill(id, r)?;
         // Never issue a stop receipt while any descendant remains in the cgroup.
-        for _ in 0..100 {
+        loop {
             if self.empty(id, r)? {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        if !self.empty(id, r)? {
-            return Err(Error::Storage);
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Invalid("STOP_DEADLINE_EXCEEDED".into()));
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
         }
         r.usage = Some(read_usage(&self.group(id))?);
         r.observation.state = ExecutionState::Collecting;
@@ -554,10 +635,7 @@ impl LinuxBackend {
                 scratch: self.dir(id).join("scratch"),
                 cancel: tokio::sync::watch::channel(false).0,
             };
-            match tokio::task::spawn_blocking(move || collect_files(&job))
-                .await
-                .map_err(|_| Error::Storage)?
-            {
+            match collect_files(&job) {
                 Ok(files) => {
                     if let Some(v) = &mut value {
                         v["files"] = json!(files);
@@ -728,9 +806,9 @@ impl ExecutionBackend for LinuxBackend {
             backend.save(&id, &r)?;
             // The persisted request remains fixed. Only this watchdog uses remaining time.
             let b = backend.clone();
-            tokio::spawn(async move {
-                b.run(id, r, lock, command, effective.limits.wall_ms).await;
-            });
+            tokio::spawn(
+                async move { b.run(id, r, lock, command, effective.limits.wall_ms).await },
+            );
             Ok(())
         })
         .await
@@ -768,7 +846,11 @@ impl ExecutionBackend for LinuxBackend {
     }
     async fn stop(&self, c: &ToolContext) -> Result<Progress> {
         let id = Self::id(c);
-        if !self.dir(&id).exists() {
+        let dir = self.dir(&id);
+        if !tokio::task::spawn_blocking(move || dir.exists())
+            .await
+            .map_err(|_| Error::Storage)?
+        {
             return Ok(Progress::Unknown);
         }
         self.cancel(c).await?;
@@ -858,13 +940,7 @@ impl ExecutionBackend for LinuxBackend {
     }
 }
 fn read_usage(group: &Path) -> Result<LinuxUsage> {
-    let stat = fs::read_to_string(group.join("cpu.stat")).map_err(io)?;
-    let cpu_usec = stat
-        .lines()
-        .find_map(|l| l.strip_prefix("usage_usec "))
-        .ok_or(Error::Storage)?
-        .parse()
-        .map_err(|_| Error::Storage)?;
+    let cpu_usec = read_cpu_usec(group)?;
     let memory_peak_bytes = fs::read_to_string(group.join("memory.peak"))
         .map_err(io)?
         .trim()
@@ -885,6 +961,14 @@ fn read_usage(group: &Path) -> Result<LinuxUsage> {
         memory_oom_kills: event(group, "memory.events", "oom_kill ")?,
         pids_limit_events: event(group, "pids.events", "max ")?,
     })
+}
+fn read_cpu_usec(group: &Path) -> Result<u64> {
+    let stat = fs::read_to_string(group.join("cpu.stat")).map_err(io)?;
+    stat.lines()
+        .find_map(|l| l.strip_prefix("usage_usec "))
+        .ok_or(Error::Storage)?
+        .parse()
+        .map_err(|_| Error::Storage)
 }
 #[cfg(target_os = "linux")]
 fn verify_cgroup_fs(path: &Path) -> Result<()> {
@@ -1046,6 +1130,104 @@ mod tests {
             && i.state == ExecutionState::Unknown));
         assert!(b.reconcile(&pending).is_err());
         assert!(groups.path().join("rt-orphan").exists());
+    }
+    #[tokio::test]
+    async fn stop_timeout_is_durable_and_later_recovery_confirms_only_cpu_pid() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let owner = RunHandle {
+            tenant: "t".into(),
+            id: "r".into(),
+        };
+        let id = key(&owner, "stop-timeout");
+        fs::create_dir(b.dir(&id)).unwrap();
+        fs::create_dir(b.group(&id)).unwrap();
+        fs::write(b.group(&id).join("cgroup.events"), "populated 1\n").unwrap();
+        let mut request = ExecutionRequest::process("/bin/sh", vec![]);
+        request.limits.stop_ms = 30;
+        let mut row = Record {
+            request,
+            observation: Observation {
+                execution: ExecutionRef {
+                    owner,
+                    id: "stop-timeout".into(),
+                    runtime_version: b.version.clone(),
+                },
+                state: ExecutionState::Running,
+                result: None,
+                failure: None,
+                cost_micro_usd: Some(0),
+                released_resources: Default::default(),
+            },
+            usage: None,
+            group_inode: Some(fs::metadata(b.group(&id)).unwrap().ino()),
+            scratch_mount_id: None,
+        };
+        b.save(&id, &row).unwrap();
+        let lock = b.lock(&id).unwrap().unwrap();
+        let started = std::time::Instant::now();
+        assert!(b.finish(&id, &mut row, None, lock).await.is_err());
+        assert!(
+            started.elapsed() < Duration::from_millis(800),
+            "must use request stop_ms, not fixed one-second polling"
+        );
+        let b = fixture(root.path(), groups.path());
+        let mut saved = b.load(&id).unwrap();
+        assert_eq!(saved.observation.state, ExecutionState::Unknown);
+        assert!(
+            saved
+                .observation
+                .failure
+                .as_deref()
+                .unwrap()
+                .starts_with("STOP_UNCONFIRMED")
+        );
+        assert!(saved.observation.released_resources.is_empty());
+        // An I/O error during confirmation must take the same durable path.
+        fs::remove_file(b.group(&id).join("cgroup.events")).unwrap();
+        let lock = b.lock(&id).unwrap().unwrap();
+        assert!(b.finish(&id, &mut saved, None, lock).await.is_err());
+        let mut saved = b.load(&id).unwrap();
+        assert_eq!(saved.observation.state, ExecutionState::Unknown);
+        assert!(
+            saved
+                .observation
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("LINUX_IO")
+        );
+        assert!(saved.observation.released_resources.is_empty());
+        fs::write(b.group(&id).join("cgroup.events"), "populated 1\n").unwrap();
+        assert!(matches!(
+            b.recover_stop(&id, &mut saved).unwrap(),
+            Progress::Pending
+        ));
+        fs::write(b.group(&id).join("cgroup.events"), "populated 0\n").unwrap();
+        for (name, value) in [
+            ("cpu.stat", "usage_usec 123\n"),
+            ("memory.peak", "4096"),
+            ("memory.events", "oom_kill 0\n"),
+            ("pids.events", "max 0\n"),
+        ] {
+            fs::write(b.group(&id).join(name), value).unwrap();
+        }
+        assert_eq!(
+            b.recover_stop(&id, &mut saved).unwrap(),
+            Progress::Confirmed
+        );
+        let saved = b.load(&id).unwrap();
+        assert_eq!(saved.observation.state, ExecutionState::Stopped);
+        assert_eq!(
+            saved.observation.released_resources,
+            [Resource::Cpu, Resource::Pid].into()
+        );
+        assert_eq!(
+            saved.observation.failure.as_deref(),
+            Some("RECOVERED_STOP_RESULT_UNKNOWN")
+        );
     }
     #[tokio::test]
     async fn stop_interrupts_staging_without_publishing_early_receipts() {

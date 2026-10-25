@@ -52,9 +52,11 @@ fn request(script: &str) -> ExecutionRequest {
     r
 }
 async fn stopped(b: &LinuxBackend, c: &ToolContext) -> Observation {
+    let mut last = None;
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let o = b.lookup(c).await.unwrap().unwrap();
+            last = Some(o.clone());
             if o.state == ExecutionState::Stopped {
                 assert!(o.released_resources.contains(&Resource::Cpu));
                 assert!(o.released_resources.contains(&Resource::Pid));
@@ -69,7 +71,9 @@ async fn stopped(b: &LinuxBackend, c: &ToolContext) -> Observation {
         }
     })
     .await
-    .expect("bounded stop")
+    .unwrap_or_else(|_| {
+        panic!("bounded stop: last observation (state, failure, released_resources): {last:?}")
+    })
 }
 async fn child_started(root: &std::path::Path, c: &ToolContext) {
     let id = digest(&serde_json::json!([c.claim.run, c.operation]));
@@ -82,19 +86,23 @@ async fn child_started(root: &std::path::Path, c: &ToolContext) {
     .expect("fixture must actually create a child before cancellation/crash");
 }
 async fn destroyed(b: &LinuxBackend, c: &ToolContext) {
+    let mut last = None;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
+            last = b.lookup(c).await.unwrap();
             match b.destroy(c).await.unwrap() {
                 Progress::Confirmed => break,
                 Progress::Pending => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
                 Progress::Unknown | Progress::NotRequired => {
-                    panic!("cleanup has no deletion receipt")
+                    panic!("cleanup has no deletion receipt: last observation: {last:?}")
                 }
             }
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| {
+        panic!("bounded destroy: last observation (state, failure, released_resources): {last:?}")
+    });
     assert_eq!(b.destroy(c).await.unwrap(), Progress::Confirmed);
     let o = b.lookup(c).await.unwrap().unwrap();
     assert!(o.released_resources.contains(&Resource::Memory));
@@ -454,6 +462,69 @@ async fn linux_payload_has_no_privileges() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires delegated cgroup v2, host mounts and bubblewrap user namespaces"]
+async fn linux_stop_unconfirmed_is_durable_and_recoverable() {
+    let root = root();
+    let b = backend(root.path());
+    let c = context("stop-unconfirmed");
+    let e = b
+        .acquire(
+            &c,
+            &request("echo ready > child-started; while [ ! -f finish-now ]; do sleep 0.01; done"),
+        )
+        .await
+        .unwrap();
+    b.start(&c, &e).await.unwrap();
+    child_started(root.path(), &c).await;
+    // Inject a real join-barrier conflict after the payload has joined. The
+    // supervisor must persist its failed confirmation, without issuing receipts.
+    let id = digest(&serde_json::json!([c.claim.run, c.operation]));
+    let barrier = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join(&id).join("join.lock"))
+        .unwrap();
+    barrier.lock().unwrap();
+    std::fs::write(root.path().join(&id).join("scratch/finish-now"), b"finish").unwrap();
+    let mut last = None;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            last = b.lookup(&c).await.unwrap();
+            if last
+                .as_ref()
+                .is_some_and(|o| o.state == ExecutionState::Unknown)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("failed confirmation must be durable: {last:?}"));
+    let o = last.unwrap();
+    assert!(
+        o.failure
+            .as_deref()
+            .unwrap()
+            .starts_with("STOP_UNCONFIRMED")
+    );
+    assert!(o.released_resources.is_empty());
+    drop(barrier);
+    // A fresh client must recover the original object, without reacquiring it.
+    let b = backend(root.path());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while b.stop(&c).await.unwrap() == Progress::Pending {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(b.stop(&c).await.unwrap(), Progress::Confirmed);
+    stopped(&b, &c).await;
+    destroyed(&b, &c).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires delegated cgroup v2, host mounts and bubblewrap user namespaces"]
 async fn linux_concurrent_runs_reclaim_independently() {
     let root = root();
     let b = backend(root.path());
@@ -464,10 +535,15 @@ async fn linux_concurrent_runs_reclaim_independently() {
             let mut c = context(&format!("parallel-{index}"));
             c.claim.run.id = format!("run-{index}");
             let r = request("printf data > scratch-data; sleep 0.2");
+            let begin = std::time::Instant::now();
             let e = b.acquire(&c, &r).await.unwrap();
+            let acquired = begin.elapsed();
             b.start(&c, &e).await.unwrap();
+            let started = begin.elapsed();
             stopped(&b, &c).await;
+            let stopped = begin.elapsed();
             destroyed(&b, &c).await;
+            eprintln!("parallel-{index}: acquire={acquired:?}, start={:?}, stop={:?}, destroy={:?}, total={:?}", started - acquired, stopped - started, begin.elapsed() - stopped, begin.elapsed());
         });
     }
     while let Some(done) = jobs.join_next().await {

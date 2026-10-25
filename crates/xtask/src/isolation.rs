@@ -14,6 +14,7 @@ pub fn names(suite: &str, feature: &str) -> Result<Vec<&'static str>, Box<dyn Er
             "linux_late_helper_cannot_join_after_stop_marker",
             "linux_payload_has_no_privileges",
             "linux_concurrent_runs_reclaim_independently",
+            "linux_stop_unconfirmed_is_durable_and_recoverable",
         ],
         "macos" if feature == "default" => {
             vec!["real_isolation_loop_output_fork_env_and_workspace_boundaries"]
@@ -115,8 +116,15 @@ mod tests {
     }
     #[test]
     fn expected_inventory_depends_on_feature() {
-        assert_eq!(names("linux", "default").unwrap().len(), 7);
-        assert_eq!(names("linux", "python").unwrap().len(), 8);
+        assert_eq!(names("linux", "default").unwrap().len(), 8);
+        assert_eq!(names("linux", "python").unwrap().len(), 9);
+        for feature in ["default", "python"] {
+            assert!(
+                names("linux", feature)
+                    .unwrap()
+                    .contains(&"linux_stop_unconfirmed_is_durable_and_recoverable")
+            );
+        }
         assert_eq!(names("macos", "default").unwrap().len(), 1);
         assert!(names("linux", "unknown").is_err());
     }

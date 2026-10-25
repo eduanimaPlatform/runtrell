@@ -6,3 +6,10 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
+
+# Linux and process backends re-hash the helper, launcher and executable on
+# every acquire/start (tamper check). Unoptimized SHA-256 made eight parallel
+# environments take ~25 s each in debug test builds and overran stop bounds on
+# slow runners; optimize only the hash implementation in dev/test builds.
+[profile.dev.package.sha2]
+opt-level = 3
