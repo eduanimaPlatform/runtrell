@@ -124,7 +124,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "SEC-02", "SEC-03", "SEC-04", "SEC-06",
                     ]
                     .contains(&id.as_str());
-                let design = if execution_scope {
+                let budget_scope = [
+                    "RES-01", "RES-02", "RES-03", "PAR-03", "PAR-05", "U09", "A06",
+                ]
+                .contains(&id.as_str());
+                let design = if budget_scope {
+                    "[budget](budget.md), [concurrency](concurrency.md), [api](api.md)"
+                } else if execution_scope {
                     "[execution](execution.md), [workspace](workspace.md)"
                 } else if data_scope {
                     "[workspace](workspace.md), [api](api.md)"
@@ -139,6 +145,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let (implementation, tests) = if status == "未着手" {
                     ("traitのみ/次段階", "本実装・対応試験は未着手")
+                } else if budget_scope {
+                    (
+                        "budget.rs / driver.rs / memory.rs / postgres engine・persistence",
+                        "testkit::budget_contractsをMemory/Pgで共通実行。軸/警告/方針/無料確定/不明予約/画像課金/attempt精算/優先度。既存fences/recovery/retryも維持。実サービスでの価格・使用量の正しさはhost責任",
+                    )
                 } else if execution_scope {
                     (
                         "execution/{mod,controller,process}.rs; postgres/src/execution.rs; runtrell-exec-limit",

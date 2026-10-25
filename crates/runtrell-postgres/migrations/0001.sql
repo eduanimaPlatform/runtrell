@@ -1,7 +1,7 @@
--- Schema 2 is a fresh schema, not an upgrade from schema 1.
+-- Schema 3 is a fresh schema; no upgrade of prior schemas.
 CREATE TABLE IF NOT EXISTS {{schema}}.schema_config (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    version integer NOT NULL CHECK (version = 2), capacity jsonb NOT NULL
+    version integer NOT NULL CHECK (version = 3), capacity jsonb NOT NULL
 );
 CREATE TABLE IF NOT EXISTS {{schema}}.runs (
     handle jsonb NOT NULL,
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.budget_accounts (
     id text PRIMARY KEY, tenant text NOT NULL,
     parent text REFERENCES {{schema}}.budget_accounts(id),
     "limit" jsonb NOT NULL, reserved jsonb NOT NULL, used jsonb NOT NULL,
-    unknown numeric(20,0) NOT NULL, exhausted boolean NOT NULL, warnings jsonb NOT NULL
+    unknown numeric(20,0) NOT NULL, exhausted boolean NOT NULL, warnings jsonb NOT NULL, policy jsonb NOT NULL, quantity_reserved jsonb NOT NULL, quantity_used jsonb NOT NULL, quantity_warnings jsonb NOT NULL
 );
 CREATE INDEX IF NOT EXISTS account_parent ON {{schema}}.budget_accounts(parent);
 CREATE TABLE IF NOT EXISTS {{schema}}.operations (
@@ -77,9 +77,9 @@ CREATE TABLE IF NOT EXISTS {{schema}}.queue_tenants (
 );
 CREATE TABLE IF NOT EXISTS {{schema}}.queue_entries (
     key text PRIMARY KEY, tenant text NOT NULL REFERENCES {{schema}}.queue_tenants(tenant),
-    position bigserial UNIQUE, low_latency boolean NOT NULL, deadline numeric(20,0) NOT NULL
+    position bigserial UNIQUE, scheduling jsonb NOT NULL, deadline numeric(20,0) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS queue_tenant_order ON {{schema}}.queue_entries(tenant,low_latency,position);
+CREATE INDEX IF NOT EXISTS queue_tenant_order ON {{schema}}.queue_entries(tenant,position);
 CREATE INDEX IF NOT EXISTS queue_deadline ON {{schema}}.queue_entries(deadline,position);
 -- Each permit is an independent lockable row, not a shared counter.
 CREATE TABLE IF NOT EXISTS {{schema}}.capacity_slots (
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.late_results (
 -- Dispatch ordering metadata only; never acquired by Run/budget/slot updates.
 CREATE TABLE IF NOT EXISTS {{schema}}.queue_policy (
     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
-    last_tenant text, fast_streak integer NOT NULL DEFAULT 0
+    last_tenant text, priority_streak integer NOT NULL DEFAULT 0
 );
 INSERT INTO {{schema}}.queue_policy(singleton) VALUES(true) ON CONFLICT DO NOTHING;
 CREATE INDEX IF NOT EXISTS attempts_unsettled ON {{schema}}.attempts(tenant,run_id) WHERE NOT settled;

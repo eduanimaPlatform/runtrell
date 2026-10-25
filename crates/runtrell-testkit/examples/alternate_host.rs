@@ -11,6 +11,7 @@ impl ModelPort for WarehouseModel {
             model: "warehouse".into(),
             context: 256,
             max_output: 8,
+            min_max_output_tokens: 1,
             timeout: 10,
             price: Some(Price {
                 model: "warehouse".into(),
@@ -18,6 +19,9 @@ impl ModelPort for WarehouseModel {
                 cached: 0,
                 output: 0,
                 reasoning: 0,
+                image_input: 0,
+                cached_image_input: 0,
+                image_output: 0,
             }),
         }
     }
@@ -74,6 +78,7 @@ impl Tool for StockTool {
             timeout: 5,
             max_output_bytes: 128,
             reserve: Amount::default(),
+            quantities: Default::default(),
             conflict_scope: None,
             retry: RetryPolicy {
                 max_attempts: 1,

@@ -305,7 +305,7 @@ fn u09_parallel_ancestor_reservations_do_not_double_allocate() {
     );
 }
 #[test]
-fn budget_shared_settlement_warning_thresholds_and_duplicate_receipts() {
+fn default_policy_warning_thresholds_and_duplicate_receipts() {
     block_on(async {
         let s = MemoryStore::default();
         let (_, c, a) = started(&s, "budget", 100).await;
@@ -394,6 +394,7 @@ fn price_cap_integer_rounding_subsets_and_no_fixed_output() {
         model: "m".into(),
         context: 100,
         max_output: 90,
+        min_max_output_tokens: 1,
         timeout: 30,
         price: Some(Price {
             model: "m".into(),
@@ -401,6 +402,9 @@ fn price_cap_integer_rounding_subsets_and_no_fixed_output() {
             cached: 0,
             output: 2_000_000,
             reasoning: 2_000_000,
+            image_input: 1_000_000,
+            cached_image_input: 0,
+            image_output: 2_000_000,
         }),
     };
     assert_eq!(
@@ -543,7 +547,10 @@ fn queue_backpressure_timeout_round_robin_and_priority_are_bounded() {
             s.enqueue(QueueEntry {
                 key: key.into(),
                 tenant: tenant.into(),
-                low_latency: fast,
+                scheduling: SchedulingPolicy {
+                    priority: i32::from(fast),
+                    ..SchedulingPolicy::default()
+                },
                 deadline: 10,
             })
             .await
@@ -553,7 +560,10 @@ fn queue_backpressure_timeout_round_robin_and_priority_are_bounded() {
             s.enqueue(QueueEntry {
                 key: "full".into(),
                 tenant: "c".into(),
-                low_latency: false,
+                scheduling: SchedulingPolicy {
+                    priority: 0,
+                    ..SchedulingPolicy::default()
+                },
                 deadline: 10
             })
             .await,
@@ -567,7 +577,10 @@ fn queue_backpressure_timeout_round_robin_and_priority_are_bounded() {
         s.enqueue(QueueEntry {
             key: "expired".into(),
             tenant: "a".into(),
-            low_latency: false,
+            scheduling: SchedulingPolicy {
+                priority: 0,
+                ..SchedulingPolicy::default()
+            },
             deadline: 1,
         })
         .await
@@ -672,7 +685,7 @@ fn duplicate_conflicting_request_and_operation_payload_are_rejected() {
     });
 }
 #[test]
-fn budget_either_axis_exact_limit_refuses_finalization() {
+fn default_policy_either_axis_exact_limit_refuses_finalization() {
     block_on(async {
         for amount in [
             Amount::new(100, 25),

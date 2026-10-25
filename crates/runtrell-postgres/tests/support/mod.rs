@@ -110,6 +110,20 @@ impl RunStore for TestPg {
     }
 }
 impl BudgetAuthority for TestPg {
+    async fn create_account_with_policy(
+        &self,
+        tenant: &str,
+        limit: Amount,
+        parent: Option<String>,
+        policy: AccountPolicy,
+    ) -> Result<String> {
+        self.0
+            .create_account_with_policy(tenant, limit, parent, policy)
+            .await
+    }
+    async fn finalization_allowed(&self, claim: &Claim, now: u64) -> Result<()> {
+        self.0.finalization_allowed(claim, now).await
+    }
     async fn exhaust(&self, claim: &Claim, now: u64) -> Result<()> {
         self.0.exhaust(claim, now).await
     }

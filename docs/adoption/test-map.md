@@ -380,11 +380,11 @@
 
 | 旧branchのpath/条件 | 新しい試験 | 相違/対象外 |
 |---|---|---|
-| store/budget_tests::shared_reservation_contract | contracts::reservation_is_idempotent_*、runtime::budget_shared_*、u09_parallel_* | Pgの試験は次段階 |
-| budget_axis_and_unknown_contract / invalid_usage_contract | runtime::budget_either_axis_*、invalid_partial_usage_* | unknownの無証拠releaseは新契約で禁止 |
-| warning_delivery_contract | runtime::budget_shared_*、warning_survives_run_switch_* | model直前にSystemNote、閾値は共有口座で一度 |
+| store/budget_tests::shared_reservation_contract | contracts::reservation_is_idempotent_*、runtime::default_policy_warning_*、u09_parallel_* | Pgの試験は次段階 |
+| budget_axis_and_unknown_contract / invalid_usage_contract | runtime::default_policy_either_axis_*、invalid_partial_usage_* | unknownの無証拠releaseは新契約で禁止 |
+| warning_delivery_contract | runtime::default_policy_warning_*、warning_survives_run_switch_* | model直前にSystemNote、閾値は共有口座で一度 |
 | budget_execution::h17_charged_failed_model_attempt_* | retry::charged_retry_* | backoffを機械的Waitingとしてホストへ返す |
-| h16_h17_exact_limit_* / h17_missing_price_* | runtime::budget_either_axis_*、price_cap_* | token/costの両軸で確定禁止。単価未設定はI/O前停止 |
+| h16_h17_exact_limit_* / h17_missing_price_* | runtime::default_policy_either_axis_*、price_cap_* | token/costの両軸で確定禁止。単価未設定はI/O前停止 |
 | h17_missing_usage_* / checkpoint_restart_* | runtime::invalid_partial_usage_*、recovery 10case | 不明予約保持、再送は同scope/期限内NotFound証拠のみ |
 | model_notfound_recovery::unsent_restart全10case | recovery.rs（名前で各caseを明示） | exact request/output cap、同attempt/予約、旧Lookup後worker拒否 |
 | store/tests::h09_claim_exclusion_* / request_deduplicates_* / h05_started_attempt_* | recovery::handoff、runtime::duplicate_conflicting_*、deadline_retry_* | 上流内部型は公開しない |
@@ -413,3 +413,39 @@ Rigの104 run unit/13 run doctestを含む既存試験は除外も弱体化も�
 | 新規ExecutionLedger契約6件 | testkit/tests/execution_ledger.rsとpostgres/tests/execution.rs | 同じsuiteで固定Workspace、CAS/取消/条件、Disk/Volume/費用、Worker/backend client再生成、registry喪失、dispatch再生成後の同値照合/予約精算 |
 | 新規Pg固有1件 | execution_sql_failure_rolls_back_and_two_clients_cas_once | insert/CASのSQL失敗rollback、同revisionの同時更新は1件のみ成功 |
 | 新規process隔離1件 | process_registry_loss_quarantines_existing_scratch | registry喪失後のUnknown保持、残存directoryの非採用/非削除、別Runによる元実体の開始拒否 |
+
+## rt-3a：共通保証と選択可能な予算・受付方針
+
+| 分類 | 試験 | 受入条件・意図した変更 |
+|---|---|---|
+| 共通保証 | contracts::reservation_is_idempotent_*、runtime::u09_parallel_*、fences/recovery/retryの全既存assertion | 全祖先の原子予約、Unknown保持、owner fence、lookup後照合、再開時の予約維持、重複精算防止を維持 |
+| 既定方針 | runtime::default_policy_warning_*、default_policy_either_axis_*、fences::default_policy_unsafe_next_model_* | 両軸、50/80/95、到達後の確定拒否、予約拒否時の口座課金停止を明示的に分類。既存assertionを変更しない |
+| 選択可能な口座方針 | budget_contracts::{policies,axes,quantity_tool} | 費用のみ/tokenのみ/軸なし/追加数量、祖先数量上限、driverによるToolDescriptor数量予約、tokenなし固定費job、25/75警告と配送済み保存、Unknown予約の保持と残予算での別操作。新規契約 |
+| 選択可能なRun方針 | budget_contracts::driver_policies | 口座停止、Run終了、有限Waitと期限後終了、下限1へのShrink、下限6での拒否。未予約I/Oゼロ |
+| 費用・精算の共通保証 | budget_contracts::{image_price,settlement_and_finalization} | 画像/cached画像交差の上下限、必須区分未計測は精算せず予約保持、既知ゼロ/固定費、同結果を一度だけ精算、同じ論理keyの別課金attemptは各々加算 |
+| 選択可能な無料確定 | budget_contracts::settlement_and_finalization | 上限到達後の追加課金なし確定を許可/拒否。owner/版/receipt/未精算操作の検査は維持 |
+| 選択可能な受付方針 | budget_contracts::scheduling、既存queue/fences試験 | purpose文字列による自動優先を撤去。host供給の整数priorityと正の有限weight、tenant巡回、FIFO、飢餓防止 |
+
+`budget_contracts`は同じ関数をMemoryとPostgresで実行する（testkit/tests/budget.rsとpostgres/tests/contracts.rs）。画像価格の純粋計算はMemory側から一度実行し、未計測の画像価格に対する保存・精算契約は両adapterで検証する。既存のrecovery/retry用fake modelは、cached単価差があるためcached=Some(0)を明示するよう変更した。Noneをゼロと推測する旧価格計算は廃止し、未計測を安全に保持する契約へ変更した。assertionを通すための削除・弱体化は行っていない。queue fixtureの旧低遅延boolはpriority=0/1へ置換し、順序assertionを維持した。
+
+## rt-3b: Linux 主力 backend と任意の Python
+
+既存の macOS / ProcessBackend / 台帳契約の assertion は維持。限定 ProcessBackend の能力拒否試験はそのまま残し、主力構成を別の LinuxBackend として追加したため、拒否を成功へ変更していない。
+
+- `execution::linux::tests::*`: atomic 管理記録、file lock、client 喪失後の ledger request 全体照合、不明実体の隔離、kernel 使用量の欠測拒否。管理 FS の試験であり実 cgroup 試験ではない。
+- `runtrell/tests/python.rs`（`python` feature）: runtime 固定 identity、依存取得拒否、Workspace 固定入力、hash 変更拒否。既定 feature は無効。
+- `runtrell/tests/linux_execution.rs`（Linux cfg + ignore）: 正常 baseline と CPU/RAM/PID/disk、loop/fork/output/越境/network、取消・子孫停止、registry 非依存の再接続、別 supervisor process の強制終了後回収、Python と成果物保存。明示実行時に env 未設定なら fail。今回 macOS では Linux 実行未検証。
+
+新規 Linux backend の累積 CPU は `cpu.stat` の監視閾値であり、厳密な無超過保証ではない。kernel が強制する `cpu.max` の帯域上限と区別する。Linux 実試験を実行するまで受入完了へ引き上げない。条件・コマンド・限界は [execution](../design/execution.md) を参照。
+
+## rt-3a2: 共通料金・予約見積りと出力枠の意味
+
+| 対象 | 公開試験 | 契約・変更理由 |
+|---|---|---|
+| 画像/cached交差、総量 | runtrell/tests/pricing.rs::intersection_cost_163_and_total_do_not_double_count_subsets | I=100,C=40,M=30,X=10,O=20,J=15で163 micro-USD、総量120。cached画像単価はcached単価と同じ設定。交差上下限を検査し、内数を再加算しない |
+| 未計測/既知0/overflow | pricing::missing_totals_subsets_zero_and_overflow_are_distinct | 総量は費用観測不要、精算額は費用観測必須。各内数不正、総量/料金/予約overflowを拒否 |
+| 整数料金と上界 | pricing::{rounding_is_once_per_bill_and_quotes_use_worst_category,every_valid_small_partition_is_bounded_by_the_quote} | 区分ごとの積を合算後、課金明細（attempt）ごとに1回だけ切上げ。入力上界+出力枠の最悪区分単価。小さい全区分の列挙で実料金<=予約を確認 |
+| 技術制約と品質方針 | pricing::{technical_and_quality_floors_constrain_allowance_not_actual_generation,invalid_request_bounds_and_model_identity_fail_before_reservation} | 旧min_output_tokensを技術指定下限min_max_output_tokensと品質枠下限min_output_budget_tokensへ明確化。旧名の互換経路なし。Shrinkは両方を守り、実生成0も許容。model/価格不一致・不正範囲を拒否 |
+| 保存・Runtime共通契約 | budget_contracts::driver_policies（Memory/Pg） | 既存assertionを維持し、品質枠2に対して実生成1で成功・精算できるケースを追加。未予約I/Oなし・不明予約保持・重複精算防止の既存試験も維持 |
+
+公開の7区分価格（reasoningとimage outputは非交差、cached imageは独立単価）を維持し、重複するcatalog/usage型は追加しない。純粋計算は新APIが存在しないコンパイル失敗をRedとして確認後に実装した。実provider/Brokerの接続試験や実価格の正しさはこの試験の対象外。

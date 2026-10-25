@@ -193,6 +193,7 @@ impl Tool for FileTool {
                 .saturating_mul(6)
                 .saturating_add(4096),
             reserve: Amount::default(),
+            quantities: Default::default(),
             conflict_scope: Some(format!(
                 "workspace:{}:{}:{}",
                 self.access.namespace().owner.tenant,
@@ -343,6 +344,7 @@ impl<V: TargetValidator> Tool for ValidationTool<V> {
             timeout: 30,
             max_output_bytes: self.adapter.store.policy().max_read,
             reserve: Amount::default(),
+            quantities: Default::default(),
             conflict_scope: Some("validation-evidence".into()),
             retry: RetryPolicy {
                 max_attempts: 1,

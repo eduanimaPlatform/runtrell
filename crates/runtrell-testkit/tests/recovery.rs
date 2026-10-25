@@ -53,6 +53,7 @@ impl ModelPort for RestartModel {
             if self.case == "failed" { 10 } else { 4 },
         );
         usage.model = "fake".into();
+        usage.cached = Some(0);
         if self.case == "failed" {
             Ok(ExternalResult::Failed {
                 code: "PROVIDER_REJECTED".into(),

@@ -52,3 +52,40 @@ mod postgres {
     }
     suite!();
 }
+
+#[test]
+fn selectable_account_policies() {
+    support::block_on(runtrell_testkit::budget_contracts::policies(
+        &support::TestPg::default(),
+    ));
+}
+#[test]
+fn budget_settlement_finalization_and_billed_attempts() {
+    support::block_on(
+        runtrell_testkit::budget_contracts::settlement_and_finalization(&support::TestPg::default()),
+    );
+}
+#[test]
+fn run_reservation_policies() {
+    support::block_on(runtrell_testkit::budget_contracts::driver_policies(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}
+#[test]
+fn host_priority_preserves_tenant_rotation() {
+    support::block_on(runtrell_testkit::budget_contracts::scheduling(
+        &support::TestPg::default(),
+    ));
+}
+#[test]
+fn selectable_axes_and_ancestor_quantity_guarantees() {
+    support::block_on(runtrell_testkit::budget_contracts::axes(
+        &support::TestPg::default(),
+    ));
+}
+#[test]
+fn tokenless_paid_tool_reserves_host_quantity() {
+    support::block_on(runtrell_testkit::budget_contracts::quantity_tool(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}

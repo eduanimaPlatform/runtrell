@@ -89,6 +89,7 @@ impl ModelPort for FakeModel {
             model: "fake".into(),
             context: 1024,
             max_output: 16,
+            min_max_output_tokens: 1,
             timeout: 30,
             price: Some(Price {
                 model: "fake".into(),
@@ -96,6 +97,9 @@ impl ModelPort for FakeModel {
                 cached: 0,
                 output: 1_000_000,
                 reasoning: 1_000_000,
+                image_input: 1_000_000,
+                cached_image_input: 0,
+                image_output: 1_000_000,
             }),
         }
     }
@@ -118,6 +122,7 @@ impl ModelPort for FakeModel {
             .ok_or_else(|| Error::Invalid("no fake reply".into()))?;
         let mut usage = Usage::measured(3, 1, 4);
         usage.model = "fake".into();
+        usage.cached = Some(0);
         let result = ExternalResult::Applied {
             output: serde_json::to_value(reply).unwrap(),
             usage,
@@ -179,6 +184,7 @@ impl Tool for BusinessTool {
             timeout: 10,
             max_output_bytes: 4096,
             reserve: Amount::new(0, 0),
+            quantities: Default::default(),
             conflict_scope: None,
             retry: RetryPolicy {
                 max_attempts: 3,
@@ -327,3 +333,4 @@ pub fn runtime(
 pub mod execution;
 pub mod execution_contracts;
 pub use execution::{FakeExecutionBackend, FakeExecutionRegistry};
+pub mod budget_contracts;

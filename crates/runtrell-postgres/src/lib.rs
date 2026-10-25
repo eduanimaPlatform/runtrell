@@ -43,7 +43,7 @@ struct SlotWire {
 struct QueueWire {
     key: String,
     tenant: String,
-    low_latency: bool,
+    scheduling: SchedulingPolicy,
     deadline: u64,
 }
 /// An immutable observation; never authorizes settlement or releases a slot.
@@ -98,7 +98,7 @@ impl PgStore {
         .await
         .map_err(storage)?;
         let config = capacity_value(&store.capacity);
-        sqlx::query(&format!("INSERT INTO {}.schema_config(singleton,version,capacity) VALUES(true,2,$1) ON CONFLICT DO NOTHING", store.schema))
+        sqlx::query(&format!("INSERT INTO {}.schema_config(singleton,version,capacity) VALUES(true,3,$1) ON CONFLICT DO NOTHING", store.schema))
             .bind(&config).execute(&mut *tx).await.map_err(storage)?;
         let (version, saved): (i32, Value) = sqlx::query_as(&format!(
             "SELECT version,capacity FROM {}.schema_config WHERE singleton",
@@ -107,7 +107,7 @@ impl PgStore {
         .fetch_one(&mut *tx)
         .await
         .map_err(storage)?;
-        if version != 2 {
+        if version != 3 {
             return Err(Error::Unsupported("postgres schema".into()));
         }
         if saved != config {

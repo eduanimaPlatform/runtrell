@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared contract fixture from runtrell-2a testkit (2d31acf).
-use runtrell::*;
 use super::{MemoryStore, block_on};
+use runtrell::*;
 use runtrell_testkit::*;
 use serde_json::json;
 use std::{
@@ -56,6 +56,7 @@ impl ModelPort for RestartModel {
             if self.case == "failed" { 10 } else { 4 },
         );
         usage.model = "fake".into();
+        usage.cached = Some(0);
         if self.case == "failed" {
             Ok(ExternalResult::Failed {
                 code: "PROVIDER_REJECTED".into(),
@@ -127,12 +128,14 @@ async fn restart_case(case: &'static str) {
     let mut future = Box::pin(rt.drive(&first));
     let w = Waker::noop();
     let mut cx = Context::from_waker(w);
-// DB barriers can yield before model I/O; stop at the same external-I/O boundary.
-loop {
-    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
-    if !rt.model.requests.lock().unwrap().is_empty() { break; }
-    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-}
+    // DB barriers can yield before model I/O; stop at the same external-I/O boundary.
+    loop {
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        if !rt.model.requests.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
     drop(future);
     let op = store.operation(&h, "model:1").await.unwrap().unwrap();
     assert!(store.get(&h).await.unwrap().checkpoint.is_some());

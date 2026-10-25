@@ -436,7 +436,7 @@ impl PgStore {
                 self.put(
                     conn,
                     "budget_accounts",
-                    "id,tenant,parent,\"limit\",reserved,used,unknown,exhausted,warnings",
+                    "id,tenant,parent,\"limit\",reserved,used,unknown,exhausted,warnings,policy,quantity_reserved,quantity_used,quantity_warnings",
                     "id",
                     json!(a),
                 )
@@ -611,8 +611,8 @@ impl PgStore {
         .execute(&mut *conn)
         .await
         .map_err(storage)?;
-        let n=sqlx::query(&format!("INSERT INTO {}.queue_entries(key,tenant,low_latency,deadline) VALUES($1,$2,$3,$4::text::numeric) ON CONFLICT DO NOTHING",self.schema))
-            .bind(&e.key).bind(&e.tenant).bind(e.low_latency).bind(e.deadline.to_string()).execute(&mut *conn).await.map_err(storage)?.rows_affected();
+        let n=sqlx::query(&format!("INSERT INTO {}.queue_entries(key,tenant,deadline,scheduling) VALUES($1,$2,$3::text::numeric,$4) ON CONFLICT DO NOTHING",self.schema))
+            .bind(&e.key).bind(&e.tenant).bind(e.deadline.to_string()).bind(json!(e.scheduling)).execute(&mut *conn).await.map_err(storage)?.rows_affected();
         if n == 0 {
             let mut state = Ledger::default();
             for v in self
@@ -623,7 +623,7 @@ impl PgStore {
             }
             return if state.queue.front().is_some_and(|old| {
                 old.tenant == e.tenant
-                    && old.low_latency == e.low_latency
+                    && old.scheduling == e.scheduling
                     && old.deadline == e.deadline
             }) {
                 Ok(())
@@ -664,9 +664,13 @@ impl PgStore {
         }
         // Only dispatch ordering is coordinated. SKIP LOCKED means an idle worker
         // can poll again; no Run, reservation or slot call acquires this row.
-        let policy: Option<(Option<String>,i32)> = sqlx::query_as(&format!(
-            "SELECT last_tenant,fast_streak FROM {}.queue_policy WHERE singleton FOR UPDATE SKIP LOCKED",self.schema))
-            .fetch_optional(&mut *tx).await.map_err(storage)?;
+        let policy: Option<(Option<String>, i32)> = sqlx::query_as(&format!(
+            "SELECT last_tenant,priority_streak FROM {}.queue_policy WHERE singleton FOR UPDATE SKIP LOCKED",
+            self.schema
+        ))
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
         let Some((last_tenant, streak)) = policy else {
             return Ok(None);
         };
@@ -676,20 +680,33 @@ impl PgStore {
         let Some(tenant) = tenant else {
             return Ok(None);
         };
-        let v: Option<Value>=sqlx::query_scalar(&format!("SELECT to_jsonb(e) FROM {}.queue_entries e WHERE tenant=$1 ORDER BY (CASE WHEN $2 < 2 THEN low_latency ELSE NOT low_latency END) DESC,position FOR UPDATE SKIP LOCKED LIMIT 1",self.schema))
-            .bind(&tenant).bind(streak).fetch_optional(&mut *tx).await.map_err(storage)?;
-        let Some(v) = v else {
+        let values: Vec<Value> = sqlx::query_scalar(&format!("SELECT to_jsonb(e) FROM {}.queue_entries e WHERE tenant=$1 ORDER BY position FOR UPDATE SKIP LOCKED", self.schema))
+            .bind(&tenant).fetch_all(&mut *tx).await.map_err(storage)?;
+        let entries: Vec<QueueEntry> = values
+            .into_iter()
+            .map(|v| {
+                let w: QueueWire = decode(v)?;
+                Ok(QueueEntry {
+                    key: w.key,
+                    tenant: w.tenant,
+                    scheduling: w.scheduling,
+                    deadline: w.deadline,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let Some(index) = runtrell::budget::queue_index(&entries, streak as usize) else {
             return Ok(None);
         };
-        let e: QueueWire = decode(v)?;
+        let e = entries[index].clone();
+        let high = entries.iter().map(|e| e.scheduling.priority).max().unwrap();
         self.remove_queue(&mut tx, &e.key).await?;
         sqlx::query(&format!(
-            "UPDATE {}.queue_policy SET last_tenant=$1,fast_streak=$2 WHERE singleton",
+            "UPDATE {}.queue_policy SET last_tenant=$1,priority_streak=$2 WHERE singleton",
             self.schema
         ))
         .bind(&e.tenant)
-        .bind(if e.low_latency {
-            streak.saturating_add(1)
+        .bind(if e.scheduling.priority == high {
+            streak.saturating_add(1).min(i32::from(u16::MAX))
         } else {
             0
         })
@@ -700,7 +717,7 @@ impl PgStore {
         Ok(Some(QueueEntry {
             key: e.key,
             tenant: e.tenant,
-            low_latency: e.low_latency,
+            scheduling: e.scheduling,
             deadline: e.deadline,
         }))
     }
@@ -755,7 +772,7 @@ fn add_queue(s: &mut Ledger, v: Value) -> Result<()> {
     s.queue.push_back(QueueEntry {
         key: w.key,
         tenant: w.tenant,
-        low_latency: w.low_latency,
+        scheduling: w.scheduling,
         deadline: w.deadline,
     });
     Ok(())

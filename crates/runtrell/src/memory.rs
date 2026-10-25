@@ -23,7 +23,7 @@ struct Ledger {
     #[serde(skip)]
     queue: VecDeque<QueueEntry>,
     last_tenant: Option<String>,
-    fast_streak: usize,
+    priority_streak: usize,
     #[serde(skip)]
     fail_next: bool,
 }
@@ -195,12 +195,7 @@ fn ancestors(s: &Ledger, id: &str) -> Result<Vec<String>> {
 fn budget_open(s: &Ledger, id: &str) -> Result<()> {
     for id in ancestors(s, id)? {
         let a = &s.accounts[&id];
-        if a.unknown > 0 {
-            return Err(Error::UsageUnknown);
-        }
-        if a.exhausted || a.used.reaches(a.limit) {
-            return Err(Error::BudgetAtLimit);
-        }
+        a.admission(false)?;
     }
     Ok(())
 }
@@ -281,6 +276,17 @@ impl RunStore for MemoryStore {
     }
     async fn start(&self, mut spec: RunSpec) -> Result<RunHandle> {
         self.tx(|s| {
+            if spec.scheduling.weight == 0
+                || matches!(
+                    spec.budget,
+                    ReservationPolicy::Wait { until: 0 }
+                        | ReservationPolicy::Shrink {
+                            min_output_budget_tokens: 0
+                        }
+                )
+            {
+                return Err(Error::Invalid("run policy".into()));
+            }
             if spec.tenant.is_empty() || spec.request_key.is_empty() {
                 return Err(Error::Invalid("tenant/request key".into()));
             }
@@ -340,7 +346,7 @@ impl RunStore for MemoryStore {
             s.queue.push_back(QueueEntry {
                 key: key(&h),
                 tenant: spec.tenant.clone(),
-                low_latency: spec.purpose == "reply",
+                scheduling: spec.scheduling,
                 deadline: spec.deadline.unwrap_or(u64::MAX),
             });
             s.runs.insert(
@@ -510,7 +516,9 @@ impl RunStore for MemoryStore {
                 return Ok(());
             }
             let r = fence(s, c, now, true)?;
-            budget_open(s, &r.spec.account)?;
+            for id in ancestors(s, &r.spec.account)? {
+                s.accounts[&id].admission(true)?;
+            }
             if s.operations.values().any(|o| {
                 o.run == c.run
                     && (!o.settled
@@ -593,10 +601,18 @@ impl BudgetAuthority for MemoryStore {
         limit: Amount,
         parent: Option<String>,
     ) -> Result<String> {
+        self.create_account_with_policy(tenant, limit, parent, AccountPolicy::default())
+            .await
+    }
+    async fn create_account_with_policy(
+        &self,
+        tenant: &str,
+        limit: Amount,
+        parent: Option<String>,
+        policy: AccountPolicy,
+    ) -> Result<String> {
         self.tx(|s| {
-            if limit.tokens == 0 || limit.micro_usd == 0 {
-                return Err(Error::Invalid("zero budget".into()));
-            }
+            policy.validate()?;
             if let Some(id) = &parent {
                 let a = s.accounts.get(id).ok_or(Error::NotFound)?;
                 if a.tenant != tenant && a.tenant != "*" {
@@ -616,6 +632,10 @@ impl BudgetAuthority for MemoryStore {
                     unknown: 0,
                     exhausted: false,
                     warnings: [0, 0],
+                    policy,
+                    quantity_reserved: BTreeMap::new(),
+                    quantity_used: BTreeMap::new(),
+                    quantity_warnings: BTreeMap::new(),
                 },
             );
             Ok(id)
@@ -624,6 +644,15 @@ impl BudgetAuthority for MemoryStore {
     async fn account(&self, id: &str) -> Result<Account> {
         self.read(|s| s.accounts.get(id).cloned().ok_or(Error::NotFound))
     }
+    async fn finalization_allowed(&self, c: &Claim, now: u64) -> Result<()> {
+        self.read(|s| {
+            let r = fence(s, c, now, true)?;
+            for id in ancestors(s, &r.spec.account)? {
+                s.accounts[&id].admission(true)?;
+            }
+            Ok(())
+        })
+    }
     async fn remaining(&self, c: &Claim, now: u64) -> Result<Amount> {
         self.read(|s| {
             let r = fence(s, c, now, true)?;
@@ -631,11 +660,7 @@ impl BudgetAuthority for MemoryStore {
             let mut remaining = Amount::new(u64::MAX, u64::MAX);
             for id in ancestors(s, &r.spec.account)? {
                 let a = &s.accounts[&id];
-                let total = a.used.checked_add(a.reserved)?;
-                let left = Amount::new(
-                    a.limit.tokens.saturating_sub(total.tokens),
-                    a.limit.micro_usd.saturating_sub(total.micro_usd),
-                );
+                let left = a.remaining_amount()?;
                 remaining.tokens = remaining.tokens.min(left.tokens);
                 remaining.micro_usd = remaining.micro_usd.min(left.micro_usd);
             }
@@ -648,34 +673,7 @@ impl BudgetAuthority for MemoryStore {
             let mut out = vec![];
             for id in ancestors(s, &r.spec.account)? {
                 let a = s.accounts.get_mut(&id).unwrap();
-                let mut reached = [None, None];
-                for (axis, (used, limit)) in [
-                    (a.used.tokens, a.limit.tokens),
-                    (a.used.micro_usd, a.limit.micro_usd),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    for threshold in [50, 80, 95] {
-                        if u128::from(used) * 100 >= u128::from(limit) * u128::from(threshold)
-                            && threshold > a.warnings[axis]
-                        {
-                            reached[axis] = Some(threshold);
-                        }
-                    }
-                    if let Some(t) = reached[axis] {
-                        a.warnings[axis] = t;
-                    }
-                }
-                if reached.iter().any(Option::is_some) {
-                    out.push(Warning {
-                        account: id,
-                        token_percent: reached[0],
-                        cost_percent: reached[1],
-                        used: a.used,
-                        limit: a.limit,
-                    });
-                }
+                if let Some(warning) = a.warning() { out.push(warning); }
             }
             if !out.is_empty() {
                 let run = get_mut(s, &c.run)?;
@@ -690,8 +688,8 @@ impl BudgetAuthority for MemoryStore {
                     cp.messages.push(Message::text(
                         "system",
                         format!(
-                            "budget {} tokens {:?} cost {:?}; used {:?}, limit {:?}",
-                            w.account, w.token_percent, w.cost_percent, w.used, w.limit
+                            "budget {} tokens {:?} cost {:?} quantities {:?}; used {:?}, limit {:?}",
+                            w.account, w.token_percent, w.cost_percent, w.quantity_percent, w.used, w.limit
                         ),
                     ));
                 }
@@ -772,13 +770,7 @@ impl OperationStore for MemoryStore {
             let accounts = ancestors(s, &r.spec.account)?;
             for id in &accounts {
                 let a = &s.accounts[id];
-                if a.used
-                    .checked_add(a.reserved)?
-                    .checked_add(request.reserve)?
-                    .exceeds(a.limit)
-                {
-                    return Err(Error::ReservationDenied);
-                }
+                a.can_reserve(&request)?;
             }
             acquire(
                 s,
@@ -793,6 +785,7 @@ impl OperationStore for MemoryStore {
             for id in accounts {
                 let a = s.accounts.get_mut(&id).unwrap();
                 a.reserved = a.reserved.checked_add(request.reserve)?;
+                a.reserve_quantities(&request)?;
             }
             let op = Operation {
                 id: id.clone(),
@@ -817,10 +810,12 @@ impl OperationStore for MemoryStore {
         if result == Err(Error::ReservationDenied) {
             self.tx(|s| {
                 let r = fence(s, c, now, true)?;
-                s.accounts
-                    .get_mut(&r.spec.account)
-                    .ok_or(Error::NotFound)?
-                    .exhausted = true;
+                if r.spec.budget == ReservationPolicy::EndAccount {
+                    s.accounts
+                        .get_mut(&r.spec.account)
+                        .ok_or(Error::NotFound)?
+                        .exhausted = true;
+                }
                 Ok(())
             })?;
         }
@@ -871,7 +866,18 @@ impl OperationStore for MemoryStore {
                 return Err(Error::PermissionDenied);
             }
             if old.result.as_ref() == Some(&result) {
-                return Ok(());
+                return Ok(
+                    if old.unknown_usage
+                        && matches!(
+                            result,
+                            ExternalResult::Applied { .. } | ExternalResult::Failed { .. }
+                        )
+                    {
+                        Err(Error::UsageUnknown)
+                    } else {
+                        Ok(())
+                    },
+                );
             }
             if old.settled {
                 return Err(Error::Conflict);
@@ -882,12 +888,11 @@ impl OperationStore for MemoryStore {
                 }
                 _ => None,
             };
-            let amount = usage.map(Usage::amount).transpose()?;
-            if let (Some(price), Some(usage)) = (&old.request.price, usage)
-                && (price.model != usage.model || Some(price.cost(usage)?) != usage.micro_usd)
-            {
-                return Err(Error::Invalid("actual price/model mismatch".into()));
-            }
+            let amount = usage
+                .map(|u| old.request.settlement_amount(u))
+                .transpose()?
+                .flatten();
+            let incomplete = amount.is_none() && usage.is_some();
             let state = match &result {
                 ExternalResult::Applied { .. } => OperationState::Applied,
                 ExternalResult::Accepted { .. } => OperationState::Accepted,
@@ -895,7 +900,10 @@ impl OperationStore for MemoryStore {
                 ExternalResult::Unknown => OperationState::Unknown,
             };
             let unknown = matches!(result, ExternalResult::Unknown)
-                || (amount.is_none() && old.request.reserve != Amount::default());
+                || (amount.is_none()
+                    && !(matches!(result, ExternalResult::Accepted { .. })
+                        && old.request.reserve == Amount::default()
+                        && old.request.quantities.is_empty()));
             for id in ancestors(s, &r.spec.account)? {
                 let a = s.accounts.get_mut(&id).unwrap();
                 if old.unknown_usage {
@@ -904,7 +912,8 @@ impl OperationStore for MemoryStore {
                 if let Some(actual) = amount {
                     a.reserved = a.reserved.subtract(old.request.reserve);
                     a.used = a.used.checked_add(actual)?;
-                    if a.used.reaches(a.limit) {
+                    a.settle_quantities(&old.request, usage.unwrap())?;
+                    if a.reached() {
                         a.exhausted = true;
                     }
                 } else if unknown {
@@ -912,6 +921,14 @@ impl OperationStore for MemoryStore {
                 }
             }
             let op = s.operations.get_mut(id).unwrap();
+            if amount.is_none() {
+                op.unsettled_result = Some(result.clone());
+                if let Some(usage) = usage
+                    && !op.usage_observations.contains(usage)
+                {
+                    op.usage_observations.push(usage.clone());
+                }
+            }
             op.state = state;
             op.result = Some(result.clone());
             op.settled = amount.is_some();
@@ -930,8 +947,12 @@ impl OperationStore for MemoryStore {
                 get_mut(s, &c.run)?.delivery = Delivery::Confirmed(id);
             }
             refresh_settlement(s, &c.run);
-            Ok(())
-        })
+            Ok(if incomplete {
+                Err(Error::UsageUnknown)
+            } else {
+                Ok(())
+            })
+        })?
     }
 }
 impl Scheduler for MemoryStore {
@@ -948,11 +969,14 @@ impl Scheduler for MemoryStore {
         })
     }
     async fn enqueue(&self, e: QueueEntry) -> Result<()> {
+        if e.scheduling.weight == 0 {
+            return Err(Error::Invalid("queue weight".into()));
+        }
         self.tx(|s| {
             if let Some(old) = s.queue.iter().find(|o| o.key == e.key) {
                 return if old.tenant == e.tenant
                     && old.deadline == e.deadline
-                    && old.low_latency == e.low_latency
+                    && old.scheduling == e.scheduling
                 {
                     Ok(())
                 } else {
@@ -990,22 +1014,24 @@ impl Scheduler for MemoryStore {
             } else {
                 first.tenant.clone()
             };
-            let slow = s
+            let indices: Vec<usize> = s
                 .queue
                 .iter()
-                .position(|e| e.tenant == tenant && !e.low_latency);
-            let fast = s
-                .queue
-                .iter()
-                .position(|e| e.tenant == tenant && e.low_latency);
-            let i = if s.fast_streak >= 2 {
-                slow.or(fast)
+                .enumerate()
+                .filter(|(_, e)| e.tenant == tenant)
+                .map(|(i, _)| i)
+                .collect();
+            let entries: Vec<QueueEntry> = indices.iter().map(|i| s.queue[*i].clone()).collect();
+            let selected = crate::budget::queue_index(&entries, s.priority_streak).unwrap();
+            let high = entries.iter().map(|e| e.scheduling.priority).max().unwrap();
+            let e = s.queue.remove(indices[selected]).unwrap();
+            s.priority_streak = if e.scheduling.priority == high {
+                s.priority_streak
+                    .saturating_add(1)
+                    .min(usize::from(u16::MAX))
             } else {
-                fast.or(slow)
-            }
-            .unwrap();
-            let e = s.queue.remove(i).unwrap();
-            s.fast_streak = if e.low_latency { s.fast_streak + 1 } else { 0 };
+                0
+            };
             s.last_tenant = Some(tenant);
             Ok(Ok(Some(e)))
         })?

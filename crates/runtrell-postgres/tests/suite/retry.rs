@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared contract fixture from runtrell-2a testkit (2d31acf).
-use runtrell::*;
 use super::{MemoryStore, block_on};
+use runtrell::*;
 use runtrell_testkit::*;
 use serde_json::json;
 use std::sync::{
@@ -29,6 +29,7 @@ impl ModelPort for RetryModel {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let mut usage = Usage::measured(3, 1, 4);
         usage.model = "fake".into();
+        usage.cached = Some(0);
         if n == 0 || !self.success {
             Ok(ExternalResult::Failed {
                 code: "TRANSIENT".into(),

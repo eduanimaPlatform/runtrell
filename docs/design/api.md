@@ -12,11 +12,15 @@ Policyは毎回現在の認可を検査する。SecretProviderは限定context�
 
 Validatorは候補hash、根拠revision、設定/検証器版に結び付くValidationReceiptを返す。Finalizerは信頼済み業務拡張であり、外部反映済みreceiptを確認した安定completion IDを返す。RunStoreは現行revisionとreceiptをCAS照合する。別ownerへの業務書込みはoperationとしてdispatchし、その結果をFinalizerが確認する。Finalizer内で未記録の有料I/Oや副作用を実行してはならない。
 
-WorkspaceStore / ArtifactStoreは2bでAccessを受け取る契約へ改訂し、[data.rs](../../crates/runtrell/src/data.rs)を型・traitの正本とする。本実装と制約は[workspace](workspace.md)参照。Workspaceはtenant/Run/Agent、版付き共有、digest/revision/manifest、CAS一括編集・exact-replace・copy回収を扱う。ArtifactはStaged / Saved / Finalizedを分け、範囲取得・外部出力・retention・削除確認を扱う。RunStore/OperationStore/BudgetAuthority/Schedulerは2aから不変。ExecutionBackend・ExecutionLedgerの正本は[execution/mod.rs](../../crates/runtrell/src/execution/mod.rs)、能力とOS別制約は[execution](execution.md)。実行backendは能力/強制上限、acquire、start、lookup、cancel、stop、destroyを分け、ledger.pendingから回収を再照合する。必要制限非対応はUnsupported、host実行へfallbackしない。
+WorkspaceStore / ArtifactStoreは2bでAccessを受け取る契約へ改訂し、[data.rs](../../crates/runtrell/src/data.rs)を型・traitの正本とする。本実装と制約は[workspace](workspace.md)参照。Workspaceはtenant/Run/Agent、版付き共有、digest/revision/manifest、CAS一括編集・exact-replace・copy回収を扱う。ArtifactはStaged / Saved / Finalizedを分け、範囲取得・外部出力・retention・削除確認を扱う。RunStore/OperationStore/BudgetAuthority/Schedulerの予算・受付方針は[budget](budget.md)を参照。ExecutionBackend・ExecutionLedgerの正本は[execution/mod.rs](../../crates/runtrell/src/execution/mod.rs)、能力とOS別制約は[execution](execution.md)。実行backendは能力/強制上限、acquire、start、lookup、cancel、stop、destroyを分け、ledger.pendingから回収を再照合する。必要制限非対応はUnsupported、host実行へfallbackしない。
+
+RunSpec.budgetとscheduling、AccountPolicyはhostが供給する型付き・保存済みsnapshot。BudgetAuthority.create_account_with_policyで口座方針を固定する。create_accountは明示された既定方針の便宜API。finalization_allowedは無料確定だけの受付判定であり、RunStore.finalizeはowner・版・未精算操作を再検査する。使用量・価格の内数と画像交差、固定費操作、既知ゼロ/未計測の区別は[budget](budget.md)参照。recordはUsageUnknownを返す場合でも、不完全な結果と使用量の観測を保存して予約を保持する。Invalidは不正内数、Storageは保存失敗を表す。
 
 wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD、時刻は共有epoch tick、optional usageはnull（0と区別）。store checkpoint内のprotocol JSONは内部形式でhostの業務APIではない。未知schemaは拒否し、旧Runはdrainまたは理由付き終了。公開SDKのModelRequestは独自のMessage/ModelReplyのみを用い、protocolのserde表現をwire契約にしない。streamの部分deltaを直接実行せず、完全なreplyだけをdriverへ渡す。マルチモーダル/opaqueはMessageの版付きhost metadataへ保持するが、2a driverの実行対応はtext/toolに限定し、未対応は拒否する。
 
 エラーはConflict（digest/版/CAS不一致）、OwnershipLost、Closed、Deadline、BudgetAtLimit、ReservationDenied、UsageUnknown、PermissionDenied、Unsupported、Backpressure、QueueTimeout、NotFound、Invalid、Storage。Storageは成功応答を返さず、I/O前失敗は外部呼出し0、I/O後失敗は元operation照合で回復する。
+
+費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。実際の価格・品質値・provider形式変換はhostが供給する。詳細は[budget](budget.md)。
 
 <!-- generated-contracts -->
 ## Rust契約定義
@@ -40,6 +44,8 @@ pub struct RunSpec {
     pub trigger: Trigger,
     pub validator: String,
     pub validator_version: String,
+    pub budget: ReservationPolicy,
+    pub scheduling: SchedulingPolicy,
 }
 
 pub struct RunHandle {
@@ -69,6 +75,7 @@ pub struct ToolDescriptor {
     pub timeout: u64,
     pub max_output_bytes: usize,
     pub reserve: Amount,
+    pub quantities: BTreeMap<String, u64>,
     pub conflict_scope: Option<String>,
     pub retry: RetryPolicy,
 }
@@ -187,6 +194,15 @@ pub trait RunStore: Send + Sync {
     ) -> Result<()>;
 }
 pub trait BudgetAuthority: Send + Sync {
+    async fn create_account_with_policy(
+        &self,
+        tenant: &str,
+        limit: Amount,
+        parent: Option<String>,
+        policy: AccountPolicy,
+    ) -> Result<String>;
+    /// Fenced, zero-charge finalization admission; does not authorize new I/O.
+    async fn finalization_allowed(&self, claim: &Claim, now: u64) -> Result<()>;
     async fn exhaust(&self, claim: &Claim, now: u64) -> Result<()>;
     async fn create_account(
         &self,
@@ -228,7 +244,7 @@ pub struct SlotRequest {
 pub struct QueueEntry {
     pub key: String,
     pub tenant: String,
-    pub low_latency: bool,
+    pub scheduling: SchedulingPolicy,
     pub deadline: u64,
 }
 #[derive(Clone, Debug)]

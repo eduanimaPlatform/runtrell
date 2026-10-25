@@ -1,6 +1,6 @@
-# PostgreSQL adapter（schema 2）
+# PostgreSQL adapter（schema 3）
 
-RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、空DBから最新schemaを作るmigrationに置き換える。リリース前のため旧schemaの検出・移行は持たない（空DBから作る）。DB schema version=2と、既存のRun/checkpoint wire schema=1は別の版である。
+RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、空DBから最新schemaを作るmigrationに置き換える。リリース前のため旧schemaの検出・移行は持たない（空DBから作る）。DB schema version=3と、既存のRun/checkpoint wire schema=1は別の版である。
 
 `PgStore::open`はhostのPgPool・schema名・Capacityを受け、初期化のCOMMIT後に返る。schema名はASCII英数字/underscore、先頭は英字/underscore、最大63 bytes、`pg_` prefix不可。識別子を検証・引用し、値はbindする。再open時のCapacity不一致はConflict。adapterはDocker操作や接続情報の自動読込みをしない。
 
@@ -81,10 +81,14 @@ throughput試験だけを選択した実行（24 Run、各20 renew、各条件48
 
 ## 2e：耐久ExecutionLedger
 
-PgStoreはExecutionLedgerを実装する。schema 2の同じ0001.sqlへexecutionsを追加し、旧schema検出・移行は追加しない。台帳はRunStore/OperationStoreと別の保存境界であり、外部取得前にintentのCOMMITを待つ。通常のSandbox受付・予約後のintent未保存は、既存operationから同じidentityで再照合する。台帳のCOMMITは業務成功や費用精算のreceiptではない。
+PgStoreはExecutionLedgerを実装する。schema 3の同じ0001.sqlへexecutionsを追加し、旧schema検出・移行は追加しない。台帳はRunStore/OperationStoreと別の保存境界であり、外部取得前にintentのCOMMITを待つ。通常のSandbox受付・予約後のintent未保存は、既存operationから同じidentityで再照合する。台帳のCOMMITは業務成功や費用精算のreceiptではない。
 
 ownerとcontext_operation、requestは不変。tenant/run_idはownerのgenerated列で検索し、全体records復元はしない。insertは同じPKの要求同値だけ冪等に返す。CASは対象行だけをFOR UPDATEし、Memoryと共通のExecutionRecord::advanceでrevision・取消・観測・資源条件/receiptを検証する。reclaimed列は同じtransactionでresourcesから算出し、pending()は未回収部分indexを使える管理検索とする。各資源の解放条件と確認はresources、証拠となる最新backend観測/費用はobservationに保存する。取消だけでは解放しない。
 
 writeはsynchronous_commit=on、lock_timeout=5秒、statement_timeout=30秒。SQL失敗/COMMIT応答不明はStorageを返し、元identityで再照会する。既存のSQL失敗注入もExecutionLedgerのinsert/CASに適用する。ledgerは独立したhost契約なのでruns/attemptsへのFKを要求しない。hostが正しいRun/operationを接続する責任を持ち、ledger操作自体はRun claim認可の代わりではない。
 
 Memory/Pgに同一6件の契約suiteを適用する（固定入力/identity、CAS/取消/条件、資源別receipt、client再生成後の回収/冪等性、registry全喪失、dispatch再生成後の同値照合/予約精算）。Pg追加試験ではinsert/CASのSQL失敗rollbackと2client同時CASの一勝一敗を確認する。backend再識別の境界は[execution](execution.md)を参照。PgStoreを作り直してもProcessBackendのmemory registryを復元することはできない。
+
+## 予算・受付方針
+
+AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_accountsのJSONB列へ保存し、既存の全祖先lock順と同じtransactionで更新する。Run方針はspec、優先度/公平性の重みはqueue_entries.schedulingへ保存する。queue内の選択はMemoryと同じbudget::queue_indexを使う。schema 3は空namespace用であり、過去schemaの移行・互換読込みは追加しない。

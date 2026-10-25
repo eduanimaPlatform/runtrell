@@ -292,7 +292,10 @@ async fn queue_slots_fairness_and_cleanup_survive_all_connections_being_discarde
         s.enqueue(QueueEntry {
             key: key.into(),
             tenant: tenant.into(),
-            low_latency: true,
+            scheduling: SchedulingPolicy {
+                priority: 1,
+                ..SchedulingPolicy::default()
+            },
             deadline: 1000,
         })
         .await
@@ -944,7 +947,10 @@ async fn concurrent_queue_workers_take_each_entry_once_and_skip_locked_entry() {
         s.enqueue(QueueEntry {
             key: format!("entry-{i}"),
             tenant: format!("t{}", i % 8),
-            low_latency: i % 3 != 0,
+            scheduling: SchedulingPolicy {
+                priority: i32::from(i % 3 != 0),
+                ..SchedulingPolicy::default()
+            },
             deadline: 1000,
         })
         .await
@@ -1112,7 +1118,10 @@ async fn queue_cursor_preserves_original_rotation_and_burst_after_restart() {
         s.enqueue(QueueEntry {
             key: key.into(),
             tenant: tenant.into(),
-            low_latency: fast,
+            scheduling: SchedulingPolicy {
+                priority: i32::from(fast),
+                ..SchedulingPolicy::default()
+            },
             deadline: 1000,
         })
         .await

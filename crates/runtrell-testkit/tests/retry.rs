@@ -26,6 +26,7 @@ impl ModelPort for RetryModel {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let mut usage = Usage::measured(3, 1, 4);
         usage.model = "fake".into();
+        usage.cached = Some(0);
         if n == 0 || !self.success {
             Ok(ExternalResult::Failed {
                 code: "TRANSIENT".into(),

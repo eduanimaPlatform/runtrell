@@ -30,21 +30,26 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
         &self,
         c: &Claim,
         id: &str,
-        mut result: ExternalResult,
+        result: ExternalResult,
     ) -> Result<ExternalResult> {
-        if let ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } =
-            &result
-            && usage.amount().is_err()
-        {
-            self.store
-                .observe_result(c, id, result.clone(), self.clock.now())
-                .await?;
-            result = ExternalResult::Unknown;
-        }
-        self.store
+        match self
+            .store
             .record(c, id, result.clone(), self.clock.now())
-            .await?;
+            .await
+        {
+            Ok(()) => {}
+            Err(Error::UsageUnknown) => return Ok(ExternalResult::Unknown),
+            Err(e) => return Err(e),
+        }
         Ok(result)
+    }
+    async fn model_budget(&self, c: &Claim, input: u64) -> Result<(u64, Amount)> {
+        let r = self.store.check(c, self.clock.now(), true).await?;
+        self.model.limits().cap_for_policy(
+            input,
+            self.store.remaining(c, self.clock.now()).await?,
+            &r.spec.budget,
+        )
     }
     /// Cancellation, external stop and resource reclamation have separate receipts.
     pub async fn cancel(&self, c: &Claim, reason: &str) -> Result<RunRecord> {
@@ -446,7 +451,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     .enqueue(QueueEntry {
                         key: format!("{}:{}", c.run.tenant, c.run.id),
                         tenant: c.run.tenant.clone(),
-                        low_latency: r.spec.purpose == "reply",
+                        scheduling: r.spec.scheduling,
                         deadline: r
                             .spec
                             .deadline
@@ -469,7 +474,16 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
             };
             if let Some(t) = terminal {
                 if matches!(e, Error::BudgetAtLimit | Error::ReservationDenied) {
-                    self.store.exhaust(c, self.clock.now()).await?;
+                    let r = self.store.check(c, self.clock.now(), true).await?;
+                    if let ReservationPolicy::Wait { until } = r.spec.budget
+                        && self.clock.now() < until
+                    {
+                        self.store.wait(c, "budget", self.clock.now()).await?;
+                        return self.store.get(&c.run).await;
+                    }
+                    if r.spec.budget == ReservationPolicy::EndAccount {
+                        self.store.exhaust(c, self.clock.now()).await?;
+                    }
                 }
                 self.store.terminate(c, t, self.clock.now()).await?;
                 return self.store.get(&c.run).await;
@@ -546,10 +560,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             metadata: Value::Null,
                         };
                         let input = self.model.input_upper_bound(&req)?;
-                        let (cap, _) = self
-                            .model
-                            .limits()
-                            .cap(input, self.store.remaining(c, self.clock.now()).await?)?;
+                        let (cap, _) = self.model_budget(c, input).await?;
                         req.max_output = cap;
                         req
                     };
@@ -557,10 +568,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                         self.next_attempt(c, op, self.model.retry_policy()).await?
                     } else {
                         let input = self.model.input_upper_bound(&request)?;
-                        let (_, reserve) = self
-                            .model
-                            .limits()
-                            .cap(input, self.store.remaining(c, self.clock.now()).await?)?;
+                        let (_, reserve) = self.model_budget(c, input).await?;
                         let mut d = DispatchRequest::new(
                             &key,
                             OperationKind::Model,
@@ -587,10 +595,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     {
                         let mut retry_request = request.clone();
                         let input = self.model.input_upper_bound(&retry_request)?;
-                        let (cap, reserve) = self
-                            .model
-                            .limits()
-                            .cap(input, self.store.remaining(c, self.clock.now()).await?)?;
+                        let (cap, reserve) = self.model_budget(c, input).await?;
                         retry_request.max_output = cap;
                         dispatch.reserve = reserve;
                         dispatch.input = serde_json::to_value(retry_request).unwrap();
@@ -718,6 +723,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                             input.clone(),
                             descriptor.reserve,
                         );
+                        d.quantities = descriptor.quantities.clone();
                         d.version = descriptor.version.clone();
                         d.scope = Some(file_tools::catalog_digest(&descriptor));
                         d.account_binding = descriptor.account.clone();
@@ -771,7 +777,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
                     let current = self.store.check(c, self.clock.now(), true).await?;
                     self.policy.authorize(&current, "finalize", "finalize")?;
                     // No call-count gate: only current budget, deadline and trusted receipts.
-                    self.store.remaining(c, self.clock.now()).await?;
+                    self.store.finalization_allowed(c, self.clock.now()).await?;
                     let receipt = self.validator.validate(&current, &output)?;
                     let completion = self.finalizer.finalize(&current, output, receipt)?;
                     self.store.finalize(c, completion, self.clock.now()).await?;
@@ -926,7 +932,7 @@ impl<S: ControlStore, M: ModelPort, T: Tool, P: Policy, C: Clock, V: Validator, 
             metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water}),
         };
         let input = self.model.input_upper_bound(&request)?;
-        let (cap, reserve) = limits.cap(input, self.store.remaining(c, self.clock.now()).await?)?;
+        let (cap, reserve) = self.model_budget(c, input).await?;
         request.max_output = cap;
         let mut d = DispatchRequest::new(
             key,

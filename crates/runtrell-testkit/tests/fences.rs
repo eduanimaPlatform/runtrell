@@ -367,7 +367,10 @@ fn tenant_round_robin_visits_third_tenant_under_refill() {
             s.enqueue(QueueEntry {
                 key: key.into(),
                 tenant: tenant.into(),
-                low_latency: true,
+                scheduling: SchedulingPolicy {
+                    priority: 1,
+                    ..SchedulingPolicy::default()
+                },
                 deadline: 100,
             })
             .await
@@ -420,7 +423,7 @@ fn partial_usage_keeps_result_evidence_and_resolves_only_by_lookup() {
     });
 }
 #[test]
-fn unsafe_next_model_reservation_exhausts_shared_request_account() {
+fn default_policy_unsafe_next_model_reservation_exhausts_shared_request_account() {
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let a = s
