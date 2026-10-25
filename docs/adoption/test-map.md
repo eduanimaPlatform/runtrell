@@ -481,3 +481,11 @@ Crash子processと遅延helperの起動を`status()`から`output()`へ変更し
 - `real_isolation_loop_output_fork_env_and_workspace_boundaries`: intentional capability clarification on macOS. Seatbelt continues to deny fork; requires_descendants requests must be rejected before acquisition. The old optional PID-file branch did not prove child execution on macOS and is replaced with an explicit unsupported-capability assertion. The Linux fork path requires a real PID file, valid numeric PID and descendant disappearance. No isolation rule is relaxed.
 - Linux fixtures require Memory to remain unreleased at Stopped and to be released only after unmount/cgroup deletion. `linux_concurrent_runs_reclaim_independently` adds eight concurrent Runs. Their execution remains a Linux acceptance step; native compilation of the fixtures is not Linux isolation evidence.
 - No inherited requirement assertion was weakened. JSON syntax repair and automatic orphan reclamation before cgroup/mount identity persistence remain explicitly unimplemented; see execution.md and api.md.
+
+## rt-3f：安定IDのraw-byte Artifact契約
+
+- 新規`backend_contract::stable_raw_bytes_memory_local_external_contract`は公開ArtifactStore traitだけを使い、Memory/Local/fake外部storeへ同じ条件を適用。同ID・同bytesの再stage/save、異bytes・media type・classのConflict、stage後/save後の再open、tenant/Run/Agent間の拒否、60万bytesの範囲取得、再試行でArtifact revisionが進まないことを確認する。Memoryの再接続はprocess耐久試験ではない。
+- 新規`stable_raw_bytes_recovers_lost_stage_and_save_responses_without_republication`はstage/saveのcommit前失敗・commit後応答喪失・部分uploadを注入。同IDで復旧し、完了後の再試行はbackendへ再commitしない。
+- 新規`stable_raw_bytes_checks_tokens_and_metadata_before_publication`は保存前後のbytes/media type/owner偽造、空/制御文字入りmetadataを拒否する。容量超過の異bytesでも既存IDとのConflictを優先する。既存publication/GC/共有/証跡試験のassertionは維持。
+- 意図した変更：media typeをStaged/ArtifactRefへ必須保存しdata schemaを2から3へ更新。旧形式の暗黙移行はしない。ランダムstage/putはapplication/octet-stream、JSON store_outputはapplication/json。stable stageはowner専用。`random_artifact_stage_preserves_explicit_write_sharing_contract`で従来のランダムstage/saveの明示write共有を維持する。同IDでmetadataが異なる場合もConflictとする。既存の保存完了・明示共有のread・予算/所有者fence契約は弱めない。
+- PostgreSQLは制御台帳のためArtifact suite対象外。追加`local_stable_raw_bytes_survive_process_exit_at_stage_and_save`はstage/save応答直後の子process終了（デストラクタなし）から別processで復元する。SIGKILL・電源断・実object storeの耐久性/性能は主張しない。

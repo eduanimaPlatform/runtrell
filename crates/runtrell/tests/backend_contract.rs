@@ -403,3 +403,327 @@ async fn local_collects_only_orphan_transaction_uploads_under_namespace_lock() {
     assert!(!orphan.exists());
     assert_eq!(std::fs::read(unrelated).unwrap(), b"preserve");
 }
+
+// Only the public ArtifactStore contract is used here, including recovery.
+async fn stable_raw_contract<S: ArtifactStore>(open: impl Fn() -> S) {
+    let a = access();
+    let spec = ArtifactSpec {
+        id: "job-result-sha256".into(),
+        media_type: "image/png".into(),
+        class: DataClass::Intermediate,
+    };
+    let bytes: Vec<u8> = (0..600_000).map(|i| (i % 256) as u8).collect();
+    let s = open();
+    let staged = s.stage_named(&a, spec.clone(), &bytes, 10).await.unwrap();
+    assert_eq!(s.staged(&a, &spec.id).await.unwrap(), staged);
+    assert!(matches!(
+        s.stage_named(&a, spec.clone(), b"different", 11).await,
+        Err(Error::Conflict)
+    ));
+    drop(s);
+    // No in-process staging handle is required after reopening.
+    let s = open();
+    let resumed = s.stage_named(&a, spec.clone(), &bytes, 100).await.unwrap();
+    assert_eq!(resumed, staged);
+    let saved = s
+        .save(&a, s.staged(&a, &spec.id).await.unwrap(), 100)
+        .await
+        .unwrap();
+    assert_eq!(saved.hash, content_digest(&bytes));
+    assert_eq!(saved.media_type, "image/png");
+    drop(s);
+    let s = open();
+    let again = s.stage_named(&a, spec.clone(), &bytes, 1000).await.unwrap();
+    assert_eq!(s.save(&a, again, 1000).await.unwrap(), saved);
+    assert_eq!(s.save(&a, staged, 2000).await.unwrap(), saved);
+    assert!(matches!(s.staged(&a, &spec.id).await, Err(Error::NotFound)));
+    assert!(matches!(
+        s.stage_named(&a, spec.clone(), b"changed", 1000).await,
+        Err(Error::Conflict)
+    ));
+    let mut changed = spec.clone();
+    changed.media_type = "application/octet-stream".into();
+    assert!(matches!(
+        s.stage_named(&a, changed, &bytes, 1000).await,
+        Err(Error::Conflict)
+    ));
+    let mut changed = spec.clone();
+    changed.class = DataClass::Final;
+    assert!(matches!(
+        s.stage_named(&a, changed, &bytes, 1000).await,
+        Err(Error::Conflict)
+    ));
+    let slice = s.read_artifact(&a, &saved, 255_999, 4096).await.unwrap();
+    assert_eq!(slice.bytes, bytes[255_999..260_095]);
+    assert_eq!(slice.total, bytes.len() as u64);
+    assert!(slice.truncated);
+    let end = s.read_artifact(&a, &saved, 599_990, 100).await.unwrap();
+    assert_eq!(end.bytes, bytes[599_990..]);
+    assert!(!end.truncated);
+    for namespace in [
+        Namespace {
+            owner: RunHandle {
+                tenant: "tenant".into(),
+                id: "other-run".into(),
+            },
+            agent: "agent".into(),
+        },
+        Namespace {
+            owner: RunHandle {
+                tenant: "other-tenant".into(),
+                id: "run".into(),
+            },
+            agent: "agent".into(),
+        },
+        Namespace {
+            owner: a.namespace().owner.clone(),
+            agent: "other-agent".into(),
+        },
+    ] {
+        let intruder = Access::for_actor(namespace.clone(), a.namespace().clone());
+        assert!(matches!(
+            s.stage_named(&intruder, spec.clone(), &bytes, 0).await,
+            Err(Error::PermissionDenied)
+        ));
+        assert!(matches!(
+            s.staged(&intruder, &spec.id).await,
+            Err(Error::PermissionDenied)
+        ));
+        assert_eq!(
+            s.save(
+                &intruder,
+                s.stage_named(&a, spec.clone(), &bytes, 0).await.unwrap(),
+                0
+            )
+            .await,
+            Err(Error::PermissionDenied)
+        );
+        assert_eq!(
+            s.read_artifact(&intruder, &saved, 0, 1).await,
+            Err(Error::PermissionDenied)
+        );
+        let own = Access::owner(namespace);
+        assert_eq!(
+            s.read_artifact(&own, &saved, 0, 1).await,
+            Err(Error::PermissionDenied)
+        );
+        let own_staged = s
+            .stage_named(&own, spec.clone(), b"independent", 0)
+            .await
+            .unwrap();
+        let own_saved = s.save(&own, own_staged, 0).await.unwrap();
+        assert_ne!(own_saved.owner, saved.owner);
+    }
+    // A no-op retry must not advance the artifact revision.
+    let next = s
+        .put(&a, b"next", DataClass::Intermediate, 2000)
+        .await
+        .unwrap();
+    assert_eq!(next.revision, saved.revision + 1);
+}
+#[tokio::test]
+async fn stable_raw_bytes_memory_local_external_contract() {
+    let memory = DataStore::memory(StoragePolicy::default());
+    stable_raw_contract(|| memory.clone()).await;
+    let root = tempfile::tempdir().unwrap();
+    stable_raw_contract(|| {
+        DataStore::local(
+            &root.path().canonicalize().unwrap(),
+            StoragePolicy::default(),
+        )
+        .unwrap()
+    })
+    .await;
+    let backend = Arc::new(FakeExternal::default());
+    stable_raw_contract(|| DataStore::external(backend.clone(), StoragePolicy::default())).await;
+}
+
+#[tokio::test]
+async fn stable_raw_bytes_recovers_lost_stage_and_save_responses_without_republication() {
+    for failure in [1, 2, 3] {
+        for boundary in 0..2 {
+            let backend = Arc::new(FakeExternal::default());
+            let open = || DataStore::external(backend.clone(), StoragePolicy::default());
+            let a = access();
+            let spec = ArtifactSpec {
+                id: "stable-job".into(),
+                media_type: "application/custom".into(),
+                class: DataClass::Intermediate,
+            };
+            let s = open();
+            if boundary == 0 {
+                backend.failure.store(failure, Ordering::SeqCst);
+                assert!(
+                    ArtifactStore::stage_named(&s, &a, spec.clone(), b"\0\xffraw", 0)
+                        .await
+                        .is_err()
+                );
+            }
+            drop(s);
+            let s = open();
+            let staged = ArtifactStore::stage_named(&s, &a, spec.clone(), b"\0\xffraw", 0)
+                .await
+                .unwrap();
+            if boundary == 1 {
+                backend.failure.store(failure, Ordering::SeqCst);
+                assert!(s.save(&a, staged.clone(), 0).await.is_err());
+            }
+            drop(s);
+            let s = open();
+            let saved = s.save(&a, staged, 0).await.unwrap();
+            let before = backend.objects.lock().unwrap().clone();
+            // A completed result must be returned without another backend commit.
+            backend.failure.store(1, Ordering::SeqCst);
+            let staged = ArtifactStore::stage_named(&s, &a, spec, b"\0\xffraw", 99)
+                .await
+                .unwrap();
+            assert_eq!(s.save(&a, staged, 99).await.unwrap(), saved);
+            assert_eq!(*backend.objects.lock().unwrap(), before);
+            assert_eq!(backend.failure.load(Ordering::SeqCst), 1);
+            assert!(backend.partial_uploads.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn stable_raw_bytes_checks_tokens_and_metadata_before_publication() {
+    let mut policy = StoragePolicy::default();
+    policy
+        .classes
+        .get_mut(&DataClass::Intermediate)
+        .unwrap()
+        .max_bytes = 64;
+    let s = DataStore::memory(policy);
+    let a = access();
+    let spec = ArtifactSpec {
+        id: "stable".into(),
+        media_type: "application/octet-stream".into(),
+        class: DataClass::Intermediate,
+    };
+    let staged = ArtifactStore::stage_named(&s, &a, spec.clone(), b"content", 0)
+        .await
+        .unwrap();
+    assert!(matches!(
+        ArtifactStore::stage_named(&s, &a, spec.clone(), &[0; 65], 0).await,
+        Err(Error::Conflict)
+    ));
+    for after_save in [false, true] {
+        if after_save {
+            s.save(&a, staged.clone(), 0).await.unwrap();
+        }
+        let mut forged = staged.clone();
+        forged.bytes = b"forged".to_vec();
+        assert_eq!(s.save(&a, forged, 0).await, Err(Error::Conflict));
+        let mut forged = staged.clone();
+        forged.media_type = "image/png".into();
+        assert_eq!(s.save(&a, forged, 0).await, Err(Error::Conflict));
+        let mut forged = staged.clone();
+        forged.owner.agent = "forged".into();
+        assert_eq!(s.save(&a, forged, 0).await, Err(Error::PermissionDenied));
+    }
+    for (id, media_type) in [
+        ("", "image/png"),
+        ("bad\nid", "image/png"),
+        ("valid", ""),
+        ("valid", "image/png\r\n"),
+    ] {
+        let invalid = ArtifactSpec {
+            id: id.into(),
+            media_type: media_type.into(),
+            class: spec.class,
+        };
+        assert!(matches!(
+            ArtifactStore::stage_named(&s, &a, invalid, b"content", 0).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn local_stable_raw_bytes_survive_process_exit_at_stage_and_save() {
+    let spec = ArtifactSpec {
+        id: "external-job-result".into(),
+        media_type: "application/custom".into(),
+        class: DataClass::Intermediate,
+    };
+    let a = access();
+    if let Ok(phase) = std::env::var("RUNTRELL_ARTIFACT_STOP_PHASE") {
+        let root = std::env::var("RUNTRELL_ARTIFACT_STOP_ROOT").unwrap();
+        let s = DataStore::local(std::path::Path::new(&root), StoragePolicy::default()).unwrap();
+        let staged = ArtifactStore::stage_named(&s, &a, spec, b"\0\xffresult", 0)
+            .await
+            .unwrap();
+        if phase == "save" {
+            s.save(&a, staged, 0).await.unwrap();
+        } else {
+            assert_eq!(phase, "stage");
+        }
+        // Stop the worker without unwinding or running store/runtime destructors.
+        std::process::exit(0);
+    }
+    for phase in ["stage", "save"] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "local_stable_raw_bytes_survive_process_exit_at_stage_and_save",
+                "--nocapture",
+            ])
+            .env("RUNTRELL_ARTIFACT_STOP_PHASE", phase)
+            .env("RUNTRELL_ARTIFACT_STOP_ROOT", &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let s = DataStore::local(&path, StoragePolicy::default()).unwrap();
+        let previous = if phase == "save" {
+            Some(s.artifact(&a, &spec.id).await.unwrap())
+        } else {
+            assert!(matches!(
+                s.artifact(&a, &spec.id).await,
+                Err(Error::NotFound)
+            ));
+            assert_eq!(s.staged(&a, &spec.id).unwrap().bytes, b"\0\xffresult");
+            None
+        };
+        let staged = ArtifactStore::stage_named(&s, &a, spec.clone(), b"\0\xffresult", 10)
+            .await
+            .unwrap();
+        let saved = s.save(&a, staged, 10).await.unwrap();
+        assert_eq!(saved.id, spec.id);
+        assert_eq!(saved.revision, 1);
+        assert_eq!(saved.media_type, spec.media_type);
+        if let Some(previous) = previous {
+            assert_eq!(saved, previous);
+        }
+        assert_eq!(
+            s.read_artifact(&a, &saved, 0, 100).await.unwrap().bytes,
+            b"\0\xffresult"
+        );
+    }
+}
+
+#[tokio::test]
+async fn random_artifact_stage_preserves_explicit_write_sharing_contract() {
+    let s = DataStore::memory(StoragePolicy::default());
+    let a = access();
+    let shared = s.share_agent(&a, "child", true, 0).await.unwrap();
+    let staged = s
+        .stage(&shared, b"shared bytes", DataClass::Intermediate, 0)
+        .unwrap();
+    let spec = ArtifactSpec {
+        id: "owner-stable-id".into(),
+        media_type: "application/octet-stream".into(),
+        class: DataClass::Intermediate,
+    };
+    assert!(matches!(
+        ArtifactStore::stage_named(&s, &shared, spec, b"owner only", 0).await,
+        Err(Error::PermissionDenied)
+    ));
+    let saved = s.save(&shared, staged, 0).await.unwrap();
+    assert_eq!(saved.owner, *a.namespace());
+    assert_eq!(
+        s.read_artifact(&a, &saved, 0, 100).await.unwrap().bytes,
+        b"shared bytes"
+    );
+}

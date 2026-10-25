@@ -202,13 +202,22 @@ impl Default for StoragePolicy {
         }
     }
 }
+/// Host-selected identity and immutable metadata within one owned namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSpec {
+    pub id: String,
+    pub media_type: String,
+    pub class: DataClass,
+}
+/// Persisted staging token, not authority. Stores must compare it with owned state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Staged {
     pub id: String,
-    owner: Namespace,
-    bytes: Vec<u8>,
-    class: DataClass,
-    expires_at: u64,
+    pub owner: Namespace,
+    pub bytes: Vec<u8>,
+    pub class: DataClass,
+    pub media_type: String,
+    pub expires_at: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
@@ -220,6 +229,7 @@ pub struct ArtifactRef {
     pub manifest: Vec<FileVersion>,
     pub retention_until: u64,
     pub class: DataClass,
+    pub media_type: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Blob {
@@ -350,7 +360,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             staged: BTreeMap::new(),
             revision: 0,
             artifact_revision: 0,
@@ -405,10 +415,19 @@ impl DataStore {
         &self.policy
     }
     fn tx<R>(&self, a: &Access, write: bool, f: impl FnOnce(&mut State) -> Result<R>) -> Result<R> {
+        self.transaction(a, write, false, f)
+    }
+    fn transaction<R>(
+        &self,
+        a: &Access,
+        write: bool,
+        skip_unchanged: bool,
+        f: impl FnOnce(&mut State) -> Result<R>,
+    ) -> Result<R> {
         a.actor.key()?;
         let key = a.target.key()?;
         let apply = |s: &mut State| {
-            if s.schema != 2 {
+            if s.schema != 3 {
                 return Err(Error::Unsupported("data state schema".into()));
             }
             if a.actor != a.target {
@@ -459,13 +478,17 @@ impl DataStore {
                     Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?,
                     None => State::default(),
                 };
+                let before = if write && skip_unchanged {
+                    Some(serde_json::to_vec(&state).map_err(|_| Error::Storage)?)
+                } else {
+                    None
+                };
                 let out = apply(&mut state)?;
                 if write {
-                    backend.compare_exchange(
-                        &key,
-                        &version,
-                        &serde_json::to_vec(&state).map_err(|_| Error::Storage)?,
-                    )?;
+                    let payload = serde_json::to_vec(&state).map_err(|_| Error::Storage)?;
+                    if before.as_ref() != Some(&payload) {
+                        backend.compare_exchange(&key, &version, &payload)?;
+                    }
                 }
                 Ok(out)
             }
@@ -763,39 +786,82 @@ impl DataStore {
         .map_err(|_| Error::Storage)?
     }
     pub fn stage(&self, a: &Access, bytes: &[u8], class: DataClass, now: u64) -> Result<Staged> {
-        self.stage_named(a, bytes, class, now, uuid::Uuid::new_v4().to_string())
+        self.stage_raw(
+            a,
+            ArtifactSpec {
+                id: uuid::Uuid::new_v4().to_string(),
+                media_type: "application/octet-stream".into(),
+                class,
+            },
+            bytes,
+            now,
+        )
     }
-    fn stage_named(
+    /// Stage raw bytes under a host-selected, namespace-scoped stable ID.
+    /// Identical retries preserve metadata and expiry; conflicting content is rejected.
+    pub fn stage_named(
         &self,
         a: &Access,
+        spec: ArtifactSpec,
         bytes: &[u8],
-        class: DataClass,
         now: u64,
-        id: String,
     ) -> Result<Staged> {
-        if bytes.len() > self.class(class)?.max_bytes {
-            return Err(invalid("CAPACITY"));
+        if a.actor != a.target {
+            return Err(Error::PermissionDenied);
         }
-        let staged = Staged {
+        self.stage_raw(a, spec, bytes, now)
+    }
+    fn stage_raw(&self, a: &Access, spec: ArtifactSpec, bytes: &[u8], now: u64) -> Result<Staged> {
+        if spec.id.is_empty()
+            || spec.id.len() > 1024
+            || spec.id.chars().any(char::is_control)
+            || spec.media_type.is_empty()
+            || spec.media_type.len() > 1024
+            || spec.media_type.chars().any(char::is_control)
+        {
+            return Err(invalid("ARTIFACT_METADATA"));
+        }
+        let ArtifactSpec {
+            id,
+            media_type,
+            class,
+        } = spec;
+        let mut staged = Staged {
             id,
             owner: a.target.clone(),
             bytes: bytes.to_vec(),
             class,
-            expires_at: now.saturating_add(self.class(class)?.retention),
+            media_type,
+            expires_at: 0,
         };
-        self.tx(a, true, |s| {
+        self.transaction(a, true, true, |s| {
             if let Some(blob) = s.blobs.get(&staged.id) {
-                if blob.bytes != staged.bytes || blob.reference.class != class {
+                if blob.bytes != staged.bytes
+                    || blob.reference.class != class
+                    || blob.reference.media_type != staged.media_type
+                {
                     return Err(Error::Conflict);
                 }
-                return Ok(staged);
+                // Saved retries use the committed retention boundary, never retry time.
+                return Ok(Staged {
+                    expires_at: blob.reference.retention_until,
+                    ..staged
+                });
             }
             if let Some(previous) = s.staged.get(&staged.id) {
-                if previous.bytes != staged.bytes || previous.class != class {
+                if previous.bytes != staged.bytes
+                    || previous.class != class
+                    || previous.media_type != staged.media_type
+                {
                     return Err(Error::Conflict);
                 }
                 return Ok(previous.clone());
             }
+            let policy = self.class(class)?;
+            if bytes.len() > policy.max_bytes {
+                return Err(invalid("CAPACITY"));
+            }
+            staged.expires_at = now.saturating_add(policy.retention);
             if s.staged.len() >= self.policy.max_entries
                 || s.staged
                     .values()
@@ -840,9 +906,12 @@ impl DataStore {
             if staged.owner != a.target {
                 return Err(Error::PermissionDenied);
             }
-            this.tx(a, true, |s| {
+            this.transaction(a, true, true, |s| {
                 if let Some(existing) = s.blobs.get(&staged.id) {
-                    if existing.bytes != staged.bytes || existing.reference.class != staged.class {
+                    if existing.bytes != staged.bytes
+                        || existing.reference.class != staged.class
+                        || existing.reference.media_type != staged.media_type
+                    {
                         return Err(Error::Conflict);
                     }
                     return Ok(existing.reference.clone());
@@ -872,6 +941,7 @@ impl DataStore {
                     manifest: Self::snapshot_of(a, s).files,
                     retention_until: now.saturating_add(policy.retention),
                     class: staged.class,
+                    media_type: staged.media_type,
                 };
                 s.staged.remove(&r.id);
                 s.blobs.insert(
@@ -1418,6 +1488,29 @@ fn decode_cursor(cursor: Option<String>, revision: u64) -> Result<usize> {
     }
 }
 pub trait ArtifactStore: Send + Sync {
+    /// Persist owned staging before returning. Same ID/content/metadata is idempotent;
+    /// different content or metadata is Conflict. Never extend expiry on retry.
+    fn stage_named(
+        &self,
+        a: &Access,
+        spec: ArtifactSpec,
+        bytes: &[u8],
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<Staged>> + Send;
+    /// Recover unpublished staging by its stable ID; owner access only.
+    fn staged(
+        &self,
+        a: &Access,
+        id: &str,
+    ) -> impl std::future::Future<Output = Result<Staged>> + Send;
+    /// Publish verified immutable bytes and manifest. Repeated saves return the
+    /// original reference; a token alone must never authorize publication.
+    fn save(
+        &self,
+        a: &Access,
+        staged: Staged,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<ArtifactRef>> + Send;
     fn put(
         &self,
         a: &Access,
@@ -1440,6 +1533,31 @@ pub trait ArtifactStore: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Progress>> + Send;
 }
 impl ArtifactStore for DataStore {
+    async fn stage_named(
+        &self,
+        a: &Access,
+        spec: ArtifactSpec,
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<Staged> {
+        let this = self.clone();
+        let a = a.clone();
+        let bytes = bytes.to_vec();
+        tokio::task::spawn_blocking(move || DataStore::stage_named(&this, &a, spec, &bytes, now))
+            .await
+            .map_err(|_| Error::Storage)?
+    }
+    async fn staged(&self, a: &Access, id: &str) -> Result<Staged> {
+        let this = self.clone();
+        let a = a.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || DataStore::staged(&this, &a, &id))
+            .await
+            .map_err(|_| Error::Storage)?
+    }
+    async fn save(&self, a: &Access, staged: Staged, now: u64) -> Result<ArtifactRef> {
+        DataStore::save(self, a, staged, now).await
+    }
     async fn put(
         &self,
         a: &Access,
@@ -1792,7 +1910,16 @@ impl DataStore {
         let access = a.clone();
         let id = digest(&json!([a.target, operation, "output"]));
         let staged = tokio::task::spawn_blocking(move || {
-            store.stage_named(&access, &bytes, DataClass::Intermediate, now, id)
+            store.stage_raw(
+                &access,
+                ArtifactSpec {
+                    id,
+                    media_type: "application/json".into(),
+                    class: DataClass::Intermediate,
+                },
+                &bytes,
+                now,
+            )
         })
         .await
         .map_err(|_| Error::Storage)??;

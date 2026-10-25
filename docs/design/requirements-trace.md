@@ -226,3 +226,9 @@ Linux targetのcross-checkはtarget未導入（E0463: core/std不在）で失敗
 
 
 最終再検証ではPGOPTIONSだけでも全件成功にはならなかった。`track_counts=off`も加え、libtestを4並列にした実行はPostgres契約108成功/3失敗（接続時のSQLSTATE 53100・同じ共有メモリ不足）、1並列にした実行も109成功/2 Storage失敗で終了した。後者で今回追加したmodel quote・モデル/外部job準備・物理証拠の試験は成功したが、最終workspace全件成功を確認したとは扱わない。先行のworkspace全件成功（683成功・6 ignored）と、この最終DB環境制約を区別する。DataStore検証APIの最終整理後はdata 21件/backend_contract 3件が別途成功。DB環境回復後とHosted CIでの再検証が残る。環境調査用の一時診断出力コードは撤去済み。
+
+### rt-3f：安定IDのraw-byte Artifact保存
+
+DATA-01/02/03/04、REC-08、A17/A23の部分証拠として、`ArtifactStore::stage_named/staged/save`と`ArtifactSpec`を公開。所有namespace内の同ID・同bytes・同metadataは元のArtifactRefへ収束し、差異はConflict。data schema 3にmedia typeを保存し、WorkspaceStoreとの標準ツール構成を維持する。
+
+`backend_contract`の`stable_raw_bytes_memory_local_external_contract`、`stable_raw_bytes_recovers_lost_stage_and_save_responses_without_republication`、`stable_raw_bytes_checks_tokens_and_metadata_before_publication`で再取得、異bytes/metadata拒否、stage/save後の再open、別tenant/Run/Agent拒否、範囲取得、応答喪失と部分uploadからの同ID回復、再commitなしのno-op、偽造token拒否を検証する。既存assertionを弱めず、全要件の状態は昇格させない。PostgreSQLの制御台帳は変更なし。追加の`local_stable_raw_bytes_survive_process_exit_at_stage_and_save`は子process終了（デストラクタなし）から別processで復元する。SIGKILL・電源断・実外部保存adapterの耐久性/性能は残る。

@@ -1,4 +1,4 @@
-# Workspace・Artifact・検証・context（data schema 2）
+# Workspace・Artifact・検証・context（data schema 3）
 
 2aの未実装WorkspaceStore/ArtifactStoreを、actor（tenant/Run/Agent）に結び付くAccessで置き換える。RunStore/OperationStore/BudgetAuthority/Schedulerのtraitは変更しない。所有者以外は既定拒否。子Runの共有は信頼済みhostがRunRecord.parentを照合して版付きgrantを発行する。共有は読取/更新を分け、更新後の再共有を必要とする。
 
@@ -25,6 +25,16 @@ retentionは2a Clockと同じUnix millisecond。class cleanupは保持中staging
 JSON SchemaはDraft 2020-12を共通実装で検証する。formatを検証し未知formatを拒否、参照は文書内fragmentのみ。未知keyword、別draft、外部参照、未対応vocabularyは構成エラーとする。診断のpathはinstance JSON Pointer、schema_pathはschema JSON Pointerを表す。業務基準・修正可否の具体的なcodeはhostが供給する。
 
 
-namespaceの保存互換性識別子は`schema=2`。実装commitとは独立して照合する。未知/旧形式は拒否し、暗黙の移行や旧経路は持たない。ControlStoreのwire/checkpoint schema=1と、checkpoint内のrepair schema=1は別の識別子である。StagedのID・所有者・bytes・class・期限をnamespaceへ保存し、`staged`で再取得、`save`で同一IDの保存を再試行する。`cleanup_staging`は期限到達した未公開データだけを所有者権限で削除する。Local一時stateファイルの寿命はtransaction lockに結び付き、次のlock取得者が孤立ファイルを回収する。Saved/Finalizedの正本markerには触れない。
+namespaceの保存互換性識別子は`schema=3`。実装commitとは独立して照合する。未知/旧形式は拒否し、暗黙の移行や旧経路は持たない。ControlStoreのwire/checkpoint schema=1と、checkpoint内のrepair schema=1は別の識別子である。StagedのID・所有者・bytes・class・期限をnamespaceへ保存し、`staged`で再取得、`save`で同一IDの保存を再試行する。`cleanup_staging`は期限到達した未公開データだけを所有者権限で削除する。Local一時stateファイルの寿命はtransaction lockに結び付き、次のlock取得者が孤立ファイルを回収する。Saved/Finalizedの正本markerには触れない。
 
 `NamespaceBackend`の参照実装経路はblobも含むnamespace全体を一つのopaque JSONとしてCASするため、大容量の分離object store最適化はしない。blobを分離するadapterはWorkspaceStore/ArtifactStore/StandardToolStore/EvidenceStoreを直接実装できる。その場合、先に所有付きstaging/blobを保存し、hashを確認してから版付きmanifestへ参照をCAS公開し、証跡保存後に確定markerをCAS公開する。各段階の安定IDで再開し、公開済みmarkerから参照されるblobをGCしない。複数サービスの原子commitを仮定しない。共通suiteの停止/部分upload試験はこの契約のfake検証であり、実サービスの耐久性や性能はadapter側の受入試験を要する。
+
+## 安定IDのraw-byte保存（rt-3f、data schema 3）
+
+`ArtifactStore::stage_named`はhost指定の`ArtifactSpec`（namespace内の非空ID、media type、DataClass）と任意のraw bytesを受け、`save`でSavedを公開する。WorkspaceStoreとの組合せはStandardToolStoreで利用できる。IDはOS pathとして扱わない。同ID・同bytes・同media type・同classのstage再試行は元のstagingを返し、save再試行は元のArtifactRefを返す。bytesまたはmetadataが異なればConflict。再試行で期限・manifest・revisionは更新しない。保存済みIDへのstageも可能で、続くsaveは既存Artifactを返す。ランダムIDのstage/putはapplication/octet-stream、store_outputはapplication/jsonを使う。
+
+安定IDはtenant/Run/Agentのnamespaceに属する。他namespaceから元namespaceのIDをstage/save/readする権限は付与しない。同じ文字列を自分のnamespaceで使うことは独立したArtifactであり、他Runの参照にはならない。stage_namedは所有者専用。既存の明示共有によるread契約は維持する。
+
+stage応答後・save応答後のclient停止と再openでは永続状態から同じIDを再開する。外部CASの応答喪失でも同IDを再送できる。保存完了と耐久性の範囲は既存backend契約どおり。未公開stagingの期限後GC・明示削除後にはIDの記録を保持しないため、永久の重複排除ではない。Memoryの再openは共有状態の再接続でありprocess耐久ではない。Local/fake外部storeの共通suiteはclient再openを試す。追加のLocal子process試験はstage/save応答直後にデストラクタなしでprocessを終了して別processから復元する。SIGKILL・電源断の試験ではない。PostgreSQL adapterは制御台帳専用でArtifact保存を提供しない。
+
+media typeをStaged/ArtifactRefへ必須保存するためnamespace schemaを3へ更新する。旧schemaの暗黙移行・互換fallbackは追加しない。control/checkpointのschemaは変更しない。

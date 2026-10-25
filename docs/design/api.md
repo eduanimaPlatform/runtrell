@@ -1,4 +1,4 @@
-# runtrell API（2a control schema 1 / data schema 2）
+# runtrell API（2a control schema 1 / data schema 3）
 
 依存は host → `runtrell` → `runtrell-protocol`。fake host → `runtrell-testkit` → `runtrell`。新規コードはApache-2.0。crate名は実行機構、判断protocol、試験接続の責務を示す作業名で、registry名の取得を意味しない。protocolの型はruntime APIで再exportしない。
 
@@ -481,3 +481,23 @@ pub trait ControlStore: RunStore + BudgetAuthority + OperationStore + Scheduler 
 impl<T: RunStore + BudgetAuthority + OperationStore + Scheduler> ControlStore for T {}
 
 ```
+
+`ArtifactStore::stage_named(access, ArtifactSpec { id, media_type, class }, bytes, now)`と`save(access, staged, now)`はraw bytesの安定ID保存契約。`staged(access, id)`は未公開stagingを再取得する。DataStoreは同名の同期stage/stagedと非同期saveを提供し、trait経路はblocking I/Oを退避する。再送・所有境界・metadata不一致・schema 3の詳細は[workspace](workspace.md)を参照する。
+
+```rust
+use runtrell::{ArtifactRef, ArtifactSpec, ArtifactStore, Result};
+use runtrell::data::{Access, DataClass};
+
+async fn save_job_result<S: ArtifactStore>(
+    store: &S, access: &Access, stable_id: String, bytes: &[u8], now: u64,
+) -> Result<ArtifactRef> {
+    let staged = store.stage_named(access, ArtifactSpec {
+        id: stable_id,
+        media_type: "image/png".into(),
+        class: DataClass::Intermediate,
+    }, bytes, now).await?;
+    store.save(access, staged, now).await
+}
+```
+
+IDの具体的な生成規則とmedia typeはhostが供給する。再開時も同じIDとmetadataを使い、bytesをJSONへ変換する必要はない。

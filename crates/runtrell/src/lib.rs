@@ -11,7 +11,8 @@ pub mod schema;
 pub use schema::{schema_diagnostics, validate_schema};
 pub mod data;
 pub use data::{
-    ArtifactRef, ArtifactStore, FileVersion, Namespace, WorkspaceSnapshot, WorkspaceStore,
+    ArtifactRef, ArtifactSpec, ArtifactStore, FileVersion, Namespace, WorkspaceSnapshot,
+    WorkspaceStore,
 };
 pub mod execution;
 pub mod file_tools;

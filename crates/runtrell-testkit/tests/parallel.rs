@@ -77,6 +77,21 @@ impl WorkspaceStore for DelayedStore {
 }
 
 impl ArtifactStore for DelayedStore {
+    async fn stage_named(
+        &self,
+        a: &Access,
+        spec: ArtifactSpec,
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<Staged> {
+        ArtifactStore::stage_named(&self.inner, a, spec, bytes, now).await
+    }
+    async fn staged(&self, a: &Access, id: &str) -> Result<Staged> {
+        ArtifactStore::staged(&self.inner, a, id).await
+    }
+    async fn save(&self, a: &Access, staged: Staged, now: u64) -> Result<ArtifactRef> {
+        self.inner.save(a, staged, now).await
+    }
     async fn put(
         &self,
         a: &Access,
