@@ -112,6 +112,8 @@ host は固定絶対 path、正確な `major.minor.patch`、実行 file SHA-256 
 
 ### GitHub-hosted CIの受入境界
 
+- state root（`RUNTRELL_LINUX_STATE_ROOT`）とその全祖先directoryは、管理helperのuidが **CAP_DAC_OVERRIDEなしで** 辿れる必要がある。bubblewrapはpayload用のuser namespaceへ移った後にscratchのsource pathを解決するため、ownerの異なるhome配下（例：GitHub-hosted runnerの `/home/runner`、mode 0750）に置くと `Can't find source path ... Permission denied` で起動できない（2026-10-25の初回Hosted CIで観測）。CIでは `/var/lib/runtrell-ci-state`（root所有、0700）を使う。本番でも同じ条件を満たす場所に置く。
+
 [公開CI](../../.github/workflows/ci.yml)は標準`ubuntu-24.04` VMの独立した実隔離jobを使う。通常の契約jobは使い捨てPostgreSQL 18 serviceを使い、Python feature有無でunit/integration/doctest・公開example・trace/hashを確認する。macOSは標準`macos-latest`上のSeatbelt実隔離jobを使う。Self-hosted、larger runner、有料cache拡張、private接続・秘密情報は使わない。
 
 Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り、親と専用subtreeの`cpu memory pids` controllerを有効化する。専用subtreeには管理processを置かず、backendがoperation単位の子groupへhelperを参加させる。管理supervisorとhelperにはhost mount namespaceのCAP_SYS_ADMINが必要で、backendが要求disk枠のtmpfsをmount/unmountする。Rustのbuildは通常userで行い、実試験の管理処理だけsudoで実行する。
