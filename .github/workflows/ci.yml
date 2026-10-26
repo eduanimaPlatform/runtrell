@@ -33,8 +33,10 @@ jobs:
         include:
           - feature: default
             args: ''
+            example_args: ''
           - feature: python
             args: --features runtrell/python,runtrell-testkit/python,runtrell-providers/openai,runtrell-providers/gemini,runtrell-providers/openrouter
+            example_args: --features runtrell/python,runtrell-testkit/python
     services:
       postgres:
         image: postgres:18
@@ -79,8 +81,8 @@ jobs:
         run: cargo test --workspace --locked ${{ matrix.args }}
       - name: Public examples
         run: |
-          cargo run -p runtrell-testkit --locked ${{ matrix.args }} --example support_decision
-          cargo run -p runtrell-testkit --locked ${{ matrix.args }} --example alternate_host
+          cargo run -p runtrell-testkit --locked ${{ matrix.example_args }} --example support_decision
+          cargo run -p runtrell-testkit --locked ${{ matrix.example_args }} --example alternate_host
       - name: Trace and pinned source hashes
         run: |
           cargo run -p xtask --locked -- trace
@@ -100,6 +102,7 @@ jobs:
         include:
           - feature: default
             args: ''
+            example_args: ''
           - feature: python
             args: --features python
     steps:
