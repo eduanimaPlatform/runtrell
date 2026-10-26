@@ -19,10 +19,12 @@ pub enum StandardTool {
     Execution,
     ImageGenerate,
     ImageEdit,
+    DocumentView,
 }
 impl StandardTool {
     pub fn requirements(self) -> &'static [&'static str] {
         match self {
+            Self::DocumentView => &["StandardToolStore", "Access", "Policy", "RunStore", "Clock"],
             Self::ImageGenerate | Self::ImageEdit => &[
                 "ImagePort",
                 "ArtifactStore",
@@ -179,6 +181,14 @@ impl<S: StandardToolStore + Clone + 'static> ToolSet<S> {
     {
         self.supplied
             .insert(StandardTool::Validation, RegisteredTool::new(tool));
+        self
+    }
+    pub fn document_view<P: Policy + 'static, R: RunStore + 'static, C: Clock + 'static>(
+        mut self,
+        tool: document_view::DocumentView<S, P, R, C>,
+    ) -> Self {
+        self.supplied
+            .insert(StandardTool::DocumentView, RegisteredTool::new(tool));
         self
     }
     pub fn execution<

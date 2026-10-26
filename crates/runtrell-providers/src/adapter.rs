@@ -268,9 +268,23 @@ impl Adapter {
         context: &ToolContext,
         request: PreparedModelRequest,
     ) -> Result<ExternalResult> {
+        request.validate_for_send()?;
         let mut body = self.body(&context.claim.run, &request)?;
         self.check_document_wire_bound(&request, &body)?;
-        let resolved = self.resolve_documents(context, &request).await?;
+        let resolved = match self.resolve_documents(context, &request).await {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                return Ok(ExternalResult::Failed {
+                    physical_evidence: None,
+                    code: "ATTACHMENT_NOT_SENT".into(),
+                    usage: Usage {
+                        model: request.model.clone(),
+                        ..Usage::measured(0, 0, 0)
+                    },
+                    retry_after: None,
+                });
+            }
+        };
         self.attach_documents(&mut body, &request, &resolved);
         match self.send(context, body, &resolved).await? {
             HttpResult::Json(parsed) => Ok(self
@@ -284,7 +298,7 @@ impl Adapter {
         &self,
         context: &ToolContext,
         body: Value,
-        sensitive: &[runtrell::sensitive_inputs::ResolvedSensitiveInput],
+        sensitive: &[runtrell::attachments::ResolvedAttachment],
     ) -> Result<HttpResult> {
         if context.claim.run != self.config.run {
             return Err(Error::PermissionDenied);
@@ -770,6 +784,7 @@ macro_rules! adapter {
                 self.0.config.capabilities.limits.clone()
             }
             fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
+                request.validate_for_send()?;
                 // Size the largest feasible cap too: its decimal wire encoding
                 // must fit before reservation, even when the prototype cap is 0.
                 let limits = self.limits();
@@ -808,7 +823,7 @@ macro_rules! adapter {
             ) -> Result<Lookup> {
                 let body = self.0.body(&context.claim.run, &request)?;
                 self.0.check_document_wire_bound(&request, &body)?;
-                self.0.resolve_documents(context, &request).await?;
+                self.0.authorize_attachments(context, &request)?;
                 Ok(Lookup::Unknown)
             }
         }

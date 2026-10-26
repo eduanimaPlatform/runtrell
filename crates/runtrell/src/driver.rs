@@ -210,7 +210,7 @@ impl<
             ) {
                 let request = serde_json::from_value(op.request.input.clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
-                let request = self.model.prepare_request(&r, request).await?;
+                let request = PreparedModelRequest::for_lookup(request)?;
                 self.model.lookup(&ctx, request).await?
             } else if op.request.kind == OperationKind::Tool
                 || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
@@ -565,7 +565,9 @@ impl<
                 kind: OperationKind::Run,
             })
             .await?;
-        let result = self.drive_inner(c).await;
+        // The loop owns prepared payloads and adapter futures. Keep its storage
+        // off caller stacks, including hosts using small executor threads.
+        let result = Box::pin(self.drive_inner(c)).await;
         self.store.release_slot(&slot_key).await?;
         if let Err(e) = &result {
             if e == &Error::Closed {
@@ -720,6 +722,7 @@ impl<
                         return Err(Error::Conflict);
                     }
                     let mut quoted_reserve = None;
+                    let mut quoted_prepared = None;
                     let request = if let Some(op) = &existing {
                         serde_json::from_value::<ModelRequest>(op.request.input.clone())
                             .map_err(|e| Error::Invalid(e.to_string()))?
@@ -730,7 +733,7 @@ impl<
                             messages = cp.messages.clone();
                         }
                         let req = ModelRequest {
-                            sensitive_inputs: vec![],
+                            attachments: crate::attachments::model_attachments(&messages)?,
                             model: self.model.limits().model,
                             messages: messages.clone(),
                             tools: descriptors.clone(),
@@ -776,7 +779,10 @@ impl<
                         }
                         let (cap, reserve) = self.model_budget(c, input).await?;
                         quoted_reserve = Some(reserve);
-                        prepared.with_max_output(cap).request().clone()
+                        let prepared = prepared.with_max_output(cap);
+                        let request = prepared.request().clone();
+                        quoted_prepared = Some(prepared);
+                        request
                     };
                     let mut dispatch = if let Some(op) = &existing {
                         self.next_attempt(c, op, self.model.retry_policy()).await?
@@ -823,21 +829,32 @@ impl<
                         let input = self.model.input_upper_bound(&prepared)?;
                         let (cap, reserve) = self.model_budget(c, input).await?;
                         retry_request.max_output = cap;
+                        quoted_prepared = Some(prepared.with_max_output(cap));
                         dispatch.reserve = reserve;
                         dispatch.input = serde_json::to_value(retry_request).unwrap();
                     }
                     let invoke_request: ModelRequest =
                         serde_json::from_value(dispatch.input.clone())
                             .map_err(|e| Error::Invalid(e.to_string()))?;
-                    let invoke_request =
-                        self.model.prepare_request(&current, invoke_request).await?;
-                    let lookup_request = invoke_request.clone();
+                    let lookup_request = PreparedModelRequest::for_lookup(invoke_request.clone())?;
                     let result = self
                         .dispatch(
                             c,
                             dispatch,
                             "model",
-                            |ctx| async move { self.model.invoke(&ctx, invoke_request).await },
+                            |ctx| async move {
+                                let prepared = if let Some(prepared) = quoted_prepared {
+                                    prepared
+                                } else {
+                                    self.model
+                                        .prepare_request(&current, invoke_request.clone())
+                                        .await?
+                                };
+                                if prepared.request() != &invoke_request {
+                                    return Err(Error::Conflict);
+                                }
+                                self.model.invoke(&ctx, prepared).await
+                            },
                             |ctx| async move {
                                 let found = self.model.lookup(&ctx, lookup_request).await?;
                                 if let Lookup::NotFound { scope } = &found
@@ -1292,7 +1309,7 @@ impl<
         let base = data.context(access).await?;
         let limits = self.model.compaction_limits();
         let request = ModelRequest {
-            sensitive_inputs: vec![],
+            attachments: vec![],
             model: limits.model.clone(),
             messages: vec![
                 Message::text(
@@ -1348,14 +1365,22 @@ impl<
         };
         let request: ModelRequest =
             serde_json::from_value(d.input.clone()).map_err(|_| Error::Conflict)?;
-        let request = self.model.prepare_request(&current, request).await?;
-        let lookup = request.clone();
+        let lookup = PreparedModelRequest::for_lookup(request.clone())?;
         let result = self
             .dispatch(
                 c,
                 d,
                 "model",
-                |ctx| async move { self.model.invoke(&ctx, request).await },
+                |ctx| async move {
+                    let prepared = self
+                        .model
+                        .prepare_request(&current, request.clone())
+                        .await?;
+                    if prepared.request() != &request {
+                        return Err(Error::Conflict);
+                    }
+                    self.model.invoke(&ctx, prepared).await
+                },
                 |ctx| async move { self.model.lookup(&ctx, lookup).await },
             )
             .await?;

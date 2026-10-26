@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![forbid(unsafe_code)]
 //! Optional, single-send ModelPort implementations. See docs/design/providers.md.
+use runtrell::attachments::AttachmentResolver;
 pub use runtrell::images::ImageLimits;
-use runtrell::sensitive_inputs::SensitiveInputResolver;
 use runtrell::{ModelLimits, RunHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -115,7 +115,7 @@ pub struct Config {
     pub max_response_bytes: usize,
     pub image_limits: ImageLimits,
     pub document_limits: DocumentLimits,
-    pub sensitive_input_resolver: Option<Arc<dyn SensitiveInputResolver>>,
+    pub attachment_resolver: Option<Arc<dyn AttachmentResolver>>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

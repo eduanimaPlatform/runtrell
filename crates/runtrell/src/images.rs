@@ -43,13 +43,13 @@ impl ImageReference {
             Self::Workspace { file, .. } => &file.hash,
         }
     }
-    fn bytes(&self) -> u64 {
+    pub fn bytes(&self) -> u64 {
         match self {
             Self::Artifact(a) => a.bytes,
             Self::Workspace { file, .. } => file.bytes,
         }
     }
-    fn mime(&self) -> &str {
+    pub fn mime(&self) -> &str {
         match self {
             Self::Artifact(a) => &a.media_type,
             Self::Workspace { mime_type, .. } => mime_type,
@@ -238,6 +238,7 @@ impl ResolvedImage {
 pub struct PreparedModelRequest {
     request: ModelRequest,
     images: Vec<ResolvedImage>,
+    attachments: Vec<crate::attachments::ResolvedAttachment>,
 }
 impl Deref for PreparedModelRequest {
     type Target = ModelRequest;
@@ -246,23 +247,66 @@ impl Deref for PreparedModelRequest {
     }
 }
 impl PreparedModelRequest {
-    pub fn text(request: ModelRequest) -> Result<Self> {
-        if !request.images.is_empty() {
-            return Err(Error::Unsupported("image_input".into()));
+    /// Lookup reconstruction deliberately has no payload. Never silently omit
+    /// declared local inputs when such a request is passed to invoke or sizing.
+    pub fn validate_for_send(&self) -> Result<()> {
+        if self.request.images.len() != self.images.len()
+            || self
+                .request
+                .images
+                .iter()
+                .zip(&self.images)
+                .any(|(reference, image)| reference != image.reference())
+            || self
+                .request
+                .attachments
+                .iter()
+                .filter(|a| matches!(a, crate::attachments::Attachment::Stored(_)))
+                .count()
+                != self.attachments.len()
+        {
+            return Err(Error::Invalid("MODEL_INPUT_NOT_PREPARED".into()));
         }
-        for input in &request.sensitive_inputs {
+        Ok(())
+    }
+    /// Reconstruct identity for result lookup only, without acquiring original data.
+    /// ModelPort::lookup must authorize the references before returning any result.
+    pub fn for_lookup(request: ModelRequest) -> Result<Self> {
+        for input in &request.attachments {
             input.validate()?;
         }
         Ok(Self {
             request,
             images: vec![],
+            attachments: vec![],
+        })
+    }
+    pub fn text(request: ModelRequest) -> Result<Self> {
+        if !request.images.is_empty() {
+            return Err(Error::Unsupported("image_input".into()));
+        }
+        for input in &request.attachments {
+            input.validate()?;
+            if matches!(input, crate::attachments::Attachment::Stored(_)) {
+                return Err(Error::Unsupported(
+                    "stored_attachment_requires_preparation".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            request,
+            images: vec![],
+            attachments: vec![],
         })
     }
     pub fn request(&self) -> &ModelRequest {
         &self.request
     }
-    pub fn sensitive_inputs(&self) -> &[crate::sensitive_inputs::SensitiveInput] {
-        &self.request.sensitive_inputs
+    pub fn attachments(&self) -> &[crate::attachments::Attachment] {
+        &self.request.attachments
+    }
+    pub fn prepared_attachments(&self) -> &[crate::attachments::ResolvedAttachment] {
+        &self.attachments
     }
     pub fn resolved_images(&self) -> &[ResolvedImage] {
         &self.images
@@ -279,6 +323,17 @@ pub struct ImageResolver<S, P> {
     pub limits: ImageLimits,
 }
 impl<S: StandardToolStore, P: Policy> ImageResolver<S, P> {
+    /// Validate current grants via metadata without acquiring file content.
+    pub async fn authorize_current(
+        &self,
+        run: &RunRecord,
+        reference: &ImageReference,
+        permission: &str,
+    ) -> Result<()> {
+        let access = self.authorize(run, reference, permission)?;
+        self.store.snapshot(access).await?;
+        Ok(())
+    }
     pub fn authorize(
         &self,
         run: &RunRecord,
@@ -303,39 +358,9 @@ impl<S: StandardToolStore, P: Policy> ImageResolver<S, P> {
         }
         let mut images = vec![];
         for reference in references {
-            let access = self.authorize(run, reference, "image.resolve")?;
-            let length =
-                usize::try_from(reference.bytes()).map_err(|_| invalid("IMAGE_BYTES_LIMIT"))?;
-            if length == 0 || length > self.limits.max_image_bytes {
-                return Err(invalid("IMAGE_BYTES_LIMIT"));
-            }
-            let mut bytes = Vec::with_capacity(length);
-            while bytes.len() < length {
-                let chunk = (length - bytes.len()).min(self.store.policy().max_read);
-                let part = match reference {
-                    ImageReference::Artifact(a) => {
-                        self.store
-                            .read_artifact(access, a, bytes.len() as u64, chunk)
-                            .await?
-                    }
-                    ImageReference::Workspace { file, .. } => {
-                        self.store
-                            .read(access, &file.path, file.revision, bytes.len() as u64, chunk)
-                            .await?
-                    }
-                };
-                if part.total != reference.bytes()
-                    || part.offset != bytes.len() as u64
-                    || part.bytes.is_empty()
-                    || part.bytes.len() > chunk
-                {
-                    return Err(Error::Conflict);
-                }
-                bytes.extend_from_slice(&part.bytes);
-            }
-            if content_digest(&bytes) != reference.hash() {
-                return Err(Error::Conflict);
-            }
+            let bytes = self
+                .read_reference(run, reference, "image.resolve", self.limits.max_image_bytes)
+                .await?;
             self.limits.inspect(reference.mime(), &bytes)?;
             images.push(ResolvedImage {
                 reference: reference.clone(),
@@ -344,6 +369,48 @@ impl<S: StandardToolStore, P: Policy> ImageResolver<S, P> {
             });
         }
         Ok(images)
+    }
+    pub async fn read_reference(
+        &self,
+        run: &RunRecord,
+        reference: &ImageReference,
+        permission: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let access = self.authorize(run, reference, permission)?;
+        let length =
+            usize::try_from(reference.bytes()).map_err(|_| invalid("IMAGE_BYTES_LIMIT"))?;
+        if length == 0 || length > max_bytes {
+            return Err(invalid("ATTACHMENT_BYTES_LIMIT"));
+        }
+        let mut bytes = Vec::with_capacity(length);
+        while bytes.len() < length {
+            let chunk = (length - bytes.len()).min(self.store.policy().max_read);
+            let part = match reference {
+                ImageReference::Artifact(a) => {
+                    self.store
+                        .read_artifact(access, a, bytes.len() as u64, chunk)
+                        .await?
+                }
+                ImageReference::Workspace { file, .. } => {
+                    self.store
+                        .read(access, &file.path, file.revision, bytes.len() as u64, chunk)
+                        .await?
+                }
+            };
+            if part.total != reference.bytes()
+                || part.offset != bytes.len() as u64
+                || part.bytes.is_empty()
+                || part.bytes.len() > chunk
+            {
+                return Err(Error::Conflict);
+            }
+            bytes.extend_from_slice(&part.bytes);
+        }
+        if content_digest(&bytes) != reference.hash() {
+            return Err(Error::Conflict);
+        }
+        Ok(bytes)
     }
 }
 /// Attaches owned storage and Policy to any image-capable model adapter.
@@ -388,35 +455,73 @@ impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
         run: &RunRecord,
         request: ModelRequest,
     ) -> Result<PreparedModelRequest> {
-        for input in &request.sensitive_inputs {
+        for input in &request.attachments {
             input.validate()?;
         }
         let images = self.resolver.resolve(run, &request.images).await?;
-        Ok(PreparedModelRequest { request, images })
+        let mut attachments = Vec::new();
+        for input in &request.attachments {
+            if let crate::attachments::Attachment::Stored(reference) = input {
+                let bytes = self
+                    .resolver
+                    .read_reference(
+                        run,
+                        reference,
+                        "attachment.resolve",
+                        self.resolver.limits.max_request_bytes,
+                    )
+                    .await?;
+                attachments.push(crate::attachments::ResolvedAttachment::bytes(
+                    input.declaration(),
+                    bytes,
+                ));
+            }
+        }
+        Ok(PreparedModelRequest {
+            request,
+            images,
+            attachments,
+        })
     }
     async fn invoke(
         &self,
         c: &ToolContext,
         request: PreparedModelRequest,
     ) -> Result<ExternalResult> {
+        request.validate_for_send()?;
         let run = self.runs.get(&c.claim.run).await?;
-        self.resolver
-            .resolve(&run, &request.request().images)
-            .await?;
         for image in request.resolved_images() {
             self.resolver
-                .authorize(&run, image.reference(), "image.send")?;
+                .authorize_current(&run, image.reference(), "image.send")
+                .await?;
+        }
+        for input in request.attachments() {
+            if let crate::attachments::Attachment::Stored(reference) = input {
+                self.resolver
+                    .authorize_current(&run, reference, "attachment.send")
+                    .await?;
+            }
         }
         self.inner.invoke(c, request).await
     }
     async fn lookup(&self, c: &ToolContext, request: PreparedModelRequest) -> Result<Lookup> {
         let run = self.runs.get(&c.claim.run).await?;
-        self.resolver
-            .resolve(&run, &request.request().images)
-            .await?;
         for image in request.resolved_images() {
             self.resolver
-                .authorize(&run, image.reference(), "image.retrieve")?;
+                .authorize_current(&run, image.reference(), "image.retrieve")
+                .await?;
+        }
+        for reference in &request.request().images {
+            self.resolver
+                .authorize_current(&run, reference, "image.retrieve")
+                .await?;
+        }
+        for input in request.attachments() {
+            if let crate::attachments::Attachment::Stored(reference) = input {
+                self.resolver
+                    .authorize_current(&run, reference, "attachment.retrieve")
+                    .await?;
+            }
         }
         self.inner.lookup(c, request).await
     }
@@ -675,7 +780,8 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         let request = self.prepare(&run, &input).await?;
         for image in request.images().iter().chain(request.mask()) {
             self.resolver
-                .authorize(&run, image.reference(), "image.send")?;
+                .authorize_current(&run, image.reference(), "image.send")
+                .await?;
         }
         self.resolver
             .policy

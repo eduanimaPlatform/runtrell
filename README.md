@@ -61,7 +61,11 @@ bounded HTTP send without automatic retry or redirect. Usage preserves missing
 counters and subset relationships. Saved continuation state is checked against
 the owning Run/session before sending. `GeminiImages` supplies optional generation
 and reference editing with the `gemini` feature. Remote lookup/idempotency are not
-claimed. See [provider contracts](docs/design/providers.md) and [images](docs/design/images.md).
+claimed. Optional [attachments](docs/design/attachments.md) support fixed external
+URL/bytes and authorized Workspace/Artifact versions. `DocumentView` inspects PDF
+page count and attaches selected pages (PNG uses ordinary image input). Lookup
+does not fetch originals or issue URLs. See [provider contracts](docs/design/providers.md)
+and [images](docs/design/images.md).
 
 | Adapter | Image input | Generation | Reference editing | Mask editing |
 |---|---|---|---|---|

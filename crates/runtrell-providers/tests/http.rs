@@ -123,7 +123,7 @@ fn config(endpoint: String) -> Config {
         max_response_bytes: 65536,
         image_limits: ImageLimits::default(),
         document_limits: DocumentLimits::default(),
-        sensitive_input_resolver: None,
+        attachment_resolver: None,
     }
 }
 fn context() -> ToolContext {
@@ -145,7 +145,7 @@ fn context() -> ToolContext {
 }
 fn request() -> ModelRequest {
     ModelRequest {
-        sensitive_inputs: vec![],
+        attachments: vec![],
         model: "host-model".into(),
         messages: vec![Message::text("user", "hello")],
         tools: vec![],

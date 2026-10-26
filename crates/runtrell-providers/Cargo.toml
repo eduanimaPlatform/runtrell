@@ -22,6 +22,7 @@ base64 = "0.22.1"
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
+lopdf = { version = "0.38", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 runtrell-testkit = { path = "../runtrell-testkit", version = "0.1.0" }

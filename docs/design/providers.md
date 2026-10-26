@@ -9,13 +9,16 @@ and optional session. No discovery, credential loading, or price catalog is prov
 
 ## Contract
 
-Sensitive document inputs are host-only declarations in `ModelRequest.sensitive_inputs`:
-opaque reference ID, MIME, byte length and SHA-256. They contain no locator or
+Optional file attachments use `ModelRequest.attachments`: external declarations
+fix opaque reference ID, version, page range, MIME, byte length and SHA-256.
+Stored attachments reuse the existing Workspace/Artifact `ImageReference` contract.
+External declarations contain no locator or
 payload. The host fixes these before quoting/reservation (it may compute the
 digest while acquiring the original before constructing the declaration).
-`PreparedModelRequest` exposes the same immutable declarations. It never owns
-resolved documents. `Config.sensitive_input_resolver` is called only at invoke
-and lookup, with the trusted ToolContext and provider endpoint. The host must
+`PreparedModelRequest` exposes the same immutable declarations and can own already
+authorized stored bytes, prepared through `ImageModel` before estimation.
+`Config.attachment_resolver.resolve` is called only at invoke,
+with the trusted ToolContext and provider endpoint. The host must
 authorize that Run/principal/operation, fixed version and destination on each call.
 It must not log payloads or return locators in reference IDs or other saved fields.
 
@@ -23,11 +26,17 @@ Inline bytes are hashed and measured by Runtrell; URL results carry host-atteste
 digest and length of the immutable target. The host must verify those against
 the fixed source when minting the URL; Runtrell does not fetch that URL. An
 attestation is a trust boundary, not independent proof of remote content.
-Mismatch rejects before HTTP. Resolution errors have no payload-bearing message.
+Mismatch rejects before provider inference HTTP; resolver authorization/resolution
+RPCs may already have occurred. Resolution errors have no payload-bearing message.
 Resolved inputs have redacted Debug and no Serialize implementation. They live
-only during adapter wire construction; no raw input is copied into operation,
-checkpoint or continuation state. Lookup resolves again but never resends:
-Unknown and reservation retention remain unchanged after a lost response.
+in prepared memory or during wire construction; no raw input is copied into operation,
+checkpoint or continuation state. Lookup calls only the separate metadata-only
+`authorize` hook, never `resolve`: Unknown and reservation retention remain
+unchanged after a lost response. Saved-result recovery does not acquire originals.
+Before inference, an adapter-observed resolution failure produces `ATTACHMENT_NOT_SENT` with known zero
+inference usage; after sending, lost responses remain Unknown with reservation held.
+This does not account for any independent host resolver RPC charge.
+Crash/cancellation without a saved unsent result conservatively retains Unknown.
 
 Document capabilities declare PDF and image support separately for URL and inline
 bytes. OpenAI Responses maps PDFs to input_file (file_url/file_data), PNG/JPEG/
@@ -41,7 +50,9 @@ bound. Count, total declared bytes and worst-case JSON wire size are checked
 before reservation. No request options permit late document attachment.
 The host also validates the actual file format and PDF page count against its
 model/token ceiling. These document limits do not use the ordinary PNG-only
-Workspace image resolver. Provider echoes of a resolved URL, full UTF-8 payload
+Workspace image inspection limits. `DocumentView` supports bounded PDF page
+selection and PNG via existing image input; see [attachments](attachments.md).
+Provider echoes of a resolved URL, full UTF-8 payload
 or Base64 payload are redacted before saving reply/continuation metadata; this
 does not replace the host's authorization and source-access policy.
 

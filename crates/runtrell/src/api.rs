@@ -719,7 +719,7 @@ pub struct ModelRequest {
     pub max_output: u64,
     pub metadata: Value,
     pub images: Vec<crate::images::ImageReference>,
-    pub sensitive_inputs: Vec<crate::sensitive_inputs::SensitiveInput>,
+    pub attachments: Vec<crate::attachments::Attachment>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -800,7 +800,8 @@ pub trait ModelPort: Send + Sync {
     fn compaction_limits(&self) -> ModelLimits {
         self.limits()
     }
-    /// Resolve and authorize all attachments before sizing and reservation.
+    /// Fix attachment identity and prepare authorized local bytes before sizing
+    /// and reservation. External transport resolution may wait until invoke.
     fn prepare_request(
         &self,
         _run: &RunRecord,
