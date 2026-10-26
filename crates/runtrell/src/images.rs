@@ -5,6 +5,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{ops::Deref, sync::Arc};
+mod formats;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageReference {
@@ -88,6 +89,17 @@ fn invalid(code: &str) -> Error {
     Error::Invalid(code.into())
 }
 impl ImageLimits {
+    fn dimensions(&self, width: u32, height: u32) -> Result<(u32, u32)> {
+        if width == 0
+            || height == 0
+            || width > self.max_width
+            || height > self.max_height
+            || u64::from(width) * u64::from(height) > self.max_pixels
+        {
+            return Err(invalid("IMAGE_DIMENSIONS_LIMIT"));
+        }
+        Ok((width, height))
+    }
     pub fn decode(&self, mime: &str, data_base64: &str) -> Result<Vec<u8>> {
         if data_base64.len() > self.max_image_bytes.div_ceil(3).saturating_mul(4) {
             return Err(invalid("IMAGE_BYTES_LIMIT"));
@@ -112,7 +124,10 @@ impl ImageLimits {
             || self.max_height == 0
             || self.max_pixels == 0
             || self.allowed_mime.is_empty()
-            || self.allowed_mime.iter().any(|m| m != "image/png")
+            || self
+                .allowed_mime
+                .iter()
+                .any(|m| !matches!(m.as_str(), "image/png" | "image/jpeg" | "image/webp"))
             || self.max_request_bytes < wire
             || self.max_response_bytes < wire
         {
@@ -120,14 +135,22 @@ impl ImageLimits {
         }
         Ok(())
     }
-    /// Validate PNG chunk structure, CRCs and dimensions without decoding pixels.
+    /// Validate image container structure and dimensions without decoding pixels.
     /// Pixel/semantic validation belongs to the host's validator.
     pub fn inspect(&self, mime: &str, bytes: &[u8]) -> Result<(u32, u32)> {
         if bytes.len() > self.max_image_bytes {
             return Err(invalid("IMAGE_BYTES_LIMIT"));
         }
-        if !self.allowed_mime.iter().any(|m| m == mime) || mime != "image/png" {
+        if !self.allowed_mime.iter().any(|m| m == mime) {
             return Err(invalid("IMAGE_MIME_UNSUPPORTED"));
+        }
+        if mime != "image/png" {
+            let (width, height) = match mime {
+                "image/jpeg" => formats::jpeg(bytes)?,
+                "image/webp" => formats::webp(bytes)?,
+                _ => return Err(invalid("IMAGE_MIME_UNSUPPORTED")),
+            };
+            return self.dimensions(width, height);
         }
         if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
             return Err(invalid("IMAGE_FORMAT"));
@@ -161,14 +184,7 @@ impl ImageLimits {
                 b"IHDR" if offset == 8 && size == 13 => {
                     let width = u32::from_be_bytes(payload[..4].try_into().unwrap());
                     let height = u32::from_be_bytes(payload[4..8].try_into().unwrap());
-                    if width == 0
-                        || height == 0
-                        || width > self.max_width
-                        || height > self.max_height
-                        || u64::from(width) * u64::from(height) > self.max_pixels
-                    {
-                        return Err(invalid("IMAGE_DIMENSIONS_LIMIT"));
-                    }
+                    self.dimensions(width, height)?;
                     let depth_ok = match payload[9] {
                         0 => matches!(payload[8], 1 | 2 | 4 | 8 | 16),
                         2 | 4 | 6 => matches!(payload[8], 8 | 16),
@@ -537,9 +553,29 @@ pub enum ImageAction {
 #[serde(deny_unknown_fields)]
 pub struct ImageRequest {
     pub prompt: String,
+    pub size: Option<String>,
+    #[serde(default)]
+    pub output_format: ImageOutputFormat,
     #[serde(default)]
     pub references: Vec<ImageReference>,
     pub mask: Option<ImageReference>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageOutputFormat {
+    #[default]
+    Png,
+    Jpeg,
+    Webp,
+}
+impl ImageOutputFormat {
+    pub fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct PreparedImageRequest {
@@ -561,6 +597,12 @@ impl PreparedImageRequest {
     pub fn action(&self) -> ImageAction {
         self.action
     }
+    pub fn size(&self) -> Option<&str> {
+        self.request.size.as_deref().filter(|s| !s.is_empty())
+    }
+    pub fn output_format(&self) -> ImageOutputFormat {
+        self.request.output_format
+    }
 }
 #[derive(Clone, Debug)]
 pub struct EncodedImage {
@@ -574,6 +616,7 @@ pub enum ImageResponse {
         images: Vec<EncodedImage>,
         usage: Usage,
         failure: Option<String>,
+        retry_after: Option<u64>,
     },
     Unknown,
 }
@@ -650,6 +693,27 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
             serde_json::from_value(input.clone()).map_err(|_| invalid("IMAGE_REQUEST"))?;
         if request.prompt.is_empty() || request.prompt.len() > 65536 || self.config.timeout == 0 {
             return Err(invalid("IMAGE_REQUEST"));
+        }
+        if request.size.as_ref().is_some_and(|s| s.len() > 128)
+            || !self
+                .resolver
+                .limits
+                .allowed_mime
+                .iter()
+                .any(|m| m == request.output_format.mime_type())
+        {
+            return Err(invalid("IMAGE_OUTPUT_OPTIONS"));
+        }
+        if let Some(size) = request
+            .size
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != "auto")
+        {
+            let (width, height) = size.split_once('x').ok_or_else(|| invalid("IMAGE_SIZE"))?;
+            self.resolver.limits.dimensions(
+                width.parse().map_err(|_| invalid("IMAGE_SIZE"))?,
+                height.parse().map_err(|_| invalid("IMAGE_SIZE"))?,
+            )?;
         }
         match self.config.action {
             ImageAction::Generate if !request.references.is_empty() || request.mask.is_some() => {
@@ -746,7 +810,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             account: "images".into(),
             permission: self.name().into(),
             capability: "image-generation-editing".into(),
-            input_schema: json!({"type":"object","properties":{"prompt":{"type":"string","minLength":1},"references":{"type":"array","items":{"type":"object"}},"mask":{"type":["object","null"]}},"required":["prompt"],"additionalProperties":false}),
+            input_schema: json!({"type":"object","properties":{"prompt":{"type":"string","minLength":1},"references":{"type":"array","items":{"type":"object"}},"mask":{"type":["object","null"]},"size":{"type":["string","null"],"maxLength":128},"output_format":{"enum":["png","jpeg","webp"],"default":"png"}},"required":["prompt"],"additionalProperties":false}),
             output_schema: json!({"type":"object"}),
             side_effect: true,
             timeout: self.config.timeout,
@@ -791,6 +855,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             images,
             usage,
             failure,
+            retry_after,
         } = response
         else {
             return Ok(ExternalResult::Unknown);
@@ -855,7 +920,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 physical_evidence: None,
                 code,
                 usage,
-                retry_after: None,
+                retry_after,
             }
         } else {
             ExternalResult::Applied {

@@ -59,9 +59,11 @@ features. The crate has no default features. Hosts supply endpoint, credentials,
 model limits/capabilities, prices and Run/session binding; adapters perform one
 bounded HTTP send without automatic retry or redirect. Usage preserves missing
 counters and subset relationships. Saved continuation state is checked against
-the owning Run/session before sending. `GeminiImages` supplies optional generation
-and reference editing with the `gemini` feature. Remote lookup/idempotency are not
-claimed. Optional [attachments](docs/design/attachments.md) support fixed external
+the owning Run/session before sending. Public OSS image adapters `OpenAiImages`
+(`openai`) and `GeminiImages` (`gemini`) supply optional generation and reference
+editing through the same standard image tools. Models are host supplied.
+Remote lookup/idempotency are not claimed.
+Optional [attachments](docs/design/attachments.md) support fixed external
 URL/bytes and authorized Workspace/Artifact versions. `DocumentView` inspects PDF
 page count and attaches selected pages (PNG uses ordinary image input). Lookup
 does not fetch originals or issue URLs. See [provider contracts](docs/design/providers.md)
@@ -69,8 +71,15 @@ and [images](docs/design/images.md).
 
 | Adapter | Image input | Generation | Reference editing | Mask editing |
 |---|---|---|---|---|
-| OpenAI / Gemini / OpenRouter ModelPort | Host-declared, authorized PNG references | — | — | — |
+| OpenAI / Gemini / OpenRouter ModelPort | Host-declared, authorized references (PNG default) | — | — | — |
+| OpenAiImages (`openai`) | Authorized references | Host-declared | Host-declared | Unsupported |
 | GeminiImages | Reference images | Host-declared | Host-declared | Unsupported |
+
+The default image MIME is PNG. Hosts can opt into inspected still JPEG/WebP in
+`ImageLimits.allowed_mime`. OpenAI forwards `size` when requested and
+`output_format` (`png` by default, also `jpeg`/`webp` when enabled), always `n=1`,
+without quality. GeminiImages supports PNG output and rejects size/other format
+options. Image limits and authorization also apply to saved-result retrieval.
 
 ```sh
 RUNTRELL_TEST_DATABASE_URL=postgres://postgres:runtrell@127.0.0.1:55433/postgres \

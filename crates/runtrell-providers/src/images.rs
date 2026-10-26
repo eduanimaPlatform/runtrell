@@ -33,6 +33,9 @@ impl GeminiImages {
     }
     fn body(&self, request: &PreparedImageRequest) -> Result<Value> {
         let config = &self.0.config;
+        if request.size().is_some() || request.output_format() != ImageOutputFormat::Png {
+            return Err(Error::Unsupported("image_output_options".into()));
+        }
         let supported = match request.action() {
             ImageAction::Generate => config.capabilities.images.generation,
             ImageAction::Edit => config.capabilities.images.reference_edit,
@@ -91,11 +94,17 @@ impl ImagePort for GeminiImages {
         let body = self.body(&request)?;
         let parsed = match self.0.send(context, body, &[]).await? {
             HttpResult::Json(parsed) => parsed,
-            HttpResult::Failure(ExternalResult::Failed { code, usage, .. }) => {
+            HttpResult::Failure(ExternalResult::Failed {
+                code,
+                usage,
+                retry_after,
+                ..
+            }) => {
                 return Ok(ImageResponse::Received {
                     images: vec![],
                     usage,
                     failure: Some(code),
+                    retry_after,
                 });
             }
             _ => return Ok(ImageResponse::Unknown),
@@ -153,6 +162,7 @@ impl ImagePort for GeminiImages {
             images,
             usage,
             failure,
+            retry_after: None,
         })
     }
 }

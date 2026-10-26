@@ -7,6 +7,19 @@ The host supplies the complete endpoint URL, credential, model, limits, price,
 model capabilities, request/response byte bounds, input token upper bound, Run,
 and optional session. No discovery, credential loading, or price catalog is provided.
 
+Public OSS image support is separately provided by `ImagePort` adapters:
+
+| Provider / adapter | Feature | Image input | Generation | Reference edit | Mask edit |
+|---|---|---|---|---|---|
+| OpenAI / OpenAiImages | openai | Authorized references | Host-declared | Host-declared | Unsupported |
+| Gemini / GeminiImages | gemini | Authorized references | Host-declared | Host-declared | Unsupported |
+
+These connect to standard `ImageGenerate`/`ImageEdit` using the same `ImageTool`.
+No provider fallback is implicit. OpenAi ModelPort alone does not implement image
+generation. Image MIME, byte/count/dimension and transport bounds come from the
+host's ImageLimits; PNG is the default, still JPEG/WebP are opt-in. See
+[images](images.md) for the OpenAI JSON wire and exact recovery/settlement behavior.
+
 ## Contract
 
 Optional file attachments use `ModelRequest.attachments`: external declarations
@@ -49,7 +62,7 @@ by resolution. Declared bytes bound inline Base64; URLs have a fixed 8192-byte
 bound. Count, total declared bytes and worst-case JSON wire size are checked
 before reservation. No request options permit late document attachment.
 The host also validates the actual file format and PDF page count against its
-model/token ceiling. These document limits do not use the ordinary PNG-only
+model/token ceiling. These document limits do not use the ordinary (PNG by default)
 Workspace image inspection limits. `DocumentView` supports bounded PDF page
 selection and PNG via existing image input; see [attachments](attachments.md).
 Provider echoes of a resolved URL, full UTF-8 payload
@@ -72,8 +85,8 @@ Arbitrary request metadata is never forwarded as wire options.
 `RequestOptions` in request.metadata.provider_options supplies JSON schema.
 Image inputs use `ModelRequest.images` with Workspace/Artifact references and
 `ImageModel` for authorized resolution into a `PreparedModelRequest` before
-estimation. Raw inline-image options have been removed. `GeminiImages` supplies
-generation/reference editing through an independent `ImagePort`; see
+estimation. Raw inline-image options have been removed. `OpenAiImages` and
+`GeminiImages` supply generation/reference editing through `ImagePort`; see
 [images](images.md) for limits, authorization, storage and settlement.
 StopReason distinguishes
 completed, max_tokens (continuable truncation), content_filter, tool_call and
@@ -126,6 +139,8 @@ Rig provider code is extracted and the adoption manifest remains unchanged.
 
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)
 - [OpenAI file inputs](https://developers.openai.com/api/docs/guides/file-inputs)
+- [OpenAI Images generation](https://developers.openai.com/api/reference/resources/images/methods/generate)
+- [OpenAI Images reference edits](https://developers.openai.com/api/reference/resources/images/methods/edit)
 - [Gemini document inputs](https://ai.google.dev/gemini-api/docs/document-processing)
 - [Gemini generateContent](https://ai.google.dev/api/generate-content)
 - [Gemini native image generation and editing](https://ai.google.dev/gemini-api/docs/image-generation)

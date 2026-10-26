@@ -165,6 +165,10 @@ pub use adapter::*;
 mod images;
 #[cfg(feature = "gemini")]
 pub use images::GeminiImages;
+#[cfg(feature = "openai")]
+mod openai_images;
+#[cfg(feature = "openai")]
+pub use openai_images::OpenAiImages;
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")

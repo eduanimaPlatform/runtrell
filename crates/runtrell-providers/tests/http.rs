@@ -10,7 +10,20 @@ use tokio::{
 };
 #[cfg(feature = "gemini")]
 mod image_contracts {
+    type Images = GeminiImages;
+    type InputModel = Gemini;
+    const MODEL_KIND: &str = "gemini";
+    const OPENAI: bool = false;
     include!("support/images.rs");
+}
+#[cfg(feature = "openai")]
+mod openai_image_contracts {
+    type Images = OpenAiImages;
+    type InputModel = OpenAi;
+    const MODEL_KIND: &str = "openai";
+    const OPENAI: bool = true;
+    include!("support/images.rs");
+    include!("support/openai_images.rs");
 }
 #[path = "support/documents.rs"]
 mod document_contracts;

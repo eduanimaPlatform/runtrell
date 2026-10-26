@@ -32,3 +32,33 @@ fn invalid_png_is_rejected_before_use() {
             .is_err()
     );
 }
+
+#[test]
+fn output_options_and_opt_in_mime_are_explicit() {
+    let input: ImageRequest = serde_json::from_value(serde_json::json!({"prompt":"draw"})).unwrap();
+    assert_eq!(input.output_format, ImageOutputFormat::Png);
+    for format in ["png", "jpeg", "webp"] {
+        let input: ImageRequest = serde_json::from_value(
+            serde_json::json!({"prompt":"draw","output_format":format,"size":"1024x1024"}),
+        )
+        .unwrap();
+        assert_eq!(input.output_format.mime_type(), format!("image/{format}"));
+    }
+    assert!(
+        serde_json::from_value::<ImageRequest>(
+            serde_json::json!({"prompt":"draw","output_format":"gif"})
+        )
+        .is_err()
+    );
+    let limits = ImageLimits {
+        allowed_mime: vec!["image/png".into(), "image/jpeg".into(), "image/webp".into()],
+        ..ImageLimits::default()
+    };
+    limits.validate().unwrap();
+    for (mime, bytes) in [
+        ("image/jpeg", b"\xff\xd8\xff\xd9".as_slice()),
+        ("image/webp", b"RIFF\x04\0\0\0WEBP".as_slice()),
+    ] {
+        assert!(limits.inspect(mime, bytes).is_err());
+    }
+}

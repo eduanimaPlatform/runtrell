@@ -300,6 +300,16 @@ impl Adapter {
         body: Value,
         sensitive: &[runtrell::attachments::ResolvedAttachment],
     ) -> Result<HttpResult> {
+        self.send_at(context, &self.config.endpoint, body, sensitive)
+            .await
+    }
+    pub(crate) async fn send_at(
+        &self,
+        context: &ToolContext,
+        endpoint: &str,
+        body: Value,
+        sensitive: &[runtrell::attachments::ResolvedAttachment],
+    ) -> Result<HttpResult> {
         if context.claim.run != self.config.run {
             return Err(Error::PermissionDenied);
         }
@@ -327,7 +337,7 @@ impl Adapter {
         value.set_sensitive(true);
         let response = self
             .client
-            .post(&self.config.endpoint)
+            .post(endpoint)
             .timeout(timeout)
             .header(header, value)
             .header("content-type", "application/json")
@@ -627,6 +637,20 @@ impl Adapter {
                 u.image_input = n("/usage/input_tokens_details/image_tokens")?;
                 u.image_output = n("/usage/output_tokens_details/image_tokens")?;
                 u.cached_image_input = n("/usage/input_tokens_details/cached_image_tokens")?;
+                for (name, path) in [
+                    (
+                        "text_input_tokens",
+                        "/usage/input_tokens_details/text_tokens",
+                    ),
+                    (
+                        "text_output_tokens",
+                        "/usage/output_tokens_details/text_tokens",
+                    ),
+                ] {
+                    if let Some(count) = n(path)? {
+                        u.quantities.insert(name.into(), count);
+                    }
+                }
             }
             Wire::Chat => {
                 u.input = n("/usage/prompt_tokens")?;

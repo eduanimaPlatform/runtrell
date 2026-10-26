@@ -8,7 +8,12 @@ use runtrell_testkit::{
 use std::sync::Arc;
 
 fn image_config(url: String) -> Config {
-    let mut c = config(url);
+    let mut c = config(if OPENAI {
+        url.replace("/test", "/v1/images/generations")
+    } else {
+        url
+    });
+    c.capabilities.limits.timeout = 30;
     c.capabilities.images = ImageCapabilities {
         input: true,
         generation: true,
@@ -30,9 +35,12 @@ fn image_config(url: String) -> Config {
     c
 }
 fn image_response() -> Value {
+    if OPENAI {
+        return json!({"data":[{"b64_json":STANDARD.encode(png())}],"usage":{"input_tokens":3,"output_tokens":5,"input_tokens_details":{"text_tokens":1,"image_tokens":2},"output_tokens_details":{"image_tokens":5}}});
+    }
     json!({"modelVersion":"host-model","candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"inlineData":{"mimeType":"image/png","data":STANDARD.encode(png())}}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"thoughtsTokenCount":0,"promptTokensDetails":[{"modality":"IMAGE","tokenCount":2}],"candidatesTokensDetails":[{"modality":"IMAGE","tokenCount":5}]}})
 }
-type TestTool = ImageTool<GeminiImages, DataStore, FakePolicy, MemoryStore, TestClock>;
+type TestTool = ImageTool<Images, DataStore, FakePolicy, MemoryStore, TestClock>;
 async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) {
     let store = Arc::new(MemoryStore::default());
     let account = store
@@ -50,7 +58,7 @@ async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) 
         agent: "main".into(),
     });
     let tool = ImageTool {
-        provider: GeminiImages::new(c).unwrap(),
+        provider: Images::new(c).unwrap(),
         resolver: ImageResolver {
             store: DataStore::memory(StoragePolicy::default()),
             policy: FakePolicy::default(),
@@ -134,12 +142,26 @@ async fn generation_reference_edit_wire_usage_and_saved_lookup() {
         let sent = task.await.unwrap();
         assert_eq!(sent.len(), 1);
         let wire: Value = serde_json::from_str(sent[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
-        assert_eq!(
-            wire["generationConfig"]["responseModalities"],
-            json!(["TEXT", "IMAGE"])
-        );
-        assert_eq!(wire["contents"][0]["parts"][0]["text"], "draw");
-        if action == ImageAction::Edit {
+        if OPENAI {
+            let mut expected =
+                json!({"model":"host-model","prompt":"draw","n":1,"output_format":"png"});
+            let path = if action == ImageAction::Edit {
+                expected["images"] = json!([{"image_url":format!("data:image/png;base64,{}",STANDARD.encode(png()))}]);
+                "/v1/images/edits"
+            } else {
+                "/v1/images/generations"
+            };
+            assert_eq!(wire, expected);
+            assert!(sent[0].starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+            assert_eq!(usage.quantities["text_input_tokens"], 1);
+        } else {
+            assert_eq!(
+                wire["generationConfig"]["responseModalities"],
+                json!(["TEXT", "IMAGE"])
+            );
+            assert_eq!(wire["contents"][0]["parts"][0]["text"], "draw");
+        }
+        if !OPENAI && action == ImageAction::Edit {
             assert_eq!(
                 wire["contents"][0]["parts"][1]["inlineData"]["data"],
                 STANDARD.encode(png())
@@ -168,14 +190,19 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
         )
         .await;
         let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
-        let ExternalResult::Failed { code, usage, .. } =
-            tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap()
+        let ExternalResult::Failed {
+            code,
+            usage,
+            retry_after,
+            ..
+        } = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap()
         else {
             panic!("expected failed")
         };
         assert!(code.contains(expected));
         assert!(!code.contains("TEST-KEY"));
         assert_eq!(usage.input, None);
+        assert_eq!(retry_after, Some(1));
         assert_eq!(task.await.unwrap().len(), 1);
     }
     for (field, value) in [
@@ -183,7 +210,15 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
         ("mimeType", json!("image/jpeg")),
     ] {
         let mut body = image_response();
-        body["candidates"][0]["content"]["parts"][0]["inlineData"][field] = value;
+        if OPENAI {
+            if field == "data" {
+                body["data"][0]["b64_json"] = value;
+            } else {
+                body["data"][0]["b64_json"] = json!(STANDARD.encode(b"not a PNG"));
+            }
+        } else {
+            body["candidates"][0]["content"]["parts"][0]["inlineData"][field] = value;
+        }
         let (url, task) = server(200, "", body).await;
         let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
         let ExternalResult::Failed { usage, .. } =
@@ -236,7 +271,35 @@ async fn unsupported_capabilities_limits_and_authorization_send_nothing() {
     );
     let mut c = image_config(url);
     c.capabilities.images.mask_edit = true;
-    assert!(matches!(GeminiImages::new(c), Err(Error::Unsupported(_))));
+    assert!(matches!(Images::new(c), Err(Error::Unsupported(_))));
+    assert!(task.await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn transport_configuration_and_gemini_output_options_are_preflight_errors() {
+    let (url, task) = server(200, "", image_response()).await;
+    let mut cfg = image_config(url.clone());
+    cfg.max_request_bytes = 1;
+    assert!(matches!(Images::new(cfg), Err(Error::Invalid(_))));
+    let mut cfg = image_config(url.clone());
+    cfg.max_response_bytes = 1;
+    assert!(matches!(Images::new(cfg), Err(Error::Invalid(_))));
+    let mut cfg = image_config(url);
+    cfg.image_limits.allowed_mime.push("image/jpeg".into());
+    let (mut tool, ctx) = fixture(cfg, ImageAction::Generate).await;
+    assert!(!format!("{:?}", tool.provider).contains("TEST-KEY"));
+    if !OPENAI {
+        tool.resolver.limits.allowed_mime.push("image/jpeg".into());
+        for options in [
+            json!({"prompt":"draw","size":"auto"}),
+            json!({"prompt":"draw","output_format":"jpeg"}),
+        ] {
+            assert!(matches!(
+                tool.invoke(&ctx, options).await,
+                Err(Error::Unsupported(_))
+            ));
+        }
+    }
     assert!(task.await.unwrap().is_empty());
 }
 
@@ -275,7 +338,7 @@ async fn unsupported_image_input_and_reference_edit_and_revoked_send_are_preflig
     cfg.run = ctx.claim.run.clone();
     cfg.capabilities.images.input = false;
     let model = ImageModel {
-        inner: Gemini::new(cfg).unwrap(),
+        inner: InputModel::new(cfg).unwrap(),
         resolver: ImageResolver {
             store: tool.resolver.store.clone(),
             policy: FakePolicy::default(),
@@ -323,8 +386,12 @@ async fn unsupported_image_input_and_reference_edit_and_revoked_send_are_preflig
 #[tokio::test]
 async fn image_count_byte_and_transport_limits_preserve_paid_usage_or_prevent_send() {
     let mut excessive = image_response();
-    let image = excessive["candidates"][0]["content"]["parts"][0].clone();
-    excessive["candidates"][0]["content"]["parts"] = json!(vec![image; 5]);
+    if OPENAI {
+        excessive["data"] = json!(vec![excessive["data"][0].clone(); 5]);
+    } else {
+        let image = excessive["candidates"][0]["content"]["parts"][0].clone();
+        excessive["candidates"][0]["content"]["parts"] = json!(vec![image; 5]);
+    }
     let (url, task) = server(200, "", excessive).await;
     let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
     let ExternalResult::Failed { usage, .. } =
@@ -470,7 +537,8 @@ async fn model_image_wire<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &st
     let clock = TestClock::default();
     clock.set(now);
     let (url, task) = server(200, "", body).await;
-    let mut cfg = image_config(url);
+    let mut cfg = image_config(url.clone());
+    cfg.endpoint = url;
     cfg.run = handle.clone();
     let rt = Runtime {
         store: store.clone(),
@@ -515,9 +583,7 @@ async fn model_image_wire<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &st
 }
 #[tokio::test]
 async fn normal_driver_delivers_authorized_images_to_provider_wire() {
-    model_image_wire(Gemini::new, "gemini").await;
-    #[cfg(feature = "openai")]
-    model_image_wire(OpenAi::new, "openai").await;
+    model_image_wire(InputModel::new, MODEL_KIND).await;
     #[cfg(feature = "openrouter")]
     model_image_wire(OpenRouter::new, "openrouter").await;
 }
@@ -585,7 +651,7 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
             limits: ImageLimits::default(),
         };
         let tool = |action| ImageTool {
-            provider: GeminiImages::new(cfg.clone()).unwrap(),
+            provider: Images::new(cfg.clone()).unwrap(),
             resolver: resolve(),
             runs: runs.clone(),
             clock: clock.clone(),
@@ -668,6 +734,33 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
     let ops = reopened.list_operations(&handle).await.unwrap();
     assert!(ops.iter().all(|o| o.settled && o.send_count == 1));
     assert_eq!(ops.len(), 5);
+    let artifacts: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match &op.result {
+            Some(ExternalResult::Applied { output, .. })
+                if op.request.kind == OperationKind::Tool =>
+            {
+                Some(output["image_inputs"][0].clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(artifacts.len(), 2);
+    assert_ne!(artifacts[0], artifacts[1]);
+    let view = ops
+        .iter()
+        .find(|op| {
+            op.request.kind == OperationKind::Model
+                && op.request.input["images"]
+                    .as_array()
+                    .is_some_and(|a| a.len() == 1)
+        })
+        .unwrap();
+    assert_eq!(view.request.input["images"][0], artifacts[0]);
+    if OPENAI {
+        assert!(wire[0].starts_with("POST /v1/images/generations HTTP/1.1\r\n"));
+        assert!(wire[1].starts_with("POST /v1/images/edits HTTP/1.1\r\n"));
+    }
     assert_eq!(
         reopened.account(&account).await.unwrap().used,
         Amount::new(28, 28)
