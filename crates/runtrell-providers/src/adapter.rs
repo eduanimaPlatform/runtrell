@@ -804,6 +804,13 @@ macro_rules! adapter {
         }
         #[cfg(feature = $feature)]
         impl ModelPort for $name {
+            fn check_input_attachments(
+                &self,
+                attachments: &[runtrell::attachments::Attachment],
+                images: &[runtrell::images::ImageReference],
+            ) -> Result<()> {
+                self.0.check_input_attachments(attachments, images)
+            }
             fn limits(&self) -> ModelLimits {
                 self.0.config.capabilities.limits.clone()
             }

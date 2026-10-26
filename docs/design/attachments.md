@@ -7,6 +7,19 @@ fixed-version contract for documents; no second storage reference format exists.
 Authorized stored bytes are prepared once with `ImageModel`, before estimation.
 Images selected by `DocumentView` use the existing `image_inputs` path.
 
+Tool attachment references remain in messages and operation receipts for history,
+provenance and recovery. Only tool messages after the last final assistant message
+contribute binary inputs to the next request (initial Run images remain explicit
+host inputs). Selection happens before preparation; estimation and sending share
+the same `PreparedModelRequest`. Compaction retains older references as text,
+without reactivating their binary inputs. Reopen a saved fixed-version attachment
+with the same tool when needed again; original-file acquisition is unnecessary.
+Partial assistant responses from `max_tokens` continuations do not close the tool
+exchange: document and image selection stays unchanged across repeated continuations
+and checkpoint recovery, until a final assistant response closes the exchange.
+Provider count/byte limits on a tool exchange produce repairable tool feedback
+asking for a narrower range, without deleting the saved result or raising limits.
+
 `AttachmentResolver::authorize` checks current trusted Run/operation/destination
 authorization without acquiring content or issuing URLs. `resolve` may perform
 host RPCs and returns transport information for the exact declared target.
@@ -25,12 +38,16 @@ Resolver RPCs
 are distinct from potentially billable provider inference HTTP requests.
 
 `document.view` accepts an authorized attachment and an optional inclusive,
-one-based page range. Without a range it returns the page count only. With a
-range it saves a PDF subset as an Artifact, returning `attachments` for the next
+one-based page range. For PDF, without a range it returns the page count only.
+With a range it saves a PDF subset as an Artifact, returning `attachments` for the next
 model request. It uses lopdf, rejects encrypted/malformed PDFs and out-of-range
-pages, and bounds input/output bytes and selected pages. PNG uses existing image
-validation and `image_inputs`; other formats are rejected. An external resolver
-must supply bytes for this local tool (a URL is not downloaded by Runtrell).
+pages, and bounds input/output bytes and selected pages. The
+[document view transformation](document-view.md) retains visible annotations and
+form appearances/resources while disabling active content; XFA is rejected.
+PNG/JPEG/WebP use existing still-image validation and `image_inputs` (host MIME
+allowlist applies); without a range a whole image is attached, and only range
+1..1 is accepted. An external resolver must supply bytes for this local tool
+(a URL is not downloaded by Runtrell).
 Tool results retain source reference and range as provenance. Access grants and
 Policy govern source access and saved-result retrieval. No business role names
-or OCR-specific execution engine are part of this feature.
+or task-specific execution engine are part of this feature.

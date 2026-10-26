@@ -220,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else if id == "RUN-05" {
                     (
                         "api.rs::ModelPort/Usage; images.rs::ImageModel/ImageTool; images/formats.rs; attachments.rs; runtrell-providers（既定featureなし、openai/gemini/openrouter、OpenAiImages/GeminiImages）",
-                        "providers/tests/http.rs: OpenAI/Gemini別suiteのfake HTTP通常driver画像wire、生成/参照編集。OpenAIは旧wire全field・size/format・PNG/JPEG/WebP保存、実Pg保存応答喪失→独立pool復旧・2画像送信/5精算行・新Artifact/再入力、課金済み不正/上限超過・usage欠落/部分報告/通信断の予約保持。無許可/能力/mask/hash拒否。汎用添付URL/inlineの送信時解決・署名URL更新、サイズ/digest/能力拒否、Debug/trace非出力、実Pg要求/checkpoint非保存・Unknown再開・保存結果再取得で原本解決0、送信前解決失敗の予約精算、DocumentViewのPDFページ選択→添付→送信・Workspace/Artifact固定版。testkit::image_contracts: Memory/Pg共通契約も維持。画像は構造検査のみ、mask・実Provider・業務横断・remote lookup/冪等保証は未対応/未検証。要件全体の状態は昇格しない",
+                        "providers/tests/http.rs: OpenAI/Gemini別suiteのfake HTTP通常driver画像wire、生成/参照編集。OpenAIは旧wire全field・size/format・PNG/JPEG/WebP保存、実Pg保存応答喪失→独立pool復旧・2画像送信/5精算行・新Artifact/再入力、課金済み不正/上限超過・usage欠落/部分報告/通信断の予約保持。無許可/能力/mask/hash拒否。汎用添付URL/inlineの送信時解決・署名URL更新、サイズ/digest/能力拒否、Debug/trace非出力、実Pg要求/checkpoint非保存・Unknown再開・保存結果再取得で原本解決0、送信前解決失敗の予約精算、DocumentViewのPDFページ選択→添付→送信・Workspace/Artifact固定版。添付は直近tool交換だけ、履歴参照は保持。実Pg・子process exit 75→別process/pool/store再開で10ページを2ページずつ標準files.writeへ保存し13要求の実wireを照合、固定版の再参照。件数/bytes超過の修正可能tool feedbackと保存済み結果、再圧縮後の参照保持。PDFのFreeText/Highlight/Ink/Stamp/widget appearance・フォーム資源保持と能動要素除去、JPEG/WebP閲覧→3adapterの実wire一致・不正bytes拒否。testkit::image_contracts: Memory/Pg共通契約も維持。画像は構造検査のみ、mask・実Provider・業務横断・remote lookup/冪等保証は未対応/未検証。要件全体の状態は昇格しない",
                     )
                 } else if id == "REC-08" {
                     (

@@ -18,7 +18,7 @@ pub enum ImageReference {
 }
 pub(crate) fn model_images(run: &RunRecord, messages: &[Message]) -> Result<Vec<ImageReference>> {
     let mut images = run.spec.images.clone();
-    for message in messages.iter().filter(|m| m.role == "tool") {
+    for message in crate::attachments::active_tool_messages(messages) {
         if let Some(value) = message.data.get("image_inputs") {
             let refs: Vec<ImageReference> =
                 serde_json::from_value(value.clone()).map_err(|_| invalid("IMAGE_REFERENCE"))?;
@@ -446,6 +446,13 @@ impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
     }
     fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
         self.inner.input_upper_bound(r)
+    }
+    fn check_input_attachments(
+        &self,
+        attachments: &[crate::attachments::Attachment],
+        images: &[ImageReference],
+    ) -> Result<()> {
+        self.inner.check_input_attachments(attachments, images)
     }
     fn retry_policy(&self) -> RetryPolicy {
         self.inner.retry_policy()

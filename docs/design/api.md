@@ -22,7 +22,7 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 エラーはConflict（digest/版/CAS不一致）、OwnershipLost、Closed、Deadline、BudgetAtLimit、ReservationDenied、UsageUnknown、PermissionDenied、Unsupported、Backpressure、QueueTimeout、NotFound、Invalid、Storage。Storageは成功応答を返さず、I/O前失敗は外部呼出し0、I/O後失敗は元operation照合で回復する。
 
-任意の汎用添付は `ModelRequest.attachments` に固定対象を保存する。外部参照は ID・版・ページ範囲・MIME・bytes・SHA-256、保存済み参照は既存の `ImageReference` の Workspace／Artifact 契約を使う。`ImageModel` は保存済み対象を見積り前に認可・取得し、同じ `PreparedModelRequest` の bytes を送る。外部対象は `attachments::AttachmentResolver` が送信直前に URL／bytes を解決し、版・範囲・metadata の不一致を拒否する。bytes のサイズ・hash は実測、URL の内容保証は resolver の固定版契約であり Runtrell の独立検証ではない。lookup は別の `authorize` だけを呼び、原本取得・URL 発行・推論再送をしない。解決 RPC と Provider 推論 HTTP は別で、送信前の解決失敗は `ATTACHMENT_NOT_SENT`（推論 usage 0）、送信後の応答喪失は Unknown・予約保持。`document_view::DocumentView` は PDF ページ数取得・範囲選択と PNG の既存画像入力を提供し、`ToolSet::document_view` で選択する。詳細は [attachments](attachments.md) と [providers](providers.md#contract) を参照。
+任意の汎用添付は `ModelRequest.attachments` に固定対象を保存する。外部参照は ID・版・ページ範囲・MIME・bytes・SHA-256、保存済み参照は既存の `ImageReference` の Workspace／Artifact 契約を使う。`ImageModel` は保存済み対象を見積り前に認可・取得し、同じ `PreparedModelRequest` の bytes を送る。外部対象は `attachments::AttachmentResolver` が送信直前に URL／bytes を解決し、版・範囲・metadata の不一致を拒否する。bytes のサイズ・hash は実測、URL の内容保証は resolver の固定版契約であり Runtrell の独立検証ではない。lookup は別の `authorize` だけを呼び、原本取得・URL 発行・推論再送をしない。解決 RPC と Provider 推論 HTTP は別で、送信前の解決失敗は `ATTACHMENT_NOT_SENT`（推論 usage 0）、送信後の応答喪失は Unknown・予約保持。`document_view::DocumentView` は PDF ページ数取得・範囲選択と PNG/JPEG/WebP の既存画像入力を提供し、`ToolSet::document_view` で選択する。詳細は [attachments](attachments.md) と [providers](providers.md#contract) を参照。
 
 費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。実際の価格・品質値はhostが供給する。provider形式変換は任意の公開[provider adapter](providers.md)が提供する。詳細は[budget](budget.md)。
 
@@ -222,6 +222,16 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    /// Pure admission check for a tool exchange, without resolving payloads or
+    /// sending inference. Return MODEL_ATTACHMENT_LIMIT for repairable size/count
+    /// failures so the driver can ask the agent to narrow the view.
+    fn check_input_attachments(
+        &self,
+        _attachments: &[crate::attachments::Attachment],
+        _images: &[crate::images::ImageReference],
+    ) -> Result<()> {
+        Ok(())
+    }
     /// A host port may route summary requests to a different configured model.
     /// prepare/invoke/lookup must route by the request's model, including recovery.
     fn compaction_limits(&self) -> ModelLimits {

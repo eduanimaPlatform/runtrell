@@ -892,7 +892,9 @@ impl<
                             });
                         }
                         if !reply.text.is_empty() {
-                            messages.push(Message::text("assistant", reply.text));
+                            let mut partial = Message::text("assistant", reply.text);
+                            partial.data = serde_json::json!({"continuation":true});
+                            messages.push(partial);
                         }
                         let instruction = current.spec.continuation.instruction;
                         messages.push(Message::text("user", &instruction));
@@ -1126,17 +1128,39 @@ impl<
                                 "tool output exceeds declared limit".into(),
                             ));
                         }
-                        messages.push(Message {
+                        let mut candidate_messages = messages.clone();
+                        candidate_messages.push(Message {
                             role: "tool".into(),
                             text: String::new(),
                             call_id: Some(call.id().to_string()),
                             tool: Some(name),
                             data: output.clone(),
                         });
-                        run.answer(
-                            call.answer(ToolResult::success(ToolOutput::text(output.to_string()))),
-                        )
-                        .map_err(|e| Error::Invalid(e.to_string()))?;
+                        let admission = self.model.check_input_attachments(
+                            &crate::attachments::model_attachments(&candidate_messages)?,
+                            &images::model_images(&current, &candidate_messages)?,
+                        );
+                        let (output, answer) = match admission {
+                            Ok(()) => (
+                                output.clone(),
+                                ToolResult::success(ToolOutput::text(output.to_string())),
+                            ),
+                            Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => {
+                                // Preserve the operation's exact result and expose its references
+                                // as text, but do not activate an over-limit binary input.
+                                let feedback = serde_json::json!({"code":code,"repairable":true,"hint":"Open fewer files or a narrower page range with the same tool.","result":output});
+                                let answer = ToolResult::failed(ToolExecutionError::new(
+                                    ToolErrorKind::InvalidArgs,
+                                    feedback.to_string(),
+                                ));
+                                (feedback, answer)
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        candidate_messages.last_mut().ok_or(Error::Conflict)?.data = output;
+                        messages = candidate_messages;
+                        run.answer(call.answer(answer))
+                            .map_err(|e| Error::Invalid(e.to_string()))?;
                         cursor += 1;
                         self.save(c, &run, messages.clone(), cursor, &catalog)
                             .await?;

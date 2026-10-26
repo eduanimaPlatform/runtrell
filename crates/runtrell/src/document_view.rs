@@ -5,6 +5,176 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+// Keep visible annotations and their appearance resources. Form field trees
+// are restricted to widgets on selected pages so discarded pages cannot leak
+// through AcroForm/Kids/Parent references.
+fn selected_form_field(
+    doc: &mut lopdf::Document,
+    field: &lopdf::Object,
+    selected: &std::collections::BTreeSet<lopdf::ObjectId>,
+    depth: usize,
+) -> Result<Option<lopdf::Object>> {
+    if depth > 64 {
+        return Err(Error::Invalid("DOCUMENT_FORM_DEPTH".into()));
+    }
+    let id = field.as_reference().ok();
+    let object = match id {
+        Some(id) => doc.get_object(id),
+        None => Ok(field),
+    }
+    .map_err(|_| Error::Invalid("DOCUMENT_FORM".into()))?;
+    let mut dict = object
+        .as_dict()
+        .map_err(|_| Error::Invalid("DOCUMENT_FORM".into()))?
+        .clone();
+    dict.remove(b"AA");
+    let mut keep = id.is_some_and(|id| selected.contains(&id));
+    if let Ok(kids) = dict.get(b"Kids") {
+        let kids = kids
+            .as_array()
+            .map_err(|_| Error::Invalid("DOCUMENT_FORM".into()))?
+            .clone();
+        let mut retained = Vec::new();
+        for kid in kids {
+            if let Some(kid) = selected_form_field(doc, &kid, selected, depth + 1)? {
+                retained.push(kid);
+            }
+        }
+        keep |= !retained.is_empty();
+        dict.set("Kids", retained);
+    }
+    if !keep {
+        return Ok(None);
+    }
+    if let Some(id) = id {
+        doc.objects.insert(id, dict.into());
+        Ok(Some(field.clone()))
+    } else {
+        Ok(Some(dict.into()))
+    }
+}
+
+fn disable_active_content(object: &mut lopdf::Object) {
+    use lopdf::Object;
+    let dict = match object {
+        Object::Dictionary(dict) => dict,
+        Object::Stream(stream) => &mut stream.dict,
+        Object::Array(items) => {
+            for item in items {
+                disable_active_content(item);
+            }
+            return;
+        }
+        _ => return,
+    };
+    // Active payload objects are discarded too, not only their entry points.
+    if dict
+        .get(b"Type")
+        .and_then(Object::as_name)
+        .is_ok_and(|n| matches!(n, b"Action" | b"EmbeddedFile"))
+        || dict.get(b"S").and_then(Object::as_name).is_ok_and(|n| {
+            matches!(
+                n,
+                b"JavaScript"
+                    | b"URI"
+                    | b"Launch"
+                    | b"GoTo"
+                    | b"GoToR"
+                    | b"GoToE"
+                    | b"SubmitForm"
+                    | b"ResetForm"
+                    | b"ImportData"
+                    | b"Rendition"
+                    | b"Movie"
+                    | b"Sound"
+                    | b"Named"
+                    | b"SetOCGState"
+                    | b"Hide"
+                    | b"Trans"
+                    | b"GoTo3DView"
+            )
+        })
+    {
+        *object = Object::Null;
+        return;
+    }
+    // Resource and appearance-state dictionaries use arbitrary names (including
+    // A/AA/FS). Removing those names indiscriminately would erase visible glyphs,
+    // fonts or selected appearance states. Only semantic PDF dictionaries have
+    // action/file entry points; action payloads themselves were removed above.
+    let semantic = dict
+        .get(b"Type")
+        .and_then(Object::as_name)
+        .is_ok_and(|n| matches!(n, b"Catalog" | b"Page" | b"Pages" | b"Annot" | b"Filespec"))
+        || dict
+            .get(b"Subtype")
+            .and_then(Object::as_name)
+            .is_ok_and(|n| {
+                matches!(
+                    n,
+                    b"Text"
+                        | b"Link"
+                        | b"FreeText"
+                        | b"Line"
+                        | b"Square"
+                        | b"Circle"
+                        | b"Polygon"
+                        | b"PolyLine"
+                        | b"Highlight"
+                        | b"Underline"
+                        | b"Squiggly"
+                        | b"StrikeOut"
+                        | b"Stamp"
+                        | b"Caret"
+                        | b"Ink"
+                        | b"Popup"
+                        | b"FileAttachment"
+                        | b"Sound"
+                        | b"Movie"
+                        | b"Widget"
+                        | b"Screen"
+                        | b"PrinterMark"
+                        | b"TrapNet"
+                        | b"Watermark"
+                        | b"3D"
+                        | b"Redact"
+                        | b"RichMedia"
+                )
+            })
+        || dict
+            .get(b"FT")
+            .and_then(Object::as_name)
+            .is_ok_and(|n| matches!(n, b"Tx" | b"Btn" | b"Ch" | b"Sig"))
+        || dict.get(b"T").and_then(Object::as_str).is_ok()
+        || dict.get(b"Fields").and_then(Object::as_array).is_ok();
+    if semantic {
+        for key in [
+            b"A".as_slice(),
+            b"AA",
+            b"OpenAction",
+            b"JS",
+            b"JavaScript",
+            b"URI",
+            b"Launch",
+            b"Next",
+            b"EF",
+            b"AF",
+            b"FS",
+            b"EmbeddedFiles",
+            b"RichMediaContent",
+            b"RichMediaSettings",
+            b"Movie",
+            b"Sound",
+            b"XFA",
+        ] {
+            dict.remove(key);
+        }
+    }
+    for (_, value) in dict.iter_mut() {
+        disable_active_content(value);
+    }
+}
+
 /// Parses and subsets with lopdf; None only inspects page count.
 pub fn select_pdf(
     bytes: &[u8],
@@ -39,26 +209,95 @@ pub fn select_pdf(
         .filter(|p| *p < range.first || *p > range.last)
         .collect();
     doc.delete_pages(&remove);
-    // Discard document-wide metadata/actions and page annotations. Only the
-    // selected page tree and its rendering resources belong to this view.
+    let selected = doc
+        .get_pages()
+        .values()
+        .filter_map(|id| doc.get_dictionary(*id).ok())
+        .filter_map(|page| page.get(b"Annots").ok())
+        .filter_map(|annots| match annots {
+            lopdf::Object::Reference(id) => doc.get_object(*id).ok(),
+            value => Some(value),
+        })
+        .filter_map(|annots| annots.as_array().ok())
+        .flatten()
+        .filter_map(|annot| annot.as_reference().ok())
+        .collect();
+    let form = doc
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"AcroForm").ok())
+        .cloned();
+    let form = if let Some(form) = form {
+        let form = match &form {
+            lopdf::Object::Reference(id) => doc.get_object(*id),
+            object => Ok(object),
+        }
+        .map_err(|_| Error::Invalid("DOCUMENT_FORM".into()))?;
+        let mut form = form
+            .as_dict()
+            .map_err(|_| Error::Invalid("DOCUMENT_FORM".into()))?
+            .clone();
+        if form.has(b"XFA") {
+            return Err(Error::Unsupported("document_xfa".into()));
+        }
+        // Calculation order can retain fields from excluded pages. Only the
+        // selected field tree and the defaults needed to display it survive.
+        let discard = form
+            .iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| {
+                ![b"Fields".as_slice(), b"DR", b"DA", b"NeedAppearances", b"Q"]
+                    .contains(&k.as_slice())
+            })
+            .collect::<Vec<_>>();
+        for key in discard {
+            form.remove(&key);
+        }
+        let fields = form
+            .get(b"Fields")
+            .and_then(lopdf::Object::as_array)
+            .map_err(|_| Error::Invalid("DOCUMENT_FORM".into()))?
+            .clone();
+        let mut retained = Vec::new();
+        for field in fields {
+            if let Some(field) = selected_form_field(&mut doc, &field, &selected, 0)? {
+                retained.push(field);
+            }
+        }
+        form.set("Fields", retained);
+        Some(form)
+    } else {
+        None
+    };
     doc.trailer.remove(b"Info");
     if let Ok(catalog) = doc.catalog_mut() {
         let keys: Vec<_> = catalog
             .iter()
             .map(|(key, _)| key.clone())
-            .filter(|k| k != b"Type" && k != b"Pages")
+            .filter(|k| k != b"Type" && k != b"Pages" && k != b"OCProperties")
             .collect();
         for key in keys {
             catalog.remove(&key);
         }
+        if let Some(form) = form {
+            catalog.set("AcroForm", form);
+        }
     }
     for id in doc.get_pages().values() {
         if let Ok(page) = doc.get_dictionary_mut(*id) {
-            page.remove(b"Annots");
             page.remove(b"AA");
             page.remove(b"Metadata");
         }
     }
+    for object in doc.objects.values_mut() {
+        disable_active_content(object);
+    }
+    let mut trailer = lopdf::Object::Dictionary(std::mem::take(&mut doc.trailer));
+    disable_active_content(&mut trailer);
+    doc.trailer = trailer
+        .as_dict()
+        .map_err(|_| Error::Invalid("DOCUMENT_PDF".into()))?
+        .clone();
     doc.prune_objects();
     let mut output = Vec::new();
     doc.save_to(&mut output)
@@ -114,7 +353,10 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> DocumentView<S, P, 
         {
             return Err(Error::Invalid("DOCUMENT_BYTES_LIMIT".into()));
         }
-        if !matches!(target.mime_type.as_str(), "application/pdf" | "image/png") {
+        if !matches!(
+            target.mime_type.as_str(),
+            "application/pdf" | "image/png" | "image/jpeg" | "image/webp"
+        ) {
             return Err(Error::Unsupported("document_view_mime".into()));
         }
         input.attachment.validate()?;
@@ -217,7 +459,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
         ToolDescriptor {
             name: "document.view".into(),
             version: format!(
-                "document-view-1:{}",
+                "document-view-2:{}",
                 digest(&json!([
                     self.limits,
                     self.output_access.namespace(),
@@ -227,7 +469,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
             account: "documents".into(),
             permission: "document.view".into(),
             capability:
-                "Inspect page count or attach selected PDF pages / PNG to the next model input"
+                "Inspect PDF page count or attach selected PDF pages / PNG / JPEG / WebP to the next model input"
                     .into(),
             input_schema: json!({"type":"object","properties":{"attachment":{"type":"object"},"pages":{"type":["object","null"],"properties":{"first":{"type":"integer","minimum":1},"last":{"type":"integer","minimum":1}},"required":["first","last"],"additionalProperties":false}},"required":["attachment"],"additionalProperties":false}),
             output_schema: json!({"type":"object"}),
@@ -332,7 +574,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
             {
                 return Err(Error::Invalid("DOCUMENT_PAGE_RANGE".into()));
             }
-            (1, parsed.pages.as_ref().map(|_| bytes))
+            (1, Some(bytes))
         };
         let mut output = json!({"page_count":count,"source":parsed});
         let binding = self.binding(c, &input);
@@ -361,7 +603,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
                     .save(&self.output_access, staged, self.clock.now())
                     .await?,
             );
-            if target.mime_type == "image/png" {
+            if target.mime_type.starts_with("image/") {
                 output["image_inputs"] = json!([reference]);
             } else {
                 output["attachments"] = json!([Attachment::Stored(reference)]);

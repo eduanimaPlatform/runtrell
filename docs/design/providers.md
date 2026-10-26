@@ -64,7 +64,12 @@ before reservation. No request options permit late document attachment.
 The host also validates the actual file format and PDF page count against its
 model/token ceiling. These document limits do not use the ordinary (PNG by default)
 Workspace image inspection limits. `DocumentView` supports bounded PDF page
-selection and PNG via existing image input; see [attachments](attachments.md).
+selection and PNG/JPEG/WebP via existing image input; see [attachments](attachments.md).
+All three model adapters accept host-enabled JPEG/WebP through ordinary image
+input. OpenRouter rejects the separate document attachment path before sending.
+`ModelPort::check_input_attachments` checks tool-exchange count/byte limits
+without resolving data; the driver returns repairable feedback for an oversized
+tool result, preserving its complete operation receipt and textual references.
 Provider echoes of a resolved URL, full UTF-8 payload
 or Base64 payload are redacted before saving reply/continuation metadata; this
 does not replace the host's authorization and source-access policy.

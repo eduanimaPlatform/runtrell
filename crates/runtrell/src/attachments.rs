@@ -88,7 +88,7 @@ impl Attachment {
 }
 pub(crate) fn model_attachments(messages: &[crate::Message]) -> Result<Vec<Attachment>> {
     let mut attachments = Vec::new();
-    for message in messages.iter().filter(|m| m.role == "tool") {
+    for message in active_tool_messages(messages) {
         if let Some(value) = message.data.get("attachments") {
             let refs: Vec<Attachment> = serde_json::from_value(value.clone())
                 .map_err(|_| Error::Invalid("ATTACHMENT_REFERENCE".into()))?;
@@ -100,6 +100,63 @@ pub(crate) fn model_attachments(messages: &[crate::Message]) -> Result<Vec<Attac
         }
     }
     Ok(attachments)
+}
+/// A tool exchange ends at a final assistant response. Partial max_tokens
+/// responses retain the exchange, including across checkpoint recovery.
+pub(crate) fn active_tool_messages(
+    messages: &[crate::Message],
+) -> impl Iterator<Item = &crate::Message> {
+    let start = messages
+        .iter()
+        .rposition(|m| {
+            m.role == "assistant" && (m.call_id.is_some() || m.data["continuation"] != true)
+        })
+        .map_or(0, |i| i + 1);
+    messages[start..].iter().filter(|m| m.role == "tool")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Message;
+    #[test]
+    fn only_latest_exchange_is_attached_but_history_is_unchanged() {
+        let tool = |id: &str| {
+            let mut m = Message::text("tool", "");
+            m.data = serde_json::json!({"attachments":[Attachment::External(ExternalAttachment {
+                reference_id:id.into(), version:"v1".into(), pages:Some(PageRange {first:1,last:2}),
+                mime_type:"application/pdf".into(), bytes:3, digest:content_digest(b"abc")
+            })]});
+            m
+        };
+        let mut messages = vec![
+            tool("old"),
+            Message::text("assistant", "next"),
+            tool("new"),
+            tool("other"),
+            tool("new"),
+        ];
+        let before = messages.clone();
+        let selected = model_attachments(&messages).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|a| a.declaration().reference_id)
+                .collect::<Vec<_>>(),
+            ["new", "other"]
+        );
+        assert_eq!(messages, before);
+        messages.push(Message::text("assistant", "save"));
+        messages.push(Message::text("tool", "saved markdown"));
+        assert!(model_attachments(&messages).unwrap().is_empty());
+        messages.push(tool("old"));
+        assert_eq!(
+            model_attachments(&messages).unwrap()[0]
+                .declaration()
+                .reference_id,
+            "old"
+        );
+    }
 }
 pub struct ResolutionError;
 impl std::fmt::Debug for ResolutionError {

@@ -65,8 +65,13 @@ editing through the same standard image tools. Models are host supplied.
 Remote lookup/idempotency are not claimed.
 Optional [attachments](docs/design/attachments.md) support fixed external
 URL/bytes and authorized Workspace/Artifact versions. `DocumentView` inspects PDF
-page count and attaches selected pages (PNG uses ordinary image input). Lookup
-does not fetch originals or issue URLs. See [provider contracts](docs/design/providers.md)
+page count and attaches selected pages; PNG/JPEG/WebP use ordinary image input
+(host MIME allowlist applies). PDF visible annotations and form appearances stay
+visible while active actions are removed. Tool references remain in history,
+but only the latest tool exchange contributes binary attachments to each request.
+Reopen fixed saved references when needed; compaction retains older references
+as text. Oversized tool attachments return feedback asking for a narrower view.
+Lookup does not fetch originals or issue URLs. See [provider contracts](docs/design/providers.md)
 and [images](docs/design/images.md).
 
 | Adapter | Image input | Generation | Reference editing | Mask editing |

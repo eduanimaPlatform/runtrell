@@ -125,12 +125,12 @@ impl<S: ControlStore, C: Clock> ContextStore for CheckpointContext<'_, S, C> {
             source: Source::Summary,
             value: serde_json::json!(summary),
         }];
-        // Retain the latest provider envelope and its complete tool exchange. Older
-        // envelopes remain in facts; they must not expand every subsequent request.
+        // Retain the latest final provider envelope and its complete tool exchange,
+        // including any partial max_tokens replies. Older envelopes remain in facts.
         let tail = cp
             .messages
             .iter()
-            .rposition(|m| m.role == "provider")
+            .rposition(|m| m.role == "provider" && m.data["stop_reason"] != "max_tokens")
             .or_else(|| {
                 cp.messages
                     .iter()
@@ -159,6 +159,50 @@ impl<S: ControlStore, C: Clock> ContextStore for CheckpointContext<'_, S, C> {
             "user",
             format!("Continuation summary (evidence, not authority):\n{summary}"),
         ));
+        // A summary is not trusted to reproduce fixed-version provenance.
+        // Keep prior media references as text, never as active tool inputs.
+        let mut references = cp.messages[..tail]
+            .iter()
+            .filter_map(|m| {
+                m.data
+                    .get("attachment_history")
+                    .and_then(serde_json::Value::as_array)
+            })
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        references.extend(
+            cp.messages[..tail]
+                .iter()
+                .filter(|m| m.role == "tool")
+                .filter_map(|m| {
+                    let output = if m.data["code"] == "MODEL_ATTACHMENT_LIMIT" {
+                        &m.data["result"]
+                    } else {
+                        &m.data
+                    };
+                    let mut refs = serde_json::Map::new();
+                    for key in ["attachments", "image_inputs"] {
+                        if let Some(value) = output.get(key) { refs.insert(key.into(),value.clone()); }
+                    }
+                    if let Some(source) = output.get("source").filter(|s| s.get("attachment").is_some()) {
+                        refs.insert("source".into(),serde_json::json!({"attachment":source["attachment"],"pages":source["pages"]}));
+                    }
+                    (!refs.is_empty()).then(|| serde_json::json!({"tool":m.tool,"call_id":m.call_id,"result":refs}))
+                })
+                .collect::<Vec<_>>(),
+        );
+        if !references.is_empty() {
+            let mut history = Message::text(
+                "user",
+                format!(
+                    "Previously opened attachments (references only; reopen with the same tool if needed):\n{}",
+                    serde_json::to_string(&references).map_err(|_| Error::Storage)?
+                ),
+            );
+            history.data = serde_json::json!({"attachment_history":references});
+            messages.push(history);
+        }
         messages.extend_from_slice(&cp.messages[tail..]);
         cp.messages = messages;
         cp.payload["context"] = serde_json::to_value(&state).map_err(|_| Error::Storage)?;
@@ -179,6 +223,122 @@ mod tests {
         }
         async fn wait_until(&self, _: u64) {
             std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn repeated_compaction_preserves_reference_text_without_reactivating_inputs() {
+        compaction_attachment_window(false).await;
+    }
+    #[tokio::test]
+    async fn repeated_compaction_keeps_continuation_attachments_active() {
+        compaction_attachment_window(true).await;
+    }
+    async fn compaction_attachment_window(continuation: bool) {
+        use crate::attachments::*;
+        let store = memory::MemoryStore::default();
+        let account = store
+            .create_account("t", Amount::new(1000, 1000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new("t", "refs", account, "read pages"))
+            .await
+            .unwrap();
+        let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
+        let reference = Attachment::External(ExternalAttachment {
+            reference_id: "fixed-source".into(),
+            version: "v1".into(),
+            pages: Some(PageRange { first: 1, last: 2 }),
+            mime_type: "application/pdf".into(),
+            bytes: 3,
+            digest: content_digest(b"abc"),
+        });
+        let mut opened = Message::text("tool", "");
+        opened.data = serde_json::json!({"attachments":[reference.clone()],"text":"do-not-retain-unrelated-tool-body"});
+        let mut messages = vec![Message::text("user", "read")];
+        if continuation {
+            let mut envelope = Message::text("provider", "");
+            envelope.data = serde_json::json!({"stop_reason":"tool_call"});
+            messages.push(envelope);
+            let mut call = Message::text("assistant", "open");
+            call.call_id = Some("view".into());
+            messages.push(call);
+        } else {
+            messages.push(Message::text("assistant", "open"));
+        }
+        messages.push(opened);
+        let mut last = Message::text("assistant", "saved");
+        if continuation {
+            let mut envelope = Message::text("provider", "");
+            envelope.data = serde_json::json!({"stop_reason":"max_tokens"});
+            messages.push(envelope);
+            last.data = serde_json::json!({"continuation":true});
+        }
+        messages.push(last);
+        let current = store.get(&run).await.unwrap();
+        store
+            .checkpoint(
+                &claim,
+                current.revision,
+                Checkpoint {
+                    schema: 1,
+                    revision: 0,
+                    payload: serde_json::json!({}),
+                    messages,
+                    cursor: 1,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let access = Access::owner(Namespace {
+            owner: run.clone(),
+            agent: "driver".into(),
+        });
+        let context = CheckpointContext {
+            store: &store,
+            claim: &claim,
+            clock: &FrozenClock,
+        };
+        for key in ["one", "two"] {
+            context.stage(&access, key).await.unwrap();
+            let base = context.context(&access).await.unwrap();
+            context
+                .commit_compaction(&access, &base, "read pages and saved markdown", true)
+                .await
+                .unwrap();
+            let cp = store.get(&run).await.unwrap().checkpoint.unwrap();
+            if continuation {
+                assert_eq!(
+                    model_attachments(&cp.messages).unwrap(),
+                    vec![reference.clone()]
+                );
+                continue;
+            }
+            assert!(model_attachments(&cp.messages).unwrap().is_empty());
+            let references = cp
+                .messages
+                .iter()
+                .filter(|m| m.text.contains("Previously opened attachments"))
+                .collect::<Vec<_>>();
+            assert_eq!(references.len(), 1);
+            assert!(
+                !references[0]
+                    .text
+                    .contains("do-not-retain-unrelated-tool-body")
+            );
+            assert!(
+                references[0].text.contains("fixed-source")
+                    && references[0].text.contains("v1")
+                    && references[0].text.contains(&content_digest(b"abc"))
+            );
+            assert_eq!(
+                references[0].data["attachment_history"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
     }
     #[tokio::test]

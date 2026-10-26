@@ -795,6 +795,16 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    /// Pure admission check for a tool exchange, without resolving payloads or
+    /// sending inference. Return MODEL_ATTACHMENT_LIMIT for repairable size/count
+    /// failures so the driver can ask the agent to narrow the view.
+    fn check_input_attachments(
+        &self,
+        _attachments: &[crate::attachments::Attachment],
+        _images: &[crate::images::ImageReference],
+    ) -> Result<()> {
+        Ok(())
+    }
     /// A host port may route summary requests to a different configured model.
     /// prepare/invoke/lookup must route by the request's model, including recovery.
     fn compaction_limits(&self) -> ModelLimits {

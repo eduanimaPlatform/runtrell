@@ -25,8 +25,15 @@ mod openai_image_contracts {
     include!("support/images.rs");
     include!("support/openai_images.rs");
 }
+#[cfg(feature = "gemini")]
+#[path = "support/attachment_window.rs"]
+mod attachment_window;
 #[path = "support/documents.rs"]
 mod document_contracts;
+#[path = "support/still_images.rs"]
+mod still_images;
+#[path = "support/view_images.rs"]
+mod view_images;
 
 async fn server(
     status: u16,

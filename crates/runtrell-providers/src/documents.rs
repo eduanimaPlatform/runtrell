@@ -13,6 +13,42 @@ fn invalid() -> Error {
     Error::Invalid("ATTACHMENT".into())
 }
 impl Adapter {
+    pub(crate) fn check_input_attachments(
+        &self,
+        attachments: &[Attachment],
+        images: &[runtrell::images::ImageReference],
+    ) -> Result<()> {
+        let limit = || Error::Invalid("MODEL_ATTACHMENT_LIMIT".into());
+        let total = attachments.iter().try_fold(0u64, |n, a| {
+            n.checked_add(a.declaration().bytes).ok_or_else(limit)
+        })?;
+        if attachments.len() > self.config.document_limits.max_inputs
+            || total > self.config.document_limits.max_total_bytes
+            || images.len() > self.config.image_limits.max_images
+            || images
+                .iter()
+                .any(|i| i.bytes() > self.config.image_limits.max_image_bytes as u64)
+        {
+            return Err(limit());
+        }
+        for attachment in attachments {
+            self.document_transports(&attachment.declaration())?;
+        }
+        if !images.is_empty() && !self.config.capabilities.images.input {
+            return Err(Error::Unsupported("image_input".into()));
+        }
+        if images.iter().any(|i| {
+            !self
+                .config
+                .image_limits
+                .allowed_mime
+                .iter()
+                .any(|mime| mime == i.mime())
+        }) {
+            return Err(Error::Unsupported("image_input_mime".into()));
+        }
+        Ok(())
+    }
     fn document_transports(&self, input: &ExternalAttachment) -> Result<&DocumentTransports> {
         input.validate()?;
         if self.wire == Wire::Chat {

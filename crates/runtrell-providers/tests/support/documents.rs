@@ -740,7 +740,9 @@ fn pdf() -> Vec<u8> {
 }
 
 #[cfg(feature = "gemini")]
-async fn sequence_server(bodies: Vec<Value>) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
+pub(super) async fn sequence_server(
+    bodies: Vec<Value>,
+) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/test", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {

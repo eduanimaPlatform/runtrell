@@ -406,7 +406,7 @@ pub async fn workflow_reopened<S: ControlStore + 'static>(
         let captures = model.captures.lock().unwrap();
         assert_eq!(captures[0], vec![content_digest(&png()); 2]);
         assert_eq!(captures[1], vec![content_digest(&png()); 3]);
-        assert_eq!(captures[2], vec![content_digest(&png()); 4]);
+        assert_eq!(captures[2], vec![content_digest(&png()); 3]);
     }
     let raw = serde_json::to_string(&ops).unwrap();
     assert!(!raw.contains(&STANDARD.encode(png())));
