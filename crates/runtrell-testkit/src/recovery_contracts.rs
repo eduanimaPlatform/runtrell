@@ -123,6 +123,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         finalizer: Arc::new(crate::DecisionFinalizer),
     };
     let request = ModelRequest {
+        sensitive_inputs: vec![],
         model: "fake".into(),
         messages: vec![],
         tools: vec![],
@@ -367,6 +368,7 @@ impl Tool for PreparedJob {
             .lookup(
                 c,
                 PreparedModelRequest::text(ModelRequest {
+                    sensitive_inputs: vec![],
                     model: "fake".into(),
                     messages: vec![],
                     tools: vec![],

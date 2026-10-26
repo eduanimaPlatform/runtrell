@@ -12,6 +12,8 @@ use tokio::{
 mod image_contracts {
     include!("support/images.rs");
 }
+#[path = "support/documents.rs"]
+mod document_contracts;
 
 async fn server(
     status: u16,
@@ -100,6 +102,7 @@ fn config(endpoint: String) -> Config {
                 input: true,
                 ..Default::default()
             },
+            documents: DocumentCapabilities::default(),
             counters: CounterSupport {
                 input: true,
                 cached: true,
@@ -119,6 +122,8 @@ fn config(endpoint: String) -> Config {
         max_request_bytes: 65536,
         max_response_bytes: 65536,
         image_limits: ImageLimits::default(),
+        document_limits: DocumentLimits::default(),
+        sensitive_input_resolver: None,
     }
 }
 fn context() -> ToolContext {
@@ -140,6 +145,7 @@ fn context() -> ToolContext {
 }
 fn request() -> ModelRequest {
     ModelRequest {
+        sensitive_inputs: vec![],
         model: "host-model".into(),
         messages: vec![Message::text("user", "hello")],
         tools: vec![],

@@ -219,8 +219,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 } else if id == "RUN-05" {
                     (
-                        "api.rs::ModelPort/Usage; images.rs::ImageModel/ImageTool; runtrell-providers（既定featureなし、openai/gemini/openrouter、GeminiImages）",
-                        "providers/tests/http.rs: fake HTTP通常driver画像wire、生成/参照編集、usage/エラー/redirect/上限/認可。testkit::image_contracts: Memory/Pg通常loop生成→保存→再入力→編集、保存結果復旧・1送信/精算額・課金済み不正画像・usage不足。PNG構造検査のみ、mask・実Provider・remote lookup/冪等保証は未対応/未検証。要件全体の状態は昇格しない",
+                        "api.rs::ModelPort/Usage; images.rs::ImageModel/ImageTool; sensitive_inputs.rs; runtrell-providers（既定featureなし、openai/gemini/openrouter、GeminiImages）",
+                        "providers/tests/http.rs: fake HTTP通常driver画像wire、生成/参照編集、文書URL/inlineの送信時解決、サイズ/digest/能力拒否、Debug/trace非出力、実Pg要求/checkpoint非保存・Unknown再開時の再解決。testkit::image_contracts: Memory/Pg通常loop生成→保存→再入力→編集、保存結果復旧・1送信/精算額・課金済み不正画像・usage不足。PNG構造検査のみ、mask・実Provider・remote lookup/冪等保証は未対応/未検証。要件全体の状態は昇格しない",
                     )
                 } else if id == "REC-08" {
                     (

@@ -730,6 +730,7 @@ impl<
                             messages = cp.messages.clone();
                         }
                         let req = ModelRequest {
+                            sensitive_inputs: vec![],
                             model: self.model.limits().model,
                             messages: messages.clone(),
                             tools: descriptors.clone(),
@@ -1291,6 +1292,7 @@ impl<
         let base = data.context(access).await?;
         let limits = self.model.compaction_limits();
         let request = ModelRequest {
+            sensitive_inputs: vec![],
             model: limits.model.clone(),
             messages: vec![
                 Message::text(

@@ -719,6 +719,7 @@ pub struct ModelRequest {
     pub max_output: u64,
     pub metadata: Value,
     pub images: Vec<crate::images::ImageReference>,
+    pub sensitive_inputs: Vec<crate::sensitive_inputs::SensitiveInput>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {

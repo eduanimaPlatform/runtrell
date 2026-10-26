@@ -2,9 +2,11 @@
 #![forbid(unsafe_code)]
 //! Optional, single-send ModelPort implementations. See docs/design/providers.md.
 pub use runtrell::images::ImageLimits;
+use runtrell::sensitive_inputs::SensitiveInputResolver;
 use runtrell::{ModelLimits, RunHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Kept out of Debug, Display and all adapter error messages.
 #[derive(Clone)]
@@ -38,6 +40,7 @@ pub struct Capabilities {
     pub tool_calling: bool,
     pub parallel_tool_calls: bool,
     pub images: ImageCapabilities,
+    pub documents: DocumentCapabilities,
     pub counters: CounterSupport,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +49,29 @@ pub struct ImageCapabilities {
     pub generation: bool,
     pub reference_edit: bool,
     pub mask_edit: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentTransports {
+    pub url: bool,
+    pub inline_bytes: bool,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentCapabilities {
+    pub pdf: DocumentTransports,
+    pub image: DocumentTransports,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentLimits {
+    pub max_inputs: usize,
+    pub max_total_bytes: u64,
+}
+impl Default for DocumentLimits {
+    fn default() -> Self {
+        Self {
+            max_inputs: 4,
+            max_total_bytes: 8 * 1024 * 1024,
+        }
+    }
 }
 /// Counter relationships are runtime Usage invariants, independent of the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +114,8 @@ pub struct Config {
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     pub image_limits: ImageLimits,
+    pub document_limits: DocumentLimits,
+    pub sensitive_input_resolver: Option<Arc<dyn SensitiveInputResolver>>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,6 +157,8 @@ pub struct Failure {
 
 #[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 mod adapter;
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
+mod documents;
 #[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 pub use adapter::*;
 #[cfg(feature = "gemini")]

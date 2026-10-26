@@ -289,6 +289,7 @@ async fn unsupported_image_input_and_reference_edit_and_revoked_send_are_preflig
         .prepare_request(
             &run,
             ModelRequest {
+                sensitive_inputs: vec![],
                 model: "host-model".into(),
                 messages: vec![Message::text("user", "inspect")],
                 tools: vec![],

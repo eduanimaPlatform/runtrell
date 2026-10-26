@@ -24,5 +24,6 @@ pub use budget::{AccountPolicy, ReservationPolicy, SchedulingPolicy};
 pub mod assembly;
 
 pub mod images;
+pub mod sensitive_inputs;
 pub mod standard_tools;
 pub use images::PreparedModelRequest;

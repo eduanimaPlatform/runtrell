@@ -89,7 +89,7 @@ impl ImagePort for GeminiImages {
         request: PreparedImageRequest,
     ) -> Result<ImageResponse> {
         let body = self.body(&request)?;
-        let parsed = match self.0.send(context, body).await? {
+        let parsed = match self.0.send(context, body, &[]).await? {
             HttpResult::Json(parsed) => parsed,
             HttpResult::Failure(ExternalResult::Failed { code, usage, .. }) => {
                 return Ok(ImageResponse::Received {

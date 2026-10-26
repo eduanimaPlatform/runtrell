@@ -15,7 +15,7 @@ pub(crate) enum Wire {
 pub(crate) struct Adapter {
     pub(crate) config: Config,
     client: Client,
-    wire: Wire,
+    pub(crate) wire: Wire,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,6 +107,7 @@ impl Adapter {
         if *run != self.config.run {
             return Err(Error::PermissionDenied);
         }
+        self.document_bound(request)?;
         let c = &self.config.capabilities;
         let l = &c.limits;
         if request.model != l.model
@@ -267,8 +268,11 @@ impl Adapter {
         context: &ToolContext,
         request: PreparedModelRequest,
     ) -> Result<ExternalResult> {
-        let body = self.body(&context.claim.run, &request)?;
-        match self.send(context, body).await? {
+        let mut body = self.body(&context.claim.run, &request)?;
+        self.check_document_wire_bound(&request, &body)?;
+        let resolved = self.resolve_documents(context, &request).await?;
+        self.attach_documents(&mut body, &request, &resolved);
+        match self.send(context, body, &resolved).await? {
             HttpResult::Json(parsed) => Ok(self
                 .reply(&parsed, &request)
                 .unwrap_or(ExternalResult::Unknown)),
@@ -276,7 +280,12 @@ impl Adapter {
             HttpResult::Unknown => Ok(ExternalResult::Unknown),
         }
     }
-    pub(crate) async fn send(&self, context: &ToolContext, body: Value) -> Result<HttpResult> {
+    pub(crate) async fn send(
+        &self,
+        context: &ToolContext,
+        body: Value,
+        sensitive: &[runtrell::sensitive_inputs::ResolvedSensitiveInput],
+    ) -> Result<HttpResult> {
         if context.claim.run != self.config.run {
             return Err(Error::PermissionDenied);
         }
@@ -335,11 +344,12 @@ impl Adapter {
                 _ => return Ok(HttpResult::Unknown),
             }
         }
-        let parsed: Value = match serde_json::from_slice(&bytes) {
+        let mut parsed: Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(_) if !(200..300).contains(&status) => Value::Null,
             Err(_) => return Ok(HttpResult::Unknown),
         };
+        crate::documents::redact_echoes(&mut parsed, sensitive);
         if !(200..300).contains(&status) || !parsed["error"].is_null() {
             let effective_status = parsed["error"]["code"]
                 .as_u64()
@@ -774,11 +784,7 @@ macro_rules! adapter {
                         .clone()
                         .with_max_output(request.max_output.max(ceiling)),
                 )?;
-                if serde_json::to_vec(&body).map_err(|_| invalid())?.len()
-                    > self.0.config.max_request_bytes
-                {
-                    return Err(invalid());
-                }
+                self.0.check_document_wire_bound(request, &body)?;
                 Ok(self.0.config.input_token_upper_bound)
             }
             fn retry_policy(&self) -> RetryPolicy {
@@ -800,7 +806,9 @@ macro_rules! adapter {
                 context: &ToolContext,
                 request: PreparedModelRequest,
             ) -> Result<Lookup> {
-                self.0.body(&context.claim.run, &request)?;
+                let body = self.0.body(&context.claim.run, &request)?;
+                self.0.check_document_wire_bound(&request, &body)?;
+                self.0.resolve_documents(context, &request).await?;
                 Ok(Lookup::Unknown)
             }
         }

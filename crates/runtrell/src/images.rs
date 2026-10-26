@@ -250,6 +250,9 @@ impl PreparedModelRequest {
         if !request.images.is_empty() {
             return Err(Error::Unsupported("image_input".into()));
         }
+        for input in &request.sensitive_inputs {
+            input.validate()?;
+        }
         Ok(Self {
             request,
             images: vec![],
@@ -257,6 +260,9 @@ impl PreparedModelRequest {
     }
     pub fn request(&self) -> &ModelRequest {
         &self.request
+    }
+    pub fn sensitive_inputs(&self) -> &[crate::sensitive_inputs::SensitiveInput] {
+        &self.request.sensitive_inputs
     }
     pub fn resolved_images(&self) -> &[ResolvedImage] {
         &self.images
@@ -382,6 +388,9 @@ impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
         run: &RunRecord,
         request: ModelRequest,
     ) -> Result<PreparedModelRequest> {
+        for input in &request.sensitive_inputs {
+            input.validate()?;
+        }
         let images = self.resolver.resolve(run, &request.images).await?;
         Ok(PreparedModelRequest { request, images })
     }
