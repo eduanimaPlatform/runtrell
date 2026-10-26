@@ -189,7 +189,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "RES-01", "RES-02", "RES-03", "PAR-03", "PAR-05", "U09", "A06",
                 ]
                 .contains(&id.as_str());
-                let design = if id == "REC-08" {
+                let design = if id == "RUN-05" {
+                    "[providers](providers.md), [budget](budget.md), [api](api.md)"
+                } else if id == "REC-08" {
                     "[postgres](postgres.md#host-owned-transaction), [api](api.md), [execution-boundary](execution-boundary.md)"
                 } else if budget_scope {
                     "[budget](budget.md), [concurrency](concurrency.md), [api](api.md)"
@@ -212,6 +214,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (
                         "execution/{controller,linux}.rs; postgres/src/execution.rs; runtrell-exec-limit",
                         "事前ResourcePlan・専用subtree・tmpfs source・boot/mount namespace・inode照合。precreation_intent_is_discoverable_without_resource_identities、precreation_recovery_confirms_absence_and_reclaims_idempotently、mount_provenance_rejects_foreign_source_type_and_stacked_mountsはmacOS成功。linux_acquisition_crash_after_cgroup / after_mount / before_identity_recordはCI必須・Linux未実行。Memory/Pg台帳と予約/精算の既存契約を維持。末尾rt-4b参照",
+                    )
+                } else if id == "RUN-05" {
+                    (
+                        "api.rs::ModelPort/Usage; runtrell-providers（既定featureなし、openai/gemini/openrouter）",
+                        "providers/tests/http.rs: fake HTTP wire/header・内数/未報告/部分usage・停止理由/不完全tool非実行・認証/要求/rate/支出/不明・Retry-After・1送信/redirect拒否・切断Unknown・Debug伏字・Run/session束縛。実Provider・画像生成・lookup/冪等保証は未提供/未検証。要件全体の状態は昇格しない",
                     )
                 } else if id == "REC-08" {
                     (

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/runtrell-protocol", "crates/runtrell", "crates/runtrell-testkit", "crates/xtask", "crates/runtrell-postgres"]
+members = ["crates/runtrell-protocol", "crates/runtrell", "crates/runtrell-testkit", "crates/xtask", "crates/runtrell-postgres", "crates/runtrell-providers"]
 resolver = "3"
 
 [workspace.package]

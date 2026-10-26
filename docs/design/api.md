@@ -22,7 +22,7 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 エラーはConflict（digest/版/CAS不一致）、OwnershipLost、Closed、Deadline、BudgetAtLimit、ReservationDenied、UsageUnknown、PermissionDenied、Unsupported、Backpressure、QueueTimeout、NotFound、Invalid、Storage。Storageは成功応答を返さず、I/O前失敗は外部呼出し0、I/O後失敗は元operation照合で回復する。
 
-費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。実際の価格・品質値・provider形式変換はhostが供給する。詳細は[budget](budget.md)。
+費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。実際の価格・品質値はhostが供給する。provider形式変換は任意の公開[provider adapter](providers.md)が提供する。詳細は[budget](budget.md)。
 
 ## 任意の標準構成（rt-3c）
 

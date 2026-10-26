@@ -34,7 +34,7 @@ jobs:
           - feature: default
             args: ''
           - feature: python
-            args: --features runtrell/python,runtrell-testkit/python
+            args: --features runtrell/python,runtrell-testkit/python,runtrell-providers/openai,runtrell-providers/gemini,runtrell-providers/openrouter
     services:
       postgres:
         image: postgres:18
@@ -69,6 +69,12 @@ jobs:
         run: cargo clippy --workspace --locked --all-targets ${{ matrix.args }} -- -D warnings
       - name: Build
         run: cargo build --workspace --locked ${{ matrix.args }}
+      - name: Independent provider features
+        if: matrix.feature == 'python'
+        run: |
+          for feature in openai gemini openrouter; do
+            cargo check -p runtrell-providers --locked --no-default-features --features "$feature"
+          done
       - name: Unit, integration and doctests
         run: cargo test --workspace --locked ${{ matrix.args }}
       - name: Public examples

@@ -1,0 +1,23 @@
+[package]
+name = "runtrell-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "Optional provider adapters for the Runtrell agent runtime"
+
+[features]
+default = []
+openai = ["dep:reqwest", "dep:httpdate"]
+gemini = ["dep:reqwest", "dep:httpdate"]
+openrouter = ["dep:reqwest", "dep:httpdate"]
+
+[dependencies]
+runtrell = { path = "../runtrell", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
+httpdate = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

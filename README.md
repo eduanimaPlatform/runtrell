@@ -39,6 +39,21 @@ Hosts execute their own SQL in the same transaction and own commit/rollback.
 Success from these methods means staged writes; only the outer commit makes them
 durable. A failed call rolls back its savepoint. See [transaction scope](docs/design/postgres.md#host-owned-transaction).
 
+## Optional provider adapters
+
+`runtrell-providers` implements `ModelPort` with opt-in `openai` (Responses),
+`gemini` (Developer API generateContent), and `openrouter` (chat completions)
+features. The crate has no default features. Hosts supply endpoint, credentials,
+model limits/capabilities, prices and Run/session binding; adapters perform one
+bounded HTTP send without automatic retry or redirect. Usage preserves missing
+counters and subset relationships. Saved continuation state is checked against
+the owning Run/session before sending. Lookup/idempotency and image generation
+are not provided. See [provider contracts and options](docs/design/providers.md).
+
+```sh
+cargo test -p runtrell-providers --locked --features openai,gemini,openrouter
+```
+
 ## Standard tools chosen by the host
 
 `standard_tools::ToolSet` builds ordinary `RegisteredTool` values for `Runtime.tools`.

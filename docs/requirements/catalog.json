@@ -555,7 +555,7 @@
     "id": "RUN-05",
     "requirement": "MUST / モデル接続をadapterとして差し替えられる。対応能力、context上限、出力上限、利用量、rate limit、timeout、stream切断を扱う",
     "classification": "core",
-    "scope": "Runtrellの共通契約・機構として保証する。利用方針・制限値・接続・業務基準はhostが供給し、共通保証は変更しない。"
+    "scope": "ModelPort・Usage・制限と結果不明の契約は共通。通信・usage変換はruntrell-providersの任意公開feature。資格情報・endpoint・modelごとの能力実値・価格はhostが供給する。"
   },
   {
     "id": "RUN-06",
