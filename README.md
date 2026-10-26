@@ -44,6 +44,7 @@ Storage, authorization and evidence failures remain separate errors.
 |---|---|
 | `PgStore::start_in` | Idempotent Run admission, queue permits, optional parent and existing account |
 | `PgStore::create_account_in` / `create_account_with_policy_in` | New account with default or explicit policy |
+| `PgStore::lock_account_in` | Tenant-checked account and ancestor locks; typed policy, limits and balances |
 | `PgStore::terminate_in` | Fenced non-success terminal state |
 | `PgStore::finalize_in` | Validated, fenced successful completion |
 

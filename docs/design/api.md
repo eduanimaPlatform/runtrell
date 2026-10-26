@@ -54,6 +54,8 @@ JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postg
 
 RunSpec.compactionは入力見積りと通常出力上限を除いたcontext余裕の閾値を設定する。ModelPort.compaction_limitsでhostが圧縮モデル・価格・上限を選び、portはrequest.modelでprepare/invoke/lookupを配送する（既定は通常モデル）。通常loopは新しいmodel要求の前にcompact_contextを自動実行し、summaryと有効なモデル入力を同じcheckpoint CASで保存する。checkpoint内のContextStoreは元の履歴を保持し、context_ownerでRunへ束縛する。別Runへコピーされたsummaryは再開前に拒否する。圧縮はtool処理が完了したモデル境界で行い、直近のtool交換・Provider継続状態・固定RunSpecと口座は要約に委ねず保持する。保存済み圧縮結果の復旧では再予約・再送せず元operationを照合する。
 
+checkpoint の context は元メッセージを `facts` へ位置順に一度だけ追記する。保存した `checkpoint.payload.context_protocol_len` 以降だけを次の stage で取り込み、文字列の一致では発言を統合しない。有効な `history` は checkpoint.messages から復元し、context 内へ同じ配列を保存しない（context.history は明示的に append した追加 evidence のみ）。圧縮は summary・有効 messages・取込み位置 を同じ CAS で更新し、保持した tail や生成した summary を新しい元発言として再追記しない。元履歴は ContextStore::context の facts で読める。これは現行保存形式であり旧形式の読替えは行わない。
+
 成果物bytesはhostが保存adapterで取得し、TargetValidator等から`schema::json_artifact_diagnostics`を利用する。同じ構文診断にArtifact IDを付け、参照のhash/bytesと不一致ならConflictで拒否する。対象選択・保存先・検証基準はhostの責任、構文判定と修正機構は共通基盤。試験の成果物保存はMemory DataStoreで、Postgresは制御checkpoint/操作台帳を担う。
 
 ## 選択可能な標準ツール（rt-5）

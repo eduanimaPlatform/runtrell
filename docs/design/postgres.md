@@ -95,7 +95,7 @@ AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_account
 
 ## Host-owned transaction
 
-`start_in`、`create_account_in`、`create_account_with_policy_in`、`terminate_in`、
+`lock_account_in`、`start_in`、`create_account_in`、`create_account_with_policy_in`、`terminate_in`、
 `finalize_in` は `&mut sqlx::Transaction<'_, Postgres>` に参加する公開 API。
 `start_in` は RunSpec.account で既存口座を指定でき、RunSpec.parent で親子関係を
 指定する。独立した後続 Run も同じ口座を共有できる。受付の同 key・同内容は
@@ -113,3 +113,7 @@ queue/permit がすべて消え、予約や外部 I/O は開始しない。
 を使う。transaction 全体で既存の lock 順序を守り、SQL の待機は有限とする。
 API は synchronous_commit=on、lock_timeout=5s、statement_timeout=30s を設定する。
 host は commit 前にこれらを弱めず、外部 I/O 中は transaction を保持しない。
+
+`lock_account_in(tx, tenant, id)` は同じ transaction で対象口座と全祖先を口座ID昇順に FOR UPDATE し、対象の Account（tenant・保存された明示的 policy・limit・現在残高）を返す。対象 tenant の不一致は PermissionDenied、不在は NotFound。policy や上限を既定値へ置換しない。lock は外側の commit/rollback まで保持する。
+
+既存 Run を変更する transaction は上記の session → Run → 口座順を守る。既存 Run の finalize_in 等より先に口座を lock しない。口座を先に lock して後続 start_in を行う場合は、既存 Run の親・session を取得しない独立 Run の受付に限定する。同じ transaction 内の未 commit 新規口座・Run は使用できる。複数の独立した口座階層を逆順で追加 lock しない。

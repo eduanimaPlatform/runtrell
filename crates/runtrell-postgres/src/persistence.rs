@@ -20,6 +20,7 @@ pub(crate) enum Scope<'a> {
     Start(&'a RunSpec),
     Request(&'a RunSpec),
     Account(Option<&'a str>),
+    LockedAccount(&'a str),
     Slot(&'a str),
     Empty,
     Attempt(&'a RunHandle, &'a str, bool),
@@ -204,6 +205,9 @@ impl PgStore {
             }
 
             Scope::Empty => {}
+            Scope::LockedAccount(id) => {
+                self.accounts(conn, &mut s, id, write).await?;
+            }
             Scope::Account(id) => {
                 if let Some(id) = id {
                     for v in self

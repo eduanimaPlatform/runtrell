@@ -1022,4 +1022,24 @@ impl PgStore {
         self.create_account_with_policy_in(tx, tenant, limit, parent, AccountPolicy::default())
             .await
     }
+    /// Locks an account and its ancestors in ID order in the host transaction.
+    /// Returns the stored policy, limit and balances without changing them.
+    /// The lock lasts until the outer commit/rollback. Acquire existing session/Run
+    /// locks first; only independent admission may follow an account-first lock.
+    /// See `docs/design/postgres.md` for the transaction-wide lock order.
+    pub async fn lock_account_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant: &str,
+        id: &str,
+    ) -> Result<Account> {
+        self.tx_in(tx, Scope::LockedAccount(id), |s| {
+            let account = s.accounts.get(id).ok_or(Error::NotFound)?;
+            if account.tenant != tenant {
+                return Err(Error::PermissionDenied);
+            }
+            Ok(account.clone())
+        })
+        .await
+    }
 }

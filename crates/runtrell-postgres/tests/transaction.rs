@@ -315,3 +315,106 @@ async fn failed_call_releases_partial_permits_and_preserves_host_transaction() {
     assert_eq!(store.queue_len().await.unwrap(), 1);
     assert_eq!(store.get(&run).await.unwrap().spec.account, account);
 }
+
+#[tokio::test]
+async fn typed_account_lock_reads_uncommitted_policy_and_rolls_back() {
+    let (pool, _, store) = open().await;
+    let mut tx = pool.begin().await.unwrap();
+    let policy = AccountPolicy {
+        tokens: false,
+        warning_percentages: vec![25, 90],
+        continue_with_unknown: true,
+        quantity_limits: [("items".into(), 7)].into(),
+        ..AccountPolicy::default()
+    };
+    let limit = Amount::new(123, 456);
+    let id = store
+        .create_account_with_policy_in(&mut tx, "t", limit, None, policy.clone())
+        .await
+        .unwrap();
+    let account = store.lock_account_in(&mut tx, "t", &id).await.unwrap();
+    assert_eq!(account.id, id);
+    assert_eq!(account.tenant, "t");
+    assert_eq!(account.limit, limit);
+    assert_eq!(account.policy, policy);
+    assert_eq!(
+        store.lock_account_in(&mut tx, "other", &id).await,
+        Err(Error::PermissionDenied)
+    );
+    assert_eq!(
+        store.lock_account_in(&mut tx, "t", "absent").await,
+        Err(Error::NotFound)
+    );
+    // Failed reads roll back their savepoint without poisoning the outer transaction.
+    let run = store
+        .start_in(&mut tx, RunSpec::new("t", "locked", account.id, "input"))
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(store.account(&id).await, Err(Error::NotFound));
+    assert_eq!(store.get(&run).await, Err(Error::NotFound));
+    assert_eq!(store.queue_len().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn typed_account_lock_waits_for_outer_transaction_and_keeps_ancestor_order() {
+    let (pool, _, store) = open().await;
+    let parent = store
+        .create_account("*", Amount::new(1000, 1000), None)
+        .await
+        .unwrap();
+    let id = store
+        .create_account("t", Amount::new(100, 100), Some(parent.clone()))
+        .await
+        .unwrap();
+    let mut first = pool.begin().await.unwrap();
+    let expected = store.lock_account_in(&mut first, "t", &id).await.unwrap();
+    let mut second = pool.begin().await.unwrap();
+    {
+        let parent_read = store.lock_account_in(&mut second, "*", &parent);
+        tokio::pin!(parent_read);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut parent_read)
+                .await
+                .is_err()
+        );
+        first.rollback().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut parent_read)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            parent
+        );
+    }
+    // A second transaction waiting on the same account can proceed after commit.
+    let mut first = pool.begin().await.unwrap();
+    let mut third = pool.begin().await.unwrap();
+    // Release the ancestor lock before acquiring the complete chain again.
+    second.commit().await.unwrap();
+    store.lock_account_in(&mut first, "t", &id).await.unwrap();
+    let read = store.lock_account_in(&mut third, "t", &id);
+    tokio::pin!(read);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut read)
+            .await
+            .is_err()
+    );
+    let run = store
+        .start_in(
+            &mut first,
+            RunSpec::new("t", "after-lock", id.clone(), "input"),
+        )
+        .await
+        .unwrap();
+    first.commit().await.unwrap();
+    assert_eq!(store.get(&run).await.unwrap().spec.account, id);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut read)
+            .await
+            .unwrap()
+            .unwrap(),
+        expected
+    );
+}
