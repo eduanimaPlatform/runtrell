@@ -74,18 +74,17 @@ async fn host_transaction_commit_rollback_and_failure() {
         assert_eq!(count, i64::from(mode == "commit"));
         if mode == "commit" {
             assert_eq!(store.get(&run).await.unwrap().spec.account, account);
+            assert!(store.list_operations(&run).await.unwrap().is_empty());
+            assert_eq!(
+                store.account(&account).await.unwrap().reserved,
+                Amount::default()
+            );
         } else {
             assert_eq!(store.get(&run).await, Err(Error::NotFound));
             assert_eq!(store.account(&account).await, Err(Error::NotFound));
         }
     }
     assert_eq!(store.queue_len().await.unwrap(), 1);
-    let reserved: i64 =
-        sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.budget_entries"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(reserved, 0);
 }
 
 #[tokio::test]

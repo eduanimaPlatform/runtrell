@@ -374,7 +374,7 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             .unwrap();
         assert_eq!(tool_op.send_count, 1);
         let unknown = matches!(case, "absent" | "partial" | "disconnect");
-        let (settled,unsettled):(i64,i64) = sqlx::query_as(&format!("SELECT count(*) FILTER (WHERE settled AND NOT unknown), count(*) FILTER (WHERE unknown) FROM {schema}.budget_entries")).fetch_one(&pool).await.unwrap();
+        let (settled,unsettled):(i64,i64) = sqlx::query_as(&format!("SELECT count(*) FILTER (WHERE settled AND NOT unknown_usage), count(*) FILTER (WHERE unknown_usage) FROM {schema}.attempts")).fetch_one(&pool).await.unwrap();
         let balance = runs.account(&account).await.unwrap();
         if unknown {
             assert!(matches!(run.state, RunState::Waiting(_)));

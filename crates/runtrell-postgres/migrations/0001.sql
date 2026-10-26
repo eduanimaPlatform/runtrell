@@ -1,7 +1,7 @@
--- Schema 3 is a fresh schema; no upgrade of prior schemas.
+-- Schema 4 is a fresh schema; no upgrade of prior schemas.
 CREATE TABLE IF NOT EXISTS {{schema}}.schema_config (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    version integer NOT NULL CHECK (version = 3), capacity jsonb NOT NULL
+    version integer NOT NULL CHECK (version = 4), capacity jsonb NOT NULL
 );
 CREATE TABLE IF NOT EXISTS {{schema}}.runs (
     handle jsonb NOT NULL,
@@ -40,11 +40,6 @@ CREATE TABLE IF NOT EXISTS {{schema}}.budget_accounts (
     unknown numeric(20,0) NOT NULL, exhausted boolean NOT NULL, warnings jsonb NOT NULL, policy jsonb NOT NULL, quantity_reserved jsonb NOT NULL, quantity_used jsonb NOT NULL, quantity_warnings jsonb NOT NULL
 );
 CREATE INDEX IF NOT EXISTS account_parent ON {{schema}}.budget_accounts(parent);
-CREATE TABLE IF NOT EXISTS {{schema}}.operations (
-    tenant text NOT NULL, run_id text NOT NULL, key text NOT NULL,
-    PRIMARY KEY(tenant,run_id,key),
-    FOREIGN KEY(tenant,run_id) REFERENCES {{schema}}.runs(tenant,id)
-);
 CREATE TABLE IF NOT EXISTS {{schema}}.attempts (
     id text PRIMARY KEY, run jsonb NOT NULL,
     tenant text GENERATED ALWAYS AS (run->>'tenant') STORED NOT NULL,
@@ -60,15 +55,23 @@ CREATE TABLE IF NOT EXISTS {{schema}}.attempts (
     replay_proof_generation numeric(20,0), created_at numeric(20,0) NOT NULL,
     finished_at numeric(20,0), usage_observations jsonb NOT NULL, unsettled_result jsonb,
     UNIQUE(tenant,run_id,operation_key,attempt),
-    FOREIGN KEY(tenant,run_id,operation_key) REFERENCES {{schema}}.operations(tenant,run_id,key)
+    FOREIGN KEY(tenant,run_id) REFERENCES {{schema}}.runs(tenant,id)
 );
-CREATE TABLE IF NOT EXISTS {{schema}}.budget_entries (
+-- Immutable attribution only: preserve referential integrity without copying
+-- reservation, usage or settlement state to every ancestor account.
+CREATE TABLE IF NOT EXISTS {{schema}}.attempt_accounts (
     attempt_id text REFERENCES {{schema}}.attempts(id),
     account_id text REFERENCES {{schema}}.budget_accounts(id),
-    reservation jsonb NOT NULL, usage jsonb, unknown boolean NOT NULL, settled boolean NOT NULL,
     PRIMARY KEY(attempt_id,account_id)
 );
-CREATE INDEX IF NOT EXISTS budget_unsettled ON {{schema}}.budget_entries(account_id) WHERE NOT settled;
+CREATE INDEX IF NOT EXISTS attempt_accounts_account ON {{schema}}.attempt_accounts(account_id);
+-- Query projection only. Balances remain atomically maintained on accounts.
+CREATE OR REPLACE VIEW {{schema}}.budget_entries AS
+SELECT a.id AS attempt_id, p.account_id, a.request->'reserve' AS reservation,
+    COALESCE(a.result->'Applied'->'usage',a.result->'Failed'->'usage') AS usage,
+    a.unknown_usage AS unknown, a.settled
+FROM {{schema}}.attempts a
+JOIN {{schema}}.attempt_accounts p ON p.attempt_id=a.id;
 CREATE TABLE IF NOT EXISTS {{schema}}.slots (
     key text PRIMARY KEY, tenant text NOT NULL, run text NOT NULL, kind jsonb NOT NULL
 );

@@ -7,6 +7,246 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
+/// Complete fenced observations recover without lookup; incomplete and stale
+/// observations never authorize a guessed settlement. Use a fresh store client
+/// as `resumed` to exercise the durable boundary as well as the shared contract.
+pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>) {
+    for case in [
+        "complete",
+        "failed",
+        "proof",
+        "reconcile",
+        "incomplete",
+        "late",
+        "price",
+        "quantity",
+        "malformed",
+    ] {
+        let account = first
+            .create_account("t", Amount::new(100, 100), None)
+            .await
+            .unwrap();
+        let run = first
+            .start(RunSpec::new("t", case, account.clone(), "input"))
+            .await
+            .unwrap();
+        let old = first.claim(&run, "old", 0, 100).await.unwrap();
+        let mut request = DispatchRequest::new(
+            "saved",
+            OperationKind::Sandbox,
+            "external",
+            json!({}),
+            Amount::new(10, 10),
+        );
+        if case == "proof" {
+            request.scope = Some("saved-proof".into());
+            request.recovery_until = Some(1000);
+        }
+        if case == "price" {
+            request.kind = OperationKind::Model;
+            request.price = crate::FakeModel::default().limits().price;
+        }
+        if case == "malformed" {
+            request.kind = OperationKind::Model;
+        }
+        if case == "quantity" {
+            request.kind = OperationKind::Tool;
+            request.quantities.insert("units".into(), 1);
+        }
+        let operation = first.begin(&old, request.clone(), 0).await.unwrap();
+        first.mark_sent(&old, &operation.id, 0).await.unwrap();
+        if case == "proof" {
+            first
+                .proven_unsent(&old, &operation.id, "saved-proof", 0)
+                .await
+                .unwrap();
+        }
+        let result = if case == "failed" {
+            ExternalResult::Failed {
+                physical_evidence: None,
+                code: "charged".into(),
+                usage: Usage::measured(2, 3, 7),
+                retry_after: Some(1),
+            }
+        } else {
+            ExternalResult::Applied {
+                physical_evidence: None,
+                output: json!({"receipt":case}),
+                usage: if case == "incomplete" {
+                    Usage::default()
+                } else if case == "malformed" {
+                    Usage {
+                        cached: Some(99),
+                        ..Usage::measured(2, 3, 7)
+                    }
+                } else if case == "price" {
+                    Usage {
+                        model: "fake".into(),
+                        cached: Some(0),
+                        micro_usd: None,
+                        ..Usage::measured(2, 3, 7)
+                    }
+                } else {
+                    Usage::measured(2, 3, 7)
+                },
+                external_id: Some(case.into()),
+            }
+        };
+        if case != "late" {
+            first
+                .observe_result(&old, &operation.id, result.clone(), 0)
+                .await
+                .unwrap();
+        }
+        let current = resumed.claim(&run, "current", 101, 100).await.unwrap();
+        assert_eq!(
+            first
+                .observe_result(&old, &operation.id, result.clone(), 101)
+                .await,
+            Err(Error::OwnershipLost)
+        );
+        let clock = crate::TestClock::default();
+        clock.set(101);
+        let rt = Runtime {
+            store: resumed.clone(),
+            model: crate::FakeModel::default(),
+            tools: Vec::<crate::BusinessTool>::new(),
+            policy: crate::FakePolicy::default(),
+            clock,
+            validator: Arc::new(crate::DecisionValidator::default()),
+            finalizer: Arc::new(crate::DecisionFinalizer),
+        };
+        assert_eq!(
+            rt.dispatch(
+                &old,
+                request.clone(),
+                "action",
+                |_| async { panic!("stale owner must not send") },
+                |_| async { panic!("stale owner must not lookup") }
+            )
+            .await,
+            Err(Error::OwnershipLost)
+        );
+        rt.policy.revoked.store(true, Ordering::SeqCst);
+        assert_eq!(
+            rt.dispatch(
+                &current,
+                request.clone(),
+                "action",
+                |_| async { panic!("revoked host must not send") },
+                |_| async { panic!("revoked host must not lookup") }
+            )
+            .await,
+            Err(Error::PermissionDenied)
+        );
+        rt.policy.revoked.store(false, Ordering::SeqCst);
+        if case == "proof" {
+            assert_eq!(
+                resumed.mark_sent(&current, &operation.id, 101).await,
+                Err(Error::Conflict)
+            );
+            assert_eq!(
+                resumed
+                    .proven_unsent(&current, &operation.id, "saved-proof", 101)
+                    .await,
+                Err(Error::Conflict)
+            );
+        }
+        if case == "reconcile" {
+            resumed.cancel(&run, "stop before recovery").await.unwrap();
+            rt.reconcile(&current).await.unwrap();
+            rt.reconcile(&current).await.unwrap();
+        } else {
+            let actual = rt
+                .dispatch(
+                    &current,
+                    request.clone(),
+                    "action",
+                    |_| async { panic!("recovery must not resend") },
+                    |_| async { Ok(Lookup::Unknown) },
+                )
+                .await;
+            if matches!(
+                case,
+                "incomplete" | "late" | "price" | "quantity" | "malformed"
+            ) {
+                assert_eq!(actual, Err(Error::UsageUnknown));
+                let balance = resumed.account(&account).await.unwrap();
+                assert_eq!(balance.used, Amount::default());
+                assert_eq!(balance.reserved, Amount::new(10, 10));
+                assert_eq!(balance.unknown, 1);
+                let saved = resumed.operation(&run, "saved").await.unwrap().unwrap();
+                assert!(!saved.settled);
+                if case != "late" {
+                    assert_eq!(saved.unsettled_result, Some(result.clone()));
+                }
+                if case == "malformed" {
+                    let mut corrected = result.clone();
+                    if let ExternalResult::Applied { usage, .. } = &mut corrected {
+                        *usage = Usage::measured(2, 3, 7);
+                    }
+                    assert_eq!(
+                        rt.dispatch(
+                            &current,
+                            request,
+                            "action",
+                            |_| async { panic!("correction must not resend") },
+                            |_| async { Ok(Lookup::Found(corrected.clone())) }
+                        )
+                        .await,
+                        Ok(corrected)
+                    );
+                    let balance = resumed.account(&account).await.unwrap();
+                    assert_eq!(
+                        (balance.used, balance.reserved, balance.unknown),
+                        (Amount::new(5, 7), Amount::default(), 0)
+                    );
+                }
+                continue;
+            }
+            assert_eq!(actual, Ok(result.clone()));
+            assert_eq!(
+                rt.dispatch(
+                    &current,
+                    request,
+                    "action",
+                    |_| async { panic!("settled must not resend") },
+                    |_| async { panic!("settled must not lookup") }
+                )
+                .await,
+                Ok(result.clone())
+            );
+        }
+        resumed
+            .record(&current, &operation.id, result.clone(), 101)
+            .await
+            .unwrap();
+        assert_eq!(
+            resumed
+                .record(&current, &operation.id, ExternalResult::Unknown, 101)
+                .await,
+            Err(Error::Conflict)
+        );
+        assert_eq!(
+            resumed
+                .observe_result(&current, &operation.id, ExternalResult::Unknown, 101)
+                .await,
+            Err(Error::Conflict)
+        );
+        let saved = resumed.operation(&run, "saved").await.unwrap().unwrap();
+        assert!(saved.settled);
+        assert_eq!(saved.result, Some(result));
+        assert!(saved.unsettled_result.is_none());
+        assert!(saved.usage_observations.is_empty());
+        assert_eq!(saved.send_count, 1);
+        let balance = resumed.account(&account).await.unwrap();
+        assert_eq!(
+            (balance.used, balance.reserved, balance.unknown),
+            (Amount::new(5, 7), Amount::default(), 0)
+        );
+    }
+}
+
 struct PreparedModel {
     fail: AtomicBool,
     prepared: AtomicUsize,

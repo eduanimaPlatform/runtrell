@@ -490,21 +490,19 @@ impl PgStore {
         }
         for (k, o) in &s.operations {
             if before.operations.get(k) != Some(o) {
-                sqlx::query(&format!("INSERT INTO {}.operations(tenant,run_id,key) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",self.schema))
-                .bind(&o.run.tenant).bind(&o.run.id).bind(&o.request.key).execute(&mut *conn).await.map_err(storage)?;
                 self.put(conn,"attempts","id,run,request,state,result,settled,unknown_usage,send_generation,send_count,replay_proof_generation,created_at,finished_at,usage_observations,unsettled_result","id",json!(o)).await?;
-                if let Some(r) = s.runs.get(&key(&o.run))
-                    && s.accounts.contains_key(&r.spec.account)
-                {
-                    let usage = match &o.result {
-                        Some(
-                            ExternalResult::Applied { usage, .. }
-                            | ExternalResult::Failed { usage, .. },
-                        ) => Some(usage),
-                        _ => None,
-                    };
-                    for id in ancestors(s, &r.spec.account)? {
-                        self.put(conn,"budget_entries","attempt_id,account_id,reservation,usage,unknown,settled","attempt_id,account_id",json!({"attempt_id":o.id,"account_id":id,"reservation":o.request.reserve,"usage":usage,"unknown":o.unknown_usage,"settled":o.settled})).await?;
+                if !before.operations.contains_key(k) {
+                    let run = s.runs.get(&key(&o.run)).ok_or(Error::Storage)?;
+                    for account in ancestors(s, &run.spec.account)? {
+                        sqlx::query(&format!(
+                            "INSERT INTO {}.attempt_accounts(attempt_id,account_id) VALUES($1,$2)",
+                            self.schema
+                        ))
+                        .bind(&o.id)
+                        .bind(account)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(storage)?;
                     }
                 }
             }

@@ -203,6 +203,7 @@ impl<
                 "reconcile"
             };
             self.policy.authorize(&r, &op.request.target, permission)?;
+            let saved = op.saved_settlement_result()?.cloned();
             let ctx = self.context(c, &r, &op, permission);
             let found = if matches!(
                 op.request.kind,
@@ -211,7 +212,11 @@ impl<
                 let request = serde_json::from_value(op.request.input.clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
                 let request = PreparedModelRequest::for_lookup(request)?;
-                self.model.lookup(&ctx, request).await?
+                if let Some(result) = saved {
+                    Lookup::Found(result)
+                } else {
+                    self.model.lookup(&ctx, request).await?
+                }
             } else if op.request.kind == OperationKind::Tool
                 || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
             {
@@ -232,7 +237,13 @@ impl<
                     .authorize(&r, &op.request.target, &descriptor.permission)?;
                 let mut tool_context = ctx;
                 tool_context.permission = descriptor.permission;
-                tool.lookup(&tool_context, op.request.input.clone()).await?
+                if let Some(result) = saved {
+                    Lookup::Found(result)
+                } else {
+                    tool.lookup(&tool_context, op.request.input.clone()).await?
+                }
+            } else if let Some(result) = saved {
+                Lookup::Found(result)
             } else if op.request.kind == OperationKind::ChildRun {
                 let spec: RunSpec = serde_json::from_value(op.request.input.clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
@@ -382,6 +393,9 @@ impl<
         self.policy.authorize(&r, &op.request.target, permission)?;
         if op.settled {
             return op.result.ok_or(Error::Conflict);
+        }
+        if let Some(result) = op.saved_settlement_result()? {
+            return self.persist_result(c, &op.id, result.clone()).await;
         }
         let ctx = self.context(c, &r, &op, permission);
         let recovery = op.state != OperationState::Intent || op.send_count > 0;

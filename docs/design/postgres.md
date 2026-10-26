@@ -1,6 +1,6 @@
-# PostgreSQL adapter（schema 3）
+# PostgreSQL adapter（schema 4）
 
-RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、空DBから最新schemaを作るmigrationに置き換える。リリース前のため旧schemaの検出・移行は持たない（空DBから作る）。DB schema version=3と、既存のRun/checkpoint wire schema=1は別の版である。
+RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、空DBから最新schemaを作るmigrationに置き換える。リリース前のため旧schemaの検出・移行は持たない（空DBから作る）。DB schema version=4と、既存のRun/checkpoint wire schema=1は別の版である。
 
 `PgStore::open`はhostのPgPool・schema名・Capacityを受け、初期化のCOMMIT後に返る。schema名はASCII英数字/underscore、先頭は英字/underscore、最大63 bytes、`pg_` prefix不可。識別子を検証・引用し、値はbindする。再open時のCapacity不一致はConflict。adapterはDocker操作や接続情報の自動読込みをしない。
 
@@ -12,10 +12,10 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 | schema_config | 不変のversion/Capacity。通常の更新ではlockしない |
 | runs | 受付入力request_spec（親期限適用前）と実効spec、Run単位のrevision・generation・owner/lease・checkpoint・終端/停止/回収/精算/配送状態・receipt。PK tenant/id、受付unique tenant/principal/request_key、親検索、session未完了sequenceのindex |
 | sessions | 衝突しないtenant/session key、受付sequence、context_revision |
-| operations | tenant/Run/論理操作keyの安定したidentity |
-| attempts | 安定attempt ID、request/intent、送信世代/回数、result、external ID、usage観測、unsettled_result。Run/操作key/attempt unique、Run未精算index |
+| attempts | 安定attempt ID、request/intent、送信世代/回数、result、external ID、usage観測、unsettled_result。Run/操作key/attempt unique、Runへの直接FK、Run未精算index。論理操作keyと有料attemptは区別する |
 | budget_accounts | 親口座、上限・予約・実費の各Amount、unknown件数、exhausted、tokens/costそれぞれの警告配送済み閾値 |
-| budget_entries | attempt/祖先口座ごとの予約Amount・確定usage・unknown/settled。複合PK、口座別未精算index |
+| attempt_accounts | begin時のattempt/全祖先口座の帰属参照だけを保持。2列の複合PKと両方へのFK、口座検索index。予約・usage・unknown/settledは複写しない |
+| budget_entries（view） | attempt_accountsとattemptsのJOINから予約・usage・unknown/settledを導出。現在残高はbudget_accountsの原子的な累積値を使う |
 | slots | 保持key/kind/tenant/Run。key unique、Run/kind検索index |
 | capacity_slots | scope/ordinalごとの有限permitとholder。global・tenant・Runのkind別、queueのglobal・tenant別。空きpermitの部分index、holder検索index |
 | queue_entries | 安定key、挿入順sequence、tenant、優先度、deadline。tenant/優先度/順序とdeadlineのindex |
@@ -46,9 +46,9 @@ queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。�
 |---|---|
 | 受付 | request同値照合、Run、session sequence、有限queueとpermit |
 | claim/renew | owner/generation/lease、Run revision、claim時のactive slotとqueue除去 |
-| begin | 現owner/取消/期限/session、全祖先予約、attempt intent、budget entries、kind別slot |
+| begin | 現owner/取消/期限/session、全祖先予約、attempt intent、帰属参照、kind別slot |
 | mark_sent | 現ownerと新規業務のfence、送信世代/回数、再送保証の世代/scope/期限 |
-| 結果 | 同値二重精算no-op/異値拒否、result/usage、全祖先の精算・unknown、budget entries、slot解放、配送状態 |
+| 結果 | 同値二重精算no-op/異値拒否、result/usage、全祖先の精算・unknown、slot解放、配送状態 |
 | checkpoint | schema検査、Run revision CAS、履歴/cursor |
 | finalize | 未確定操作・予算・receipt/hash/根拠/設定/検証器版、session context、completion/出力/Run終端 |
 | 取消/回収 | 子孫伝播、queue除去、取消/停止/cleanupの独立状態。未精算予約は保持 |
@@ -56,6 +56,10 @@ queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。�
 外部model/toolのI/O中はDB transactionを保持しない。`synchronous_commit=on`でWAL flush後だけ成功を返し、保存要求の受領・memory更新と耐久保存完了を区別する。SQL/接続/COMMIT応答不明はStorageとし、安定identityから再照会する。自動再送はしない。更新のlock_timeout=5秒、statement_timeout=30秒。disk喪失・非同期failover・任意外部APIとのexactly-onceは保証しない。
 
 古いownerのrecord/observe_resultは`late_results`へ耐久保存した後OwnershipLostを返し、残高・slot・成功状態に反映しない。現ownerが照合する。終端Runも残存slot・未完了cleanup/精算から再発見する。
+
+`observe_result`で現ownerのfenceとRun/attempt帰属を検証して保存した完全なApplied/Failedは、driverのdispatch/reconcileがlookupより先に再利用する。十分性は保存されたrequestのprice・quantityとusageから判定し、欠測を0とはしない。不正なusage観測も精算根拠にはせず保持し、後から正しいlookup結果で補える。完全な保存結果は異値observe/recordで置換できず、proven_unsent/mark_sentによる再送も拒否する。現在のclaimと認可を再検証したrecordだけが全祖先を一回精算する。旧ownerのlate_resultsはこの経路に含めない。DBとControlStoreは信頼境界内であり、DB管理者の直接改ざんの検出は保証しない。
+
+精算後はresultを正本とし、usage_observationsとunsettled_resultの重複を解放する。未精算の部分usage/結果は維持し、Unknown/Acceptedによる後続観測では上書きしない。late_resultsの保持期限・GCは決めない。attempt_accountsのFKにより、未精算・精算済みattemptと帰属先口座の削除制限を維持する。attemptsのRun FKと口座parentのFKも維持する。帰属参照はbeginの同じtransactionで全祖先分を一度だけ挿入し、送信・観測・精算では更新しない。完全導出だけでは失うattempt削除制限をこの小さい参照で守る。APIはRunの口座と口座parentを変更せず、GC APIは提供しない。口座別view照会には口座indexを使えるが、現在残高取得にはaccount/lock_account_inを使う。
 
 ## 検証と性能計測
 
@@ -81,7 +85,7 @@ throughput試験だけを選択した実行（24 Run、各20 renew、各条件48
 
 ## 2e：耐久ExecutionLedger
 
-PgStoreはExecutionLedgerを実装する。schema 3の同じ0001.sqlへexecutionsを追加し、旧schema検出・移行は追加しない。台帳はRunStore/OperationStoreと別の保存境界であり、外部取得前にintentのCOMMITを待つ。通常のSandbox受付・予約後のintent未保存は、既存operationから同じidentityで再照合する。台帳のCOMMITは業務成功や費用精算のreceiptではない。
+PgStoreはExecutionLedgerを実装する。schema 4の同じ0001.sqlへexecutionsを追加し、旧schema検出・移行は追加しない。台帳はRunStore/OperationStoreと別の保存境界であり、外部取得前にintentのCOMMITを待つ。通常のSandbox受付・予約後のintent未保存は、既存operationから同じidentityで再照合する。台帳のCOMMITは業務成功や費用精算のreceiptではない。
 
 ownerとcontext_operation、requestは不変。tenant/run_idはownerのgenerated列で検索し、全体records復元はしない。insertは同じPKの要求同値だけ冪等に返す。CASは対象行だけをFOR UPDATEし、Memoryと共通のExecutionRecord::advanceでrevision・取消・観測・資源条件/receiptを検証する。reclaimed列は同じtransactionでresourcesから算出し、pending()は未回収部分indexを使える管理検索とする。各資源の解放条件と確認はresources、証拠となる最新backend観測/費用はobservationに保存する。取消だけでは解放しない。
 
@@ -91,7 +95,7 @@ Memory/Pgに同一6件の契約suiteを適用する（固定入力/identity、CA
 
 ## 予算・受付方針
 
-AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_accountsのJSONB列へ保存し、既存の全祖先lock順と同じtransactionで更新する。Run方針はspec、優先度/公平性の重みはqueue_entries.schedulingへ保存する。queue内の選択はMemoryと同じbudget::queue_indexを使う。schema 3は空namespace用であり、過去schemaの移行・互換読込みは追加しない。
+AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_accountsのJSONB列へ保存し、既存の全祖先lock順と同じtransactionで更新する。Run方針はspec、優先度/公平性の重みはqueue_entries.schedulingへ保存する。queue内の選択はMemoryと同じbudget::queue_indexを使う。schema 4は空namespace用であり、過去schemaの移行・互換読込みは追加しない。
 
 ## Host-owned transaction
 

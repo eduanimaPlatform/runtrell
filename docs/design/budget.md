@@ -89,3 +89,10 @@ ordinary refusal/wait behavior. Input estimation is performed before this final
 quote and must bound the finalized request. The shared Memory/Postgres
 `model_quote_race` contract inserts a reservation by another Run between quoting
 and admission, then checks the resumed request and reservation together.
+
+Persisted complete results are recovered through the original attempt before a
+provider lookup. The store fences observations at write time and checks the
+current owner again at settlement. Conflicting complete observations are refused.
+Incomplete observations retain reservations; late results from stale owners
+require independent host verification and are never automatically adopted. After
+settlement, result is authoritative and temporary observation copies are cleared.

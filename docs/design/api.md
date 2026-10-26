@@ -40,7 +40,7 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 `DispatchRequest.recovery_proof`は最終要求・intent・全祖先予約と同じbegin境界に固定する。invoke/lookup/cancelのToolContextから元証明を参照できる。既存操作では準備を再実行せず、保存済み要求と証明で照合する。adapterが現在の保存世代・lease・ownerとの一致を検証する。新attemptの証明取得でも元予約snapshotのrecovery_untilを延長しない。準備済み操作のNotFoundはproof.generationと照合し、Toolのdescriptor digestであるscopeとは分ける。初回準備失敗で予約を作らないことと、既存Unknownの予約を保持することは別契約である。RegisteredToolとStoredOutputToolも準備宣言・hookを転送する。
 
-`ExternalResult::{Applied,Failed}.physical_evidence`は接続先が報告した物理送信の観測列。各観測は順序番号と不透明bytes、列全体はComplete/Truncatedを持ち、最大256観測・合計65536 bytes、順序番号は狭義増加とする。切詰めはadapterが宣言し、Runtrellは黙って切り捨てず上限違反を拒否する。これは`Operation.usage_observations`（Runtrellの論理結果の使用量履歴）とは別物。結果と一緒にMemory/Pgへ保存し、再照合・同値結果の重複精算防止に使う。証拠bytesをRuntrellが料金へ解釈することはなく、Usageの測定・完全性検査も引き続き必要となる。
+`ExternalResult::{Applied,Failed}.physical_evidence`は接続先が報告した物理送信の観測列。各観測は順序番号と不透明bytes、列全体はComplete/Truncatedを持ち、最大256観測・合計65536 bytes、順序番号は狭義増加とする。切詰めはadapterが宣言し、Runtrellは黙って切り捨てず上限違反を拒否する。これは`Operation.usage_observations`（Runtrellの未精算論理結果の使用量履歴）とは別物。結果と一緒にMemory/Pgへ保存し、再照合・同値結果の重複精算防止に使う。証拠bytesをRuntrellが料金へ解釈することはなく、Usageの測定・完全性検査も引き続き必要となる。
 
 公開async traitはSend futureを返す静的dispatch契約。RegisteredToolのerased futureもSendであり、所有したRuntime/claimをmulti-thread Tokioのtokio::spawnへ渡せる。ホストはsupervisor・blocking taskの完了までTokio runtimeを維持する。blocking taskのFuture取消は物理I/Oの取消・保存失敗を意味しない。
 
@@ -482,6 +482,10 @@ pub trait BudgetAuthority: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Vec<Warning>>> + Send;
 }
 pub trait OperationStore: Send + Sync {
+    /// Persist a final adapter result under the current claim without settling.
+    /// A complete saved result is immutable and can be recovered by a successor.
+    /// Incomplete evidence retains reservations; stale observations never authorize
+    /// settlement. After settlement, result is canonical and temporary copies clear.
     fn observe_result(
         &self,
         claim: &Claim,

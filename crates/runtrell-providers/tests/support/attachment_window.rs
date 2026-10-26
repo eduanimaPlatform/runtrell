@@ -6,11 +6,16 @@ use runtrell_postgres::PgStore;
 use runtrell_testkit::{DecisionFinalizer, DecisionValidator, FakePolicy, TestClock};
 use std::sync::Arc;
 fn uuid_id() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_string()
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 fn pages_pdf() -> Vec<u8> {

@@ -9,6 +9,13 @@ use std::{
     },
     task::{Context, Poll, Waker},
 };
+#[test]
+fn saved_observations_recover_once_without_provider_lookup() {
+    runtrell_testkit::block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        recovery_contracts::saved_observations(store.clone(), store).await;
+    });
+}
 struct RestartModel {
     case: &'static str,
     resumed: AtomicBool,

@@ -425,13 +425,23 @@ impl OperationStore for PgStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
+            if op.settled {
+                return if op.result.as_ref() == Some(&result) { Ok(()) } else { Err(Error::Conflict) };
+            }
+            if let Some(saved) = op.saved_settlement_result()? && saved != &result {
+                return Err(Error::Conflict);
+            }
             if let ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } =
                 &result
                 && !op.usage_observations.contains(usage)
             {
                 op.usage_observations.push(usage.clone());
             }
-            op.unsettled_result = Some(result);
+            if matches!(result, ExternalResult::Applied { .. } | ExternalResult::Failed { .. })
+                || op.unsettled_result.is_none()
+            {
+                op.unsettled_result = Some(result);
+            }
             Ok(())
         }).await;
         if status == Err(Error::OwnershipLost) {
@@ -451,7 +461,7 @@ impl OperationStore for PgStore {
             {
                 return Err(Error::UsageUnknown);
             }
-            if op.settled {
+            if op.settled || op.saved_settlement_result()?.is_some() {
                 return Err(Error::Conflict);
             }
             op.state = OperationState::Intent;
@@ -589,7 +599,7 @@ impl OperationStore for PgStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
-            if op.state != OperationState::Intent {
+            if op.state != OperationState::Intent || op.saved_settlement_result()?.is_some() {
                 return Err(Error::Conflict);
             }
             if op.request.recovery_proof.is_some()
@@ -621,6 +631,11 @@ impl OperationStore for PgStore {
                 let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
                 if old.run != c.run {
                     return Err(Error::PermissionDenied);
+                }
+                if let Some(saved) = old.saved_settlement_result()?
+                    && saved != &result
+                {
+                    return Err(Error::Conflict);
                 }
                 if old.result.as_ref() == Some(&result) {
                     return Ok(
@@ -678,12 +693,18 @@ impl OperationStore for PgStore {
                 }
                 let op = s.operations.get_mut(id).unwrap();
                 if amount.is_none() {
-                    op.unsettled_result = Some(result.clone());
+                    if usage.is_some() || op.unsettled_result.is_none() {
+                        op.unsettled_result = Some(result.clone());
+                    }
                     if let Some(usage) = usage
                         && !op.usage_observations.contains(usage)
                     {
                         op.usage_observations.push(usage.clone());
                     }
+                }
+                if amount.is_some() {
+                    op.unsettled_result = None;
+                    op.usage_observations.clear();
                 }
                 op.state = state;
                 op.result = Some(result.clone());

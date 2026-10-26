@@ -668,6 +668,28 @@ pub struct Operation {
     pub usage_observations: Vec<Usage>,
     pub unsettled_result: Option<ExternalResult>,
 }
+impl Operation {
+    /// A result persisted by a fenced observer, sufficient for this attempt's
+    /// pinned price and quantity contract. Late unfenced observations are excluded.
+    pub fn saved_settlement_result(&self) -> Result<Option<&ExternalResult>> {
+        let Some(result) = self.unsettled_result.as_ref() else {
+            return Ok(None);
+        };
+        result.validate_evidence()?;
+        let usage = match result {
+            ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => usage,
+            _ => return Ok(None),
+        };
+        // This is a sufficiency probe. Malformed observations remain evidence,
+        // but must not prevent lookup from supplying corrected measurements.
+        // record still validates every new result before changing balances.
+        Ok(self
+            .request
+            .settlement_amount(usage)
+            .is_ok_and(|amount| amount.is_some())
+            .then_some(result))
+    }
+}
 // Keep lookup results inline: callers forward the receipt directly to atomic settlement.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1053,6 +1075,10 @@ pub trait BudgetAuthority: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Vec<Warning>>> + Send;
 }
 pub trait OperationStore: Send + Sync {
+    /// Persist a final adapter result under the current claim without settling.
+    /// A complete saved result is immutable and can be recovered by a successor.
+    /// Incomplete evidence retains reservations; stale observations never authorize
+    /// settlement. After settlement, result is canonical and temporary copies clear.
     fn observe_result(
         &self,
         claim: &Claim,

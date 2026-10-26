@@ -725,7 +725,7 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
     assert_eq!(wire[0].matches(&STANDARD.encode(png())).count(), 0);
     assert_eq!(wire[1].matches(&STANDARD.encode(png())).count(), 1);
     let entries: i64 = sqlx::query_scalar(&format!(
-        "SELECT count(*) FROM {schema}.budget_entries WHERE settled AND NOT unknown"
+        "SELECT count(*) FROM {schema}.attempts WHERE settled AND NOT unknown_usage"
     ))
     .fetch_one(&pool)
     .await

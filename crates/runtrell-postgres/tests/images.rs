@@ -5,7 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn images_reopen_artifacts_and_independent_pg_pool_with_one_settlement_row_per_send() {
+async fn images_reopen_artifacts_with_one_settlement_per_billed_attempt() {
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("image Pg tests never skip");
     let pool = PgPoolOptions::new()
         .max_connections(4)
@@ -36,8 +36,27 @@ async fn images_reopen_artifacts_and_independent_pg_pool_with_one_settlement_row
     let data = DataStore::local(&root, StoragePolicy::default()).unwrap();
     let reloaded = DataStore::local(&root, StoragePolicy::default()).unwrap();
     runtrell_testkit::image_contracts::workflow_reopened(first, data, reopened, reloaded).await;
-    let (entries,settled):(i64,i64) = sqlx::query_as(&format!("SELECT count(*),count(*) FILTER (WHERE settled AND NOT unknown) FROM {schema}.budget_entries")).fetch_one(&pool).await.unwrap();
-    assert_eq!((entries, settled), (5, 5));
+    let settled: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {schema}.attempts WHERE settled AND NOT unknown_usage"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(settled, 5);
+    let (used, reserved, unknown): (serde_json::Value, serde_json::Value, i64) = sqlx::query_as(
+        &format!("SELECT used,reserved,unknown::bigint FROM {schema}.budget_accounts"),
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (used, reserved, unknown),
+        (
+            serde_json::json!(Amount::new(28, 28)),
+            serde_json::json!(Amount::default()),
+            0
+        )
+    );
     let sends: i64 = sqlx::query_scalar(&format!(
         "SELECT sum(send_count)::bigint FROM {schema}.attempts"
     ))
