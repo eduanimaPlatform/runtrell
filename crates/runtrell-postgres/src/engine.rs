@@ -157,107 +157,20 @@ impl RunStore for PgStore {
                     && r.spec.request_key == spec.request_key
             });
             match old {
-                Some(r) if r.spec == *spec => Ok(Some(r.handle.clone())),
+                Some(r) if s.requests.get(&key(&r.handle)) == Some(spec) => {
+                    Ok(Some(r.handle.clone()))
+                }
                 Some(_) => Err(Error::Conflict),
                 None => Ok(None),
             }
         })
         .await
     }
-    async fn start(&self, mut spec: RunSpec) -> Result<RunHandle> {
-        self.tx(Scope::Start(&spec.clone()), |s| {
-            if spec.scheduling.weight == 0
-                || matches!(
-                    spec.budget,
-                    ReservationPolicy::Wait { until: 0 }
-                        | ReservationPolicy::Shrink {
-                            min_output_budget_tokens: 0
-                        }
-                )
-            {
-                return Err(Error::Invalid("run policy".into()));
-            }
-            if spec.tenant.is_empty() || spec.request_key.is_empty() {
-                return Err(Error::Invalid("tenant/request key".into()));
-            }
-            if let Some(old) = s.runs.values().find(|r| {
-                r.spec.tenant == spec.tenant
-                    && r.spec.principal == spec.principal
-                    && r.spec.request_key == spec.request_key
-            }) {
-                return if old.spec == spec {
-                    Ok(old.handle.clone())
-                } else {
-                    Err(Error::Conflict)
-                };
-            }
-            let a = s.accounts.get(&spec.account).ok_or(Error::NotFound)?;
-            if a.tenant != spec.tenant {
-                return Err(Error::PermissionDenied);
-            }
-            if let Some(parent) = &spec.parent {
-                let p = get(s, parent)?;
-                if p.handle.tenant != spec.tenant
-                    || p.cancel.is_some()
-                    || matches!(p.state, RunState::Terminal(_))
-                {
-                    return Err(Error::Closed);
-                }
-                if spec.account != p.spec.account
-                    && !ancestors(s, &spec.account)?.contains(&p.spec.account)
-                {
-                    return Err(Error::PermissionDenied);
-                }
-                spec.deadline = match (spec.deadline, p.spec.deadline) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-            }
-            let sequence = if let Some(id) = &spec.session {
-                let session = s.sessions.entry(session_key(&spec.tenant, id)).or_default();
-                if session.1 != spec.context_revision {
-                    return Err(Error::Conflict);
-                }
-                session.0 += 1;
-                session.0
-            } else {
-                0
-            };
-            let h = RunHandle {
-                tenant: spec.tenant.clone(),
-                id: uuid::Uuid::new_v4().to_string(),
-            };
-            s.queue.push_back(QueueEntry {
-                key: key(&h),
-                tenant: spec.tenant.clone(),
-                scheduling: spec.scheduling,
-                deadline: spec.deadline.unwrap_or(u64::MAX),
-            });
-            s.runs.insert(
-                key(&h),
-                RunRecord {
-                    handle: h.clone(),
-                    spec,
-                    schema: 1,
-                    revision: 0,
-                    sequence,
-                    owner: None,
-                    generation: 0,
-                    state: RunState::Queued,
-                    checkpoint: None,
-                    cancel: None,
-                    stop: Progress::NotRequired,
-                    cleanup: Progress::NotRequired,
-                    settlement: Progress::NotRequired,
-                    delivery: Delivery::None,
-                    output: None,
-                    receipt: None,
-                    completion: None,
-                },
-            );
-            Ok(h)
-        })
-        .await
+    async fn start(&self, spec: RunSpec) -> Result<RunHandle> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let value = self.start_in(&mut tx, spec).await?;
+        self.commit(tx).await?;
+        Ok(value)
     }
     async fn get(&self, h: &RunHandle) -> Result<RunRecord> {
         self.read(Scope::Run(h, Mode::Bare), |s| Ok(get(s, h)?.clone()))
@@ -361,106 +274,16 @@ impl RunStore for PgStore {
         .await
     }
     async fn terminate(&self, c: &Claim, t: Terminal, now: u64) -> Result<()> {
-        self.tx(
-            Scope::Run(
-                &c.run,
-                if matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_)) {
-                    Mode::Tree
-                } else {
-                    Mode::Close
-                },
-            ),
-            |s| {
-                fence(s, c, now, false)?;
-                if t == Terminal::Succeeded {
-                    return Err(Error::Invalid("requires finalizer".into()));
-                }
-                let cascade = matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_));
-                let mut pending = vec![c.run.clone()];
-                while let Some(h) = pending.pop() {
-                    if cascade {
-                        pending.extend(
-                            s.runs
-                                .values()
-                                .filter(|r| {
-                                    r.spec.parent.as_ref() == Some(&h)
-                                        && !matches!(r.state, RunState::Terminal(_))
-                                })
-                                .map(|r| r.handle.clone()),
-                        );
-                    }
-                    let outstanding = s.operations.values().any(|op| op.run == h && !op.settled);
-                    let r = get_mut(s, &h)?;
-                    if !matches!(r.state, RunState::Terminal(_)) {
-                        r.state = RunState::Terminal(t.clone());
-                        r.revision += 1;
-                    }
-                    if outstanding {
-                        r.stop = Progress::Pending;
-                        r.cleanup = Progress::Pending;
-                    }
-                    s.queue.retain(|e| e.key != key(&h));
-                }
-                Ok(())
-            },
-        )
-        .await
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        self.terminate_in(&mut tx, c, t, now).await?;
+        self.commit(tx).await?;
+        Ok(())
     }
     async fn finalize(&self, c: &Claim, completion: Completion, now: u64) -> Result<()> {
-        self.tx(Scope::Run(&c.run, Mode::Finalize), |s| {
-            let r = fence(s, c, now, false)?;
-            if r.completion.as_ref() == Some(&completion.id)
-                && r.output.as_ref() == Some(&completion.output)
-                && r.receipt.as_ref() == Some(&completion.receipt)
-            {
-                return Ok(());
-            }
-            let r = fence(s, c, now, true)?;
-            for id in ancestors(s, &r.spec.account)? {
-                s.accounts[&id].admission(true)?;
-            }
-            if s.operations.values().any(|o| {
-                o.run == c.run
-                    && (!o.settled
-                        || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
-                        || (o.state == OperationState::Failed
-                            && !s.operations.values().any(|later| {
-                                later.run == o.run
-                                    && later.request.key == o.request.key
-                                    && later.request.attempt > o.request.attempt
-                            })))
-            }) {
-                return Err(Error::UsageUnknown);
-            }
-            let v = &completion.receipt;
-            if !v.passed
-                || v.hash != digest(&completion.output)
-                || v.basis_revision != r.spec.basis_revision
-                || v.config_version != r.spec.config_version
-                || v.validator != r.spec.validator
-                || v.validator_version != r.spec.validator_version
-            {
-                return Err(Error::Conflict);
-            }
-            if let Some(id) = &r.spec.session {
-                let session = s
-                    .sessions
-                    .get_mut(&session_key(&r.spec.tenant, id))
-                    .ok_or(Error::Conflict)?;
-                if session.1 != r.spec.context_revision {
-                    return Err(Error::Conflict);
-                }
-                session.1 += 1;
-            }
-            let r = get_mut(s, &c.run)?;
-            r.state = RunState::Terminal(Terminal::Succeeded);
-            r.output = Some(completion.output);
-            r.receipt = Some(completion.receipt);
-            r.completion = Some(completion.id);
-            r.revision += 1;
-            Ok(())
-        })
-        .await
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        self.finalize_in(&mut tx, c, completion, now).await?;
+        self.commit(tx).await?;
+        Ok(())
     }
     async fn wait(&self, c: &Claim, reason: &str, now: u64) -> Result<()> {
         self.tx(Scope::Run(&c.run, Mode::Bare), |s| {
@@ -515,36 +338,12 @@ impl BudgetAuthority for PgStore {
         parent: Option<String>,
         policy: AccountPolicy,
     ) -> Result<String> {
-        self.tx(Scope::Account(parent.clone().as_deref()), |s| {
-            policy.validate()?;
-            if let Some(id) = &parent {
-                let a = s.accounts.get(id).ok_or(Error::NotFound)?;
-                if a.tenant != tenant && a.tenant != "*" {
-                    return Err(Error::PermissionDenied);
-                }
-            }
-            let id = uuid::Uuid::new_v4().to_string();
-            s.accounts.insert(
-                id.clone(),
-                Account {
-                    id: id.clone(),
-                    tenant: tenant.into(),
-                    parent,
-                    limit,
-                    reserved: Amount::default(),
-                    used: Amount::default(),
-                    unknown: 0,
-                    exhausted: false,
-                    warnings: [0, 0],
-                    policy,
-                    quantity_reserved: BTreeMap::new(),
-                    quantity_used: BTreeMap::new(),
-                    quantity_warnings: BTreeMap::new(),
-                },
-            );
-            Ok(id)
-        })
-        .await
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let value = self
+            .create_account_with_policy_in(&mut tx, tenant, limit, parent, policy)
+            .await?;
+        self.commit(tx).await?;
+        Ok(value)
     }
     async fn account(&self, id: &str) -> Result<Account> {
         self.read(Scope::Account(Some(id)), |s| {
@@ -945,5 +744,282 @@ impl Scheduler for PgStore {
     }
     async fn dequeue(&self, now: u64) -> Result<Option<QueueEntry>> {
         self.take_queue(now).await
+    }
+}
+
+impl PgStore {
+    /// Stages idempotent admission, including queue permits and parent constraints.
+    /// The host owns the outer commit; an error rolls this call back to its savepoint.
+    pub async fn start_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        mut spec: RunSpec,
+    ) -> Result<RunHandle> {
+        let request_spec = spec.clone();
+        self.tx_in(tx, Scope::Start(&spec.clone()), |s| {
+            if spec.scheduling.weight == 0
+                || matches!(
+                    spec.budget,
+                    ReservationPolicy::Wait { until: 0 }
+                        | ReservationPolicy::Shrink {
+                            min_output_budget_tokens: 0
+                        }
+                )
+            {
+                return Err(Error::Invalid("run policy".into()));
+            }
+            if spec.tenant.is_empty() || spec.request_key.is_empty() {
+                return Err(Error::Invalid("tenant/request key".into()));
+            }
+            if let Some(old) = s.runs.values().find(|r| {
+                r.spec.tenant == spec.tenant
+                    && r.spec.principal == spec.principal
+                    && r.spec.request_key == spec.request_key
+            }) {
+                return if s.requests.get(&key(&old.handle)) == Some(&spec) {
+                    Ok(old.handle.clone())
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+            let a = s.accounts.get(&spec.account).ok_or(Error::NotFound)?;
+            if a.tenant != spec.tenant {
+                return Err(Error::PermissionDenied);
+            }
+            if let Some(parent) = &spec.parent {
+                let p = get(s, parent)?;
+                if p.handle.tenant != spec.tenant
+                    || p.cancel.is_some()
+                    || matches!(p.state, RunState::Terminal(_))
+                {
+                    return Err(Error::Closed);
+                }
+                if spec.account != p.spec.account
+                    && !ancestors(s, &spec.account)?.contains(&p.spec.account)
+                {
+                    return Err(Error::PermissionDenied);
+                }
+                spec.deadline = match (spec.deadline, p.spec.deadline) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+            let sequence = if let Some(id) = &spec.session {
+                let session = s.sessions.entry(session_key(&spec.tenant, id)).or_default();
+                if session.1 != spec.context_revision {
+                    return Err(Error::Conflict);
+                }
+                session.0 += 1;
+                session.0
+            } else {
+                0
+            };
+            let h = RunHandle {
+                tenant: spec.tenant.clone(),
+                id: uuid::Uuid::new_v4().to_string(),
+            };
+            s.queue.push_back(QueueEntry {
+                key: key(&h),
+                tenant: spec.tenant.clone(),
+                scheduling: spec.scheduling,
+                deadline: spec.deadline.unwrap_or(u64::MAX),
+            });
+            s.requests.insert(key(&h), request_spec);
+            s.runs.insert(
+                key(&h),
+                RunRecord {
+                    handle: h.clone(),
+                    spec,
+                    schema: 1,
+                    revision: 0,
+                    sequence,
+                    owner: None,
+                    generation: 0,
+                    state: RunState::Queued,
+                    checkpoint: None,
+                    cancel: None,
+                    stop: Progress::NotRequired,
+                    cleanup: Progress::NotRequired,
+                    settlement: Progress::NotRequired,
+                    delivery: Delivery::None,
+                    output: None,
+                    receipt: None,
+                    completion: None,
+                },
+            );
+            Ok(h)
+        })
+        .await
+    }
+    /// Stages a fenced non-success terminal transition, preserving unsettled work.
+    /// The host owns the outer commit; an error rolls this call back to its savepoint.
+    pub async fn terminate_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        c: &Claim,
+        t: Terminal,
+        now: u64,
+    ) -> Result<()> {
+        self.tx_in(
+            tx,
+            Scope::Run(
+                &c.run,
+                if matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_)) {
+                    Mode::Tree
+                } else {
+                    Mode::Close
+                },
+            ),
+            |s| {
+                fence(s, c, now, false)?;
+                if t == Terminal::Succeeded {
+                    return Err(Error::Invalid("requires finalizer".into()));
+                }
+                let cascade = matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_));
+                let mut pending = vec![c.run.clone()];
+                while let Some(h) = pending.pop() {
+                    if cascade {
+                        pending.extend(
+                            s.runs
+                                .values()
+                                .filter(|r| {
+                                    r.spec.parent.as_ref() == Some(&h)
+                                        && !matches!(r.state, RunState::Terminal(_))
+                                })
+                                .map(|r| r.handle.clone()),
+                        );
+                    }
+                    let outstanding = s.operations.values().any(|op| op.run == h && !op.settled);
+                    let r = get_mut(s, &h)?;
+                    if !matches!(r.state, RunState::Terminal(_)) {
+                        r.state = RunState::Terminal(t.clone());
+                        r.revision += 1;
+                    }
+                    if outstanding {
+                        r.stop = Progress::Pending;
+                        r.cleanup = Progress::Pending;
+                    }
+                    s.queue.retain(|e| e.key != key(&h));
+                }
+                Ok(())
+            },
+        )
+        .await
+    }
+    /// Stages successful completion after the normal fencing and receipt checks.
+    /// The host owns the outer commit; an error rolls this call back to its savepoint.
+    pub async fn finalize_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        c: &Claim,
+        completion: Completion,
+        now: u64,
+    ) -> Result<()> {
+        self.tx_in(tx, Scope::Run(&c.run, Mode::Finalize), |s| {
+            let r = fence(s, c, now, false)?;
+            if r.completion.as_ref() == Some(&completion.id)
+                && r.output.as_ref() == Some(&completion.output)
+                && r.receipt.as_ref() == Some(&completion.receipt)
+            {
+                return Ok(());
+            }
+            let r = fence(s, c, now, true)?;
+            for id in ancestors(s, &r.spec.account)? {
+                s.accounts[&id].admission(true)?;
+            }
+            if s.operations.values().any(|o| {
+                o.run == c.run
+                    && (!o.settled
+                        || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
+                        || (o.state == OperationState::Failed
+                            && !s.operations.values().any(|later| {
+                                later.run == o.run
+                                    && later.request.key == o.request.key
+                                    && later.request.attempt > o.request.attempt
+                            })))
+            }) {
+                return Err(Error::UsageUnknown);
+            }
+            let v = &completion.receipt;
+            if !v.passed
+                || v.hash != digest(&completion.output)
+                || v.basis_revision != r.spec.basis_revision
+                || v.config_version != r.spec.config_version
+                || v.validator != r.spec.validator
+                || v.validator_version != r.spec.validator_version
+            {
+                return Err(Error::Conflict);
+            }
+            if let Some(id) = &r.spec.session {
+                let session = s
+                    .sessions
+                    .get_mut(&session_key(&r.spec.tenant, id))
+                    .ok_or(Error::Conflict)?;
+                if session.1 != r.spec.context_revision {
+                    return Err(Error::Conflict);
+                }
+                session.1 += 1;
+            }
+            let r = get_mut(s, &c.run)?;
+            r.state = RunState::Terminal(Terminal::Succeeded);
+            r.output = Some(completion.output);
+            r.receipt = Some(completion.receipt);
+            r.completion = Some(completion.id);
+            r.revision += 1;
+            Ok(())
+        })
+        .await
+    }
+    /// Stages a new account with an immutable policy and optional parent.
+    /// The host owns the outer commit; an error rolls this call back to its savepoint.
+    pub async fn create_account_with_policy_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant: &str,
+        limit: Amount,
+        parent: Option<String>,
+        policy: AccountPolicy,
+    ) -> Result<String> {
+        self.tx_in(tx, Scope::Account(parent.clone().as_deref()), |s| {
+            policy.validate()?;
+            if let Some(id) = &parent {
+                let a = s.accounts.get(id).ok_or(Error::NotFound)?;
+                if a.tenant != tenant && a.tenant != "*" {
+                    return Err(Error::PermissionDenied);
+                }
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            s.accounts.insert(
+                id.clone(),
+                Account {
+                    id: id.clone(),
+                    tenant: tenant.into(),
+                    parent,
+                    limit,
+                    reserved: Amount::default(),
+                    used: Amount::default(),
+                    unknown: 0,
+                    exhausted: false,
+                    warnings: [0, 0],
+                    policy,
+                    quantity_reserved: BTreeMap::new(),
+                    quantity_used: BTreeMap::new(),
+                    quantity_warnings: BTreeMap::new(),
+                },
+            );
+            Ok(id)
+        })
+        .await
+    }
+    /// Stages an account using the default policy; the host commits the transaction.
+    pub async fn create_account_in(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant: &str,
+        limit: Amount,
+        parent: Option<String>,
+    ) -> Result<String> {
+        self.create_account_with_policy_in(tx, tenant, limit, parent, AccountPolicy::default())
+            .await
     }
 }

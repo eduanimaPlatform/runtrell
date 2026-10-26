@@ -10,7 +10,7 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 |---|---|
 | executions | 所有Run/operationの複合PK、固定request/Workspace入力JSONB、numeric revision、取消要求、最新観測、資源別条件/receipt JSONB、回収済み判定。未回収行の部分index |
 | schema_config | 不変のversion/Capacity。通常の更新ではlockしない |
-| runs | Run単位のrevision・generation・owner/lease・checkpoint・終端/停止/回収/精算/配送状態・receipt。PK tenant/id、受付unique tenant/principal/request_key、親検索、session未完了sequenceのindex |
+| runs | 受付入力request_spec（親期限適用前）と実効spec、Run単位のrevision・generation・owner/lease・checkpoint・終端/停止/回収/精算/配送状態・receipt。PK tenant/id、受付unique tenant/principal/request_key、親検索、session未完了sequenceのindex |
 | sessions | 衝突しないtenant/session key、受付sequence、context_revision |
 | operations | tenant/Run/論理操作keyの安定したidentity |
 | attempts | 安定attempt ID、request/intent、送信世代/回数、result、external ID、usage観測、unsettled_result。Run/操作key/attempt unique、Run未精算index |
@@ -92,3 +92,24 @@ Memory/Pgに同一6件の契約suiteを適用する（固定入力/identity、CA
 ## 予算・受付方針
 
 AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_accountsのJSONB列へ保存し、既存の全祖先lock順と同じtransactionで更新する。Run方針はspec、優先度/公平性の重みはqueue_entries.schedulingへ保存する。queue内の選択はMemoryと同じbudget::queue_indexを使う。schema 3は空namespace用であり、過去schemaの移行・互換読込みは追加しない。
+
+## Host-owned transaction
+
+`start_in`、`create_account_in`、`create_account_with_policy_in`、`terminate_in`、
+`finalize_in` は `&mut sqlx::Transaction<'_, Postgres>` に参加する公開 API。
+`start_in` は RunSpec.account で既存口座を指定でき、RunSpec.parent で親子関係を
+指定する。独立した後続 Run も同じ口座を共有できる。受付の同 key・同内容は
+同じ Run を返し、異内容は Conflict。親の期限適用前の受付内容（request_spec）を保存・比較し、元の child spec を再実行できる。
+通常の trait API と同じ遷移・lock・保存処理を使い、hook/callback は持たない。
+
+host は同じ transaction で独自の SQL を実行し、最後に commit/rollback する。
+各 API の成功は未 commit の staged write であり、耐久成功ではない。
+API は savepoint を使い、失敗時はその呼出しの部分更新を戻す。host は一連の
+処理のどれかが失敗したら外側も rollback する。外側の rollback では口座・Run・
+queue/permit がすべて消え、予約や外部 I/O は開始しない。
+`terminate_in` は成功以外の終端、`finalize_in` は検証済み成功の既存条件を守る。
+
+同じ database/namespace の初期化済み store と通常の READ COMMITTED transaction
+を使う。transaction 全体で既存の lock 順序を守り、SQL の待機は有限とする。
+API は synchronous_commit=on、lock_timeout=5s、statement_timeout=30s を設定する。
+host は commit 前にこれらを弱めず、外部 I/O 中は transaction を保持しない。

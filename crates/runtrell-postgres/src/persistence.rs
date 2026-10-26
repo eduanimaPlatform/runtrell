@@ -56,6 +56,18 @@ impl PgStore {
         f: impl FnOnce(&mut Ledger) -> Result<R>,
     ) -> Result<R> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        let value = self.tx_in(&mut tx, scope, f).await?;
+        self.commit(tx).await?;
+        Ok(value)
+    }
+    pub(crate) async fn tx_in<R>(
+        &self,
+        outer: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        scope: Scope<'_>,
+        f: impl FnOnce(&mut Ledger) -> Result<R>,
+    ) -> Result<R> {
+        // A failed call must not leave partial permits or writes in a host transaction.
+        let mut tx = sqlx::Acquire::begin(&mut *outer).await.map_err(storage)?;
         let result = async {
             sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
                 .await.map_err(storage)?;
@@ -63,16 +75,18 @@ impl PgStore {
             let before = state.clone();
             let value = f(&mut state)?;
             self.save(&mut tx, &before, &state).await?;
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                sqlx::query("SELECT 1/0").execute(&mut *tx).await.map_err(storage)?;
+            }
             Ok(value)
         }.await;
         match result {
             Ok(value) => {
-                self.commit(tx).await?;
+                // RELEASE SAVEPOINT only; the caller owns the outer COMMIT.
+                tx.commit().await.map_err(storage)?;
                 Ok(value)
             }
             Err(error) => {
-                // Drop only queues a rollback in SQLx. Release partial permits
-                // before the caller can attempt another allocation on this pool.
                 tx.rollback().await.map_err(storage)?;
                 Err(error)
             }
@@ -212,7 +226,7 @@ impl PgStore {
                     )
                     .await?
                 {
-                    let r: RunRecord = decode(v)?;
+                    let r = load_run(&mut s, v)?;
                     s.runs.insert(key(&r.handle), r);
                 }
             }
@@ -237,7 +251,7 @@ impl PgStore {
                     )
                     .await?
                 {
-                    let r: RunRecord = decode(v)?;
+                    let r = load_run(&mut s, v)?;
                     s.runs.insert(key(&r.handle), r);
                 }
                 // An existing receipt requires no new admission or parent/session mutation.
@@ -255,7 +269,7 @@ impl PgStore {
                             )
                             .await?
                         {
-                            let r: RunRecord = decode(v)?;
+                            let r = load_run(&mut s, v)?;
                             s.runs.insert(key(h), r);
                         }
                     }
@@ -291,7 +305,7 @@ impl PgStore {
                         )
                         .await?
                     {
-                        let r: RunRecord = decode(v)?;
+                        let r = load_run(&mut s, v)?;
                         s.runs.insert(key(&at), r);
                         if matches!(mode, Mode::Tree) {
                             // Discover children only after locking their parent: child admission
@@ -306,7 +320,7 @@ impl PgStore {
                                 )
                                 .await?
                             {
-                                let child: RunRecord = decode(v)?;
+                                let child = load_run(&mut s, v)?;
                                 pending.push_back(child.handle);
                             }
                         }
@@ -318,7 +332,7 @@ impl PgStore {
                     {
                         // Only one active predecessor is needed to enforce the input order.
                         for v in self.rows(conn,"runs","tenant=$1 AND session_id=$2 AND sequence < $3::numeric AND NOT (state ? 'Terminal') ORDER BY sequence LIMIT 1", &[&h.tenant,id,&r.sequence.to_string()],false).await? {
-                            let prior: RunRecord = decode(v)?; s.runs.insert(key(&prior.handle),prior);
+                            let prior = load_run(&mut s, v)?; s.runs.insert(key(&prior.handle),prior);
                         }
                     }
                     if matches!(mode, Mode::Budget | Mode::Work | Mode::Finalize) {
@@ -441,7 +455,9 @@ impl PgStore {
     async fn save(&self, conn: &mut PgConnection, before: &Ledger, s: &Ledger) -> Result<()> {
         for (k, r) in &s.runs {
             if before.runs.get(k) != Some(r) {
-                self.put(conn,"runs","handle,spec,schema,revision,sequence,owner,generation,state,checkpoint,cancel,stop,cleanup,settlement,delivery,output,receipt,completion","tenant,id",json!(r)).await?;
+                let mut value = json!(r);
+                value["request_spec"] = json!(s.requests.get(k).ok_or(Error::Storage)?);
+                self.put(conn,"runs","handle,spec,request_spec,schema,revision,sequence,owner,generation,state,checkpoint,cancel,stop,cleanup,settlement,delivery,output,receipt,completion","tenant,id",value).await?;
             }
         }
         for (k, a) in &s.accounts {
@@ -796,4 +812,11 @@ fn add_queue(s: &mut Ledger, v: Value) -> Result<()> {
         deadline: w.deadline,
     });
     Ok(())
+}
+
+fn load_run(s: &mut Ledger, value: Value) -> Result<RunRecord> {
+    let request = decode(value["request_spec"].clone())?;
+    let run: RunRecord = decode(value)?;
+    s.requests.insert(key(&run.handle), request);
+    Ok(run)
 }

@@ -26,6 +26,7 @@ pub struct PgStore {
 #[derive(Clone, Default)]
 struct Ledger {
     runs: BTreeMap<String, RunRecord>,
+    requests: BTreeMap<String, RunSpec>,
     accounts: BTreeMap<String, Account>,
     operations: BTreeMap<String, Operation>,
     sessions: BTreeMap<String, (u64, u64)>,

@@ -189,7 +189,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "RES-01", "RES-02", "RES-03", "PAR-03", "PAR-05", "U09", "A06",
                 ]
                 .contains(&id.as_str());
-                let design = if budget_scope {
+                let design = if id == "REC-08" {
+                    "[postgres](postgres.md#host-owned-transaction), [api](api.md), [execution-boundary](execution-boundary.md)"
+                } else if budget_scope {
                     "[budget](budget.md), [concurrency](concurrency.md), [api](api.md)"
                 } else if execution_scope {
                     "[execution](execution.md), [workspace](workspace.md)"
@@ -210,6 +212,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (
                         "execution/{controller,linux}.rs; postgres/src/execution.rs; runtrell-exec-limit",
                         "事前ResourcePlan・専用subtree・tmpfs source・boot/mount namespace・inode照合。precreation_intent_is_discoverable_without_resource_identities、precreation_recovery_confirms_absence_and_reclaims_idempotently、mount_provenance_rejects_foreign_source_type_and_stacked_mountsはmacOS成功。linux_acquisition_crash_after_cgroup / after_mount / before_identity_recordはCI必須・Linux未実行。Memory/Pg台帳と予約/精算の既存契約を維持。末尾rt-4b参照",
+                    )
+                } else if id == "REC-08" {
+                    (
+                        "postgres/src/engine.rs::{start_in,create_account_in,create_account_with_policy_in,terminate_in,finalize_in}; persistence.rs::tx_in",
+                        "postgres/tests/transaction.rs: host SQLとRun/口座のcommit・rollback・SQL失敗・同値受付/異値拒否・共有口座・親子Run・終端/後続Run境界・別process再open。耐久成功はhostのouter commit後。電源断/failoverは未検証",
                     )
                 } else if ["RUN-07", "VAL-06"].contains(&id.as_str()) {
                     (

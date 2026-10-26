@@ -26,6 +26,19 @@ Hosts implement `ModelPort`/`Tool`/`Policy`/`Validator`/`Finalizer` and supply a
 Finalizer receipt establish Run success. External application, cancellation,
 stopping, reclamation and settlement remain distinct records.
 
+## PostgreSQL transaction API
+
+| API | Stages in the host's `sqlx::Transaction<'_, Postgres>` |
+|---|---|
+| `PgStore::start_in` | Idempotent Run admission, queue permits, optional parent and existing account |
+| `PgStore::create_account_in` / `create_account_with_policy_in` | New account with default or explicit policy |
+| `PgStore::terminate_in` | Fenced non-success terminal state |
+| `PgStore::finalize_in` | Validated, fenced successful completion |
+
+Hosts execute their own SQL in the same transaction and own commit/rollback.
+Success from these methods means staged writes; only the outer commit makes them
+durable. A failed call rolls back its savepoint. See [transaction scope](docs/design/postgres.md#host-owned-transaction).
+
 ## Standard tools chosen by the host
 
 `standard_tools::ToolSet` builds ordinary `RegisteredTool` values for `Runtime.tools`.

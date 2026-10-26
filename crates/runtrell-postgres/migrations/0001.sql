@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.runs (
     tenant text GENERATED ALWAYS AS (handle->>'tenant') STORED NOT NULL,
     id text GENERATED ALWAYS AS (handle->>'id') STORED NOT NULL,
     spec jsonb NOT NULL,
+    request_spec jsonb NOT NULL,
     principal text GENERATED ALWAYS AS (spec->>'principal') STORED NOT NULL,
     request_key text GENERATED ALWAYS AS (spec->>'request_key') STORED NOT NULL,
     account text GENERATED ALWAYS AS (spec->>'account') STORED NOT NULL,
