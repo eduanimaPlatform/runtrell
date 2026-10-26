@@ -15,6 +15,16 @@ processとpipeの非同期待機はTokio側に残す。lockはoperation別で、
 取得・開始準備・照会・unmount/削除は既存のblocking worker経路を維持する。
 同期syscallそのものの強制中断やLinux上の所要時間改善の実証は、この変更の単体試験では保証しない。
 
+`start`はoperation lockの競合だけを開始成功と扱わない。Ready保存後に取得側のfdを
+閉じても、別Runのfork直後・exec前の子が同じopen file descriptionを保持している間は
+flockが残り得る。Readyの競合は非同期に待ち直し、元のwall枠とcontext deadlineの
+残時間を開始準備・watchdogにも適用する。取消・期限切れはエラーで返し、予約やreceiptを
+変更しない。Running/Collectingまたは停止・回収状態の耐久記録を確認した再呼出しだけは
+冪等に成功する。Acquiring/Unknownは開始成功としない。ロック取得後はrecordを再読し、
+同じoperationを二重起動しない。単体試験は複製fdとfake supervisorで競合を固定する。
+実Linuxの並行試験は同一Runの重複start・開始直後の遷移・Run別成果物の一回だけの生成を
+確認する（Hosted未実行）。停止待ちの上限は変更しない。
+
 ## 目的と受入境界
 
 Run受付・検索だけでは環境を作らない。コード要求は既存dispatchのSandbox操作として、階層予算と共有slotを先に予約する。RunStore / OperationStore / BudgetAuthority / Schedulerは変更しない。新しいExecutionLedgerは取得intent、固定入力、取消、停止、資源別回収、費用を別に保存する。Memory adapterは共有instance内のみ、PgStoreのExecutionLedgerはDBへのCOMMIT後の耐久保存を提供する。台帳の耐久性とbackend実体の再発見能力は別契約とする。

@@ -534,13 +534,29 @@ async fn linux_concurrent_runs_reclaim_independently() {
         jobs.spawn(async move {
             let mut c = context(&format!("parallel-{index}"));
             c.claim.run.id = format!("run-{index}");
-            let r = request("printf data > scratch-data; sleep 0.2");
+            let expected = format!("data-{index}");
+            let mut r = request(&format!("printf {expected} >> scratch-data; sleep 0.2"));
+            r.output_paths.push("scratch-data".into());
             let begin = std::time::Instant::now();
             let e = b.acquire(&c, &r).await.unwrap();
             let acquired = begin.elapsed();
-            b.start(&c, &e).await.unwrap();
+            tokio::try_join!(b.start(&c, &e), b.start(&c, &e)).unwrap();
             let started = begin.elapsed();
-            stopped(&b, &c).await;
+            let after_start = b.lookup(&c).await.unwrap().unwrap();
+            assert!(
+                matches!(
+                    after_start.state,
+                    ExecutionState::Running | ExecutionState::Collecting | ExecutionState::Stopped
+                ),
+                "start must acknowledge a durable transition: {after_start:?}"
+            );
+            let observation = stopped(&b, &c).await;
+            assert!(observation.failure.is_none(), "{observation:?}");
+            assert_eq!(
+                observation.result.unwrap()["files"]["scratch-data"],
+                serde_json::json!(expected.as_bytes()),
+                "each Run must execute exactly once and retain its own output"
+            );
             let stopped = begin.elapsed();
             destroyed(&b, &c).await;
             eprintln!("parallel-{index}: acquire={acquired:?}, start={:?}, stop={:?}, destroy={:?}, total={:?}", started - acquired, stopped - started, begin.elapsed() - stopped, begin.elapsed());

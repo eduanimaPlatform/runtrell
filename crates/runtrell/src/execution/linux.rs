@@ -99,6 +99,21 @@ fn acquisition_boundary(name: &str) {
 fn io(e: std::io::Error) -> Error {
     Error::Invalid(format!("LINUX_IO: {e}"))
 }
+fn start_request(
+    request: &ExecutionRequest,
+    c: &ToolContext,
+    began: std::time::Instant,
+) -> Result<ExecutionRequest> {
+    let remaining = Duration::from_millis(request.limits.wall_ms)
+        .saturating_sub(began.elapsed())
+        .as_millis() as u64;
+    if remaining == 0 {
+        return Err(Error::Deadline);
+    }
+    let mut effective = with_deadline(request.clone(), c)?;
+    effective.limits.wall_ms = effective.limits.wall_ms.min(remaining);
+    Ok(effective)
+}
 fn hash(path: &Path) -> Result<String> {
     Ok(crate::data::content_digest(&fs::read(path).map_err(io)?))
 }
@@ -890,54 +905,76 @@ impl ExecutionBackend for LinuxBackend {
         .map_err(|_| Error::Storage)?
     }
     async fn start(&self, c: &ToolContext, e: &ExecutionRef) -> Result<()> {
-        let backend = self.clone();
-        let c = c.clone();
-        let e = e.clone();
-        tokio::task::spawn_blocking(move || {
-            let id = Self::id(&c);
-            let mut r = backend.load(&id)?;
-            if r.observation.execution != e {
-                return Err(Error::PermissionDenied);
-            }
-            let Some(lock) = backend.lock(&id)? else {
+        let began = std::time::Instant::now();
+        loop {
+            let backend = self.clone();
+            let c = c.clone();
+            let e = e.clone();
+            let started = tokio::task::spawn_blocking(move || {
+                let id = Self::id(&c);
+                let mut r = backend.load(&id)?;
+                if r.observation.execution != e {
+                    return Err(Error::PermissionDenied);
+                }
+                let lock = backend.lock(&id)?;
+                if lock.is_some() {
+                    r = backend.load(&id)?;
+                }
+                match r.observation.state {
+                    ExecutionState::Ready => (),
+                    ExecutionState::Acquiring | ExecutionState::Unknown => {
+                        return Err(Error::Conflict);
+                    }
+                    ExecutionState::Running
+                    | ExecutionState::Collecting
+                    | ExecutionState::Stopped
+                    | ExecutionState::Reclaiming
+                    | ExecutionState::Destroyed => return Ok(true),
+                }
+                if backend.dir(&id).join("cancel").exists() {
+                    return Err(Error::Closed);
+                }
+                let effective = start_request(&r.request, &c, began)?;
+                let Some(lock) = lock else {
+                    // flock contention is not a supervisor acknowledgement. In
+                    // particular, a different Run's fork can temporarily retain
+                    // an acquisition descriptor even after Ready was saved.
+                    return Ok(false);
+                };
+                backend.verify_group(&id)?;
+                if r.scratch_mount_id.is_none()
+                    || backend.scratch_identity(&id)? != r.scratch_mount_id
+                {
+                    return Err(Error::Conflict);
+                }
+                if read_usage(&backend.group(&id))?.cpu_usec
+                    >= effective
+                        .limits
+                        .cpu_millis
+                        .ok_or(Error::Conflict)?
+                        .saturating_mul(1000)
+                {
+                    backend.recover_stop(&id, &mut r)?;
+                    return Err(Error::BudgetAtLimit);
+                }
+                let command = backend.command(&id, &effective)?;
+                let effective = start_request(&r.request, &c, began)?;
+                r.observation.state = ExecutionState::Running;
+                backend.save(&id, &r)?;
+                // The persisted request remains fixed. Only this watchdog uses remaining time.
+                let b = backend.clone();
+                tokio::spawn(
+                    async move { b.run(id, r, lock, command, effective.limits.wall_ms).await },
+                );
+                Ok(true)
+            })
+            .await
+            .map_err(|_| Error::Storage)??;
+            if started {
                 return Ok(());
-            };
-            r = backend.load(&id)?;
-            if r.observation.state != ExecutionState::Ready {
-                return Ok(());
             }
-            if backend.dir(&id).join("cancel").exists() {
-                return Err(Error::Closed);
-            }
-            let effective = with_deadline(r.request.clone(), &c)?;
-            backend.verify_group(&id)?;
-            if r.scratch_mount_id.is_none() || backend.scratch_identity(&id)? != r.scratch_mount_id
-            {
-                return Err(Error::Conflict);
-            }
-            if read_usage(&backend.group(&id))?.cpu_usec
-                >= effective
-                    .limits
-                    .cpu_millis
-                    .ok_or(Error::Conflict)?
-                    .saturating_mul(1000)
-            {
-                backend.recover_stop(&id, &mut r)?;
-                return Err(Error::BudgetAtLimit);
-            }
-            let command = backend.command(&id, &effective)?;
-            let effective = with_deadline(r.request.clone(), &c)?;
-            r.observation.state = ExecutionState::Running;
-            backend.save(&id, &r)?;
-            // The persisted request remains fixed. Only this watchdog uses remaining time.
-            let b = backend.clone();
-            tokio::spawn(
-                async move { b.run(id, r, lock, command, effective.limits.wall_ms).await },
-            );
-            Ok(())
-        })
-        .await
-        .map_err(|_| Error::Storage)?
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
     async fn lookup(&self, c: &ToolContext) -> Result<Option<Observation>> {
         let backend = self.clone();
@@ -1183,6 +1220,186 @@ mod tests {
             helper_hash: String::new(),
             launcher_hash: String::new(),
         }
+    }
+    fn ready_record(b: &LinuxBackend, c: &ToolContext) -> Record {
+        let id = LinuxBackend::id(c);
+        fs::create_dir(b.dir(&id)).unwrap();
+        let row = Record {
+            plan: b.plan(&id).unwrap(),
+            preparing: false,
+            request: ExecutionRequest::process("/bin/sh", vec![]),
+            observation: Observation {
+                execution: ExecutionRef {
+                    owner: c.claim.run.clone(),
+                    id: c.operation.clone(),
+                    runtime_version: b.version.clone(),
+                },
+                state: ExecutionState::Ready,
+                result: None,
+                failure: None,
+                cost_micro_usd: Some(0),
+                released_resources: Default::default(),
+            },
+            usage: None,
+            group_inode: None,
+            scratch_mount_id: None,
+        };
+        b.save(&id, &row).unwrap();
+        row
+    }
+    #[tokio::test]
+    async fn start_never_acknowledges_ready_while_operation_lock_is_held() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        let mut row = ready_record(&b, &c);
+        row.request.limits.wall_ms = 30;
+        b.save(&id, &row).unwrap();
+        let acquisition_lock = b.lock(&id).unwrap().unwrap();
+        // Like a different Run's forked child before exec: closing the parent's
+        // descriptor does not release flock while another descriptor owns it.
+        let inherited_lock = acquisition_lock.try_clone().unwrap();
+        drop(acquisition_lock);
+        assert!(b.lock(&id).unwrap().is_none());
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            b.start(&c, &row.observation.execution),
+        )
+        .await
+        .expect("contention must not reset the request's wall budget");
+        assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+        let observation = b.lookup(&c).await.unwrap().unwrap();
+        assert_eq!(observation.state, ExecutionState::Ready);
+        assert!(observation.released_resources.is_empty());
+        drop(inherited_lock);
+    }
+    #[tokio::test]
+    async fn start_retries_ready_after_lock_release_and_checks_group_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        let row = ready_record(&b, &c);
+        fs::create_dir(b.group(&id)).unwrap();
+        fs::write(b.group(&id).join("cgroup.kill"), "untouched").unwrap();
+        let lock = b.lock(&id).unwrap().unwrap();
+        let start = b.start(&c, &row.observation.execution);
+        tokio::pin!(start);
+        tokio::select! {
+            result = &mut start => panic!("Ready is still locked: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => (),
+        }
+        drop(lock);
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut start)
+            .await
+            .expect("start must retry after the lock is released");
+        // The group has no saved inode: retry must reach the real preflight,
+        // rather than acknowledge Ready or adopt a group by name.
+        assert!(matches!(result, Err(Error::Conflict)), "{result:?}");
+        assert_eq!(
+            fs::read(b.group(&id).join("cgroup.kill")).unwrap(),
+            b"untouched"
+        );
+        let saved = b.load(&id).unwrap();
+        assert_eq!(saved.request, row.request);
+        assert_eq!(saved.observation, row.observation);
+    }
+    #[tokio::test]
+    async fn start_acknowledges_competing_supervisor_without_waiting_for_its_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        let mut row = ready_record(&b, &c);
+        let lock = b.lock(&id).unwrap().unwrap();
+        let execution = row.observation.execution.clone();
+        let start = b.start(&c, &execution);
+        tokio::pin!(start);
+        tokio::select! {
+            result = &mut start => panic!("supervisor has not saved Running: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => (),
+        }
+        // Fake supervisor: publish its durable handoff, retaining its lock.
+        // No Linux-only mount or process launch is needed for this race.
+        row.observation.state = ExecutionState::Running;
+        b.save(&id, &row).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut start)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(b.lock(&id).unwrap().is_none());
+        assert_eq!(b.load(&id).unwrap().observation, row.observation);
+        // An idempotent replay must not create another supervisor either.
+        b.start(&c, &execution).await.unwrap();
+        drop(lock);
+    }
+    #[tokio::test]
+    async fn start_contention_honors_context_deadline_and_cancel() {
+        for cancel in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let groups = tempfile::tempdir().unwrap();
+            let b = fixture(root.path(), groups.path());
+            let mut c = crash_context();
+            let id = LinuxBackend::id(&c);
+            let row = ready_record(&b, &c);
+            let _lock = b.lock(&id).unwrap().unwrap();
+            c.deadline = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    + 30,
+            );
+            if cancel {
+                b.cancel(&c).await.unwrap();
+            }
+            let result = tokio::time::timeout(
+                Duration::from_millis(500),
+                b.start(&c, &row.observation.execution),
+            )
+            .await
+            .expect("the context deadline must bound the Ready lock wait");
+            if cancel {
+                assert!(matches!(result, Err(Error::Closed)), "{result:?}");
+            } else {
+                assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+            }
+            assert_eq!(b.load(&id).unwrap().observation, row.observation);
+        }
+    }
+    #[tokio::test]
+    async fn start_rejects_unconfirmed_states_and_foreign_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        let mut row = ready_record(&b, &c);
+        for state in [ExecutionState::Acquiring, ExecutionState::Unknown] {
+            row.observation.state = state;
+            b.save(&id, &row).unwrap();
+            for contended in [false, true] {
+                let _lock = contended.then(|| b.lock(&id).unwrap().unwrap());
+                assert!(matches!(
+                    b.start(&c, &row.observation.execution).await,
+                    Err(Error::Conflict)
+                ));
+                assert_eq!(b.load(&id).unwrap().observation, row.observation);
+            }
+        }
+        row.observation.state = ExecutionState::Running;
+        b.save(&id, &row).unwrap();
+        let _lock = b.lock(&id).unwrap().unwrap();
+        let mut foreign = row.observation.execution.clone();
+        foreign.owner.id = "another-run".into();
+        assert!(matches!(
+            b.start(&c, &foreign).await,
+            Err(Error::PermissionDenied)
+        ));
     }
     #[test]
     fn durable_identity_lock_and_ledger_match_survive_client_loss() {
