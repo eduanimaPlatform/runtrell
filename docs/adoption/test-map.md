@@ -542,3 +542,8 @@ rt-5の意図した試験変更: xtaskの必須名件数をLinux default 8→9/P
 `python_tool_uses_selected_script_and_pinned_runtime_only_when_configured`（testkitのpython feature）はsynthetic runtimeとfake backendでscript選択、Pythonだけの提示定義、固定hash、offline引数、保存/回収を確認する。実Python評価の証拠ではない。取得応答待ちの試験は取消とRun期限切れの双方で、payload非開始・照会回収・最終DeadlineReachedまで検査する。
 
 `selected_execution_reports_capability_diagnostics_but_disabled_does_not`で選択時だけ必要制限を検査すること、`argument_policy_is_pinned_in_definition_and_enforced_per_call`で明示した引数方針（Any/Exact）を定義と呼出しの両方へ適用しdigestへ固定することを確認する。
+
+## Driver stack regression
+
+- `testkit/tests/driver_stack.rs` and `postgres/tests/driver_stack.rs` run the shared model/tool/automatic-compaction and image-attachment contracts on explicitly sized 1 MiB threads, half Tokio's default worker stack. A current-thread runtime polls the driver on that thread; boxing the test's root future keeps fixture storage on the heap without moving driver polling to another executor.
+- The contracts assert successful completion after lost compaction/tool responses, checkpoint reuse, preserved attachments, single invocation and settlement, and validation repair. PostgreSQL also reopens the control store through an independent pool and decodes the saved JSON checkpoints. Providers are credential-free fakes; this does not establish a universal stack bound for arbitrary host adapters or payload depths.

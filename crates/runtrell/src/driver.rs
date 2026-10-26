@@ -298,9 +298,9 @@ impl<
         IF: Future<Output = Result<ExternalResult>>,
         LF: Future<Output = Result<Lookup>>,
     {
-        let existing = self
-            .store
-            .operation(&c.run, &request.key)
+        // Store and adapter futures can be large for durable hosts. Box the
+        // children as well as this dispatcher to bound its live poll frame.
+        let existing = Box::pin(self.store.operation(&c.run, &request.key))
             .await?
             .filter(|op| op.request.attempt == request.attempt);
         let op = if let Some(op) = existing {
@@ -319,12 +319,10 @@ impl<
             }
             op
         } else {
-            let r = self.store.check(c, self.clock.now(), true).await?;
+            let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
             self.policy.authorize(&r, &request.target, permission)?;
             if request.attempt > 1 {
-                let previous = self
-                    .store
-                    .operation(&c.run, &request.key)
+                let previous = Box::pin(self.store.operation(&c.run, &request.key))
                     .await?
                     .ok_or(Error::Conflict)?;
                 request.recovery_until =
@@ -380,7 +378,7 @@ impl<
                 );
             }
             request.recovery_proof = proof;
-            match self.store.begin(c, request, self.clock.now()).await {
+            match Box::pin(self.store.begin(c, request, self.clock.now())).await {
                 Err(Error::ReservationDenied)
                     if matches!(r.spec.budget, ReservationPolicy::Shrink { .. }) =>
                 {
@@ -389,7 +387,7 @@ impl<
                 result => result?,
             }
         };
-        let r = self.store.check(c, self.clock.now(), false).await?;
+        let r = Box::pin(self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         if op.settled {
             return op.result.ok_or(Error::Conflict);
@@ -400,15 +398,17 @@ impl<
         let ctx = self.context(c, &r, &op, permission);
         let recovery = op.state != OperationState::Intent || op.send_count > 0;
         if recovery {
-            let found = lookup(ctx.clone()).await.unwrap_or(Lookup::Unknown);
+            let found = Box::pin(lookup(ctx.clone()))
+                .await
+                .unwrap_or(Lookup::Unknown);
             // Fence after lookup even when no result was found.
-            self.store.check(c, self.clock.now(), false).await?;
+            Box::pin(self.store.check(c, self.clock.now(), false)).await?;
             match found {
                 Lookup::Found(result) => {
                     return self.persist_result(c, &op.id, result).await;
                 }
                 Lookup::NotFound { scope } => {
-                    let r = self.store.check(c, self.clock.now(), true).await?;
+                    let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
                     self.policy.authorize(&r, &op.request.target, permission)?;
                     if let Err(error) = self
                         .store
@@ -416,9 +416,13 @@ impl<
                         .await
                     {
                         if error == Error::UsageUnknown {
-                            self.store
-                                .record(c, &op.id, ExternalResult::Unknown, self.clock.now())
-                                .await?;
+                            Box::pin(self.store.record(
+                                c,
+                                &op.id,
+                                ExternalResult::Unknown,
+                                self.clock.now(),
+                            ))
+                            .await?;
                         }
                         return Err(error);
                     }
@@ -432,20 +436,26 @@ impl<
                             external_id: op.id.clone(),
                         },
                     };
-                    self.store
-                        .record(c, &op.id, pending.clone(), self.clock.now())
-                        .await?;
+                    Box::pin(
+                        self.store
+                            .record(c, &op.id, pending.clone(), self.clock.now()),
+                    )
+                    .await?;
                     return Ok(pending);
                 }
                 Lookup::Unknown => {
-                    self.store
-                        .record(c, &op.id, ExternalResult::Unknown, self.clock.now())
-                        .await?;
+                    Box::pin(self.store.record(
+                        c,
+                        &op.id,
+                        ExternalResult::Unknown,
+                        self.clock.now(),
+                    ))
+                    .await?;
                     return Err(Error::UsageUnknown);
                 }
             }
         }
-        let r = self.store.check(c, self.clock.now(), true).await?;
+        let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         self.store.mark_sent(c, &op.id, self.clock.now()).await?;
         let deadline = match (
@@ -469,8 +479,7 @@ impl<
         };
         let mut ctx = ctx;
         ctx.deadline = deadline;
-        let result = self
-            .bounded(invoke(ctx), deadline)
+        let result = Box::pin(self.bounded(invoke(ctx), deadline))
             .await
             .unwrap_or(Ok(ExternalResult::Unknown))
             .unwrap_or(ExternalResult::Unknown);
@@ -583,16 +592,20 @@ impl<
         // off caller stacks, including hosts using small executor threads.
         let result = Box::pin(self.drive_inner(c)).await;
         self.store.release_slot(&slot_key).await?;
+        Box::pin(self.finish_drive(c, result)).await
+    }
+
+    async fn finish_drive(&self, c: &Claim, result: Result<RunRecord>) -> Result<RunRecord> {
         if let Err(e) = &result {
             if e == &Error::Closed {
-                return self.store.get(&c.run).await;
+                return Box::pin(self.store.get(&c.run)).await;
             }
             if let Error::Pending(reason) = e {
                 self.store.wait(c, reason, self.clock.now()).await?;
-                return self.store.get(&c.run).await;
+                return Box::pin(self.store.get(&c.run)).await;
             }
             if e == &Error::Backpressure {
-                let r = self.store.check(c, self.clock.now(), true).await?;
+                let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
                 self.store
                     .enqueue(QueueEntry {
                         key: format!("{}:{}", c.run.tenant, c.run.id),
@@ -605,7 +618,7 @@ impl<
                     })
                     .await?;
                 self.store.wait(c, "capacity", self.clock.now()).await?;
-                return self.store.get(&c.run).await;
+                return Box::pin(self.store.get(&c.run)).await;
             }
             let terminal = match e {
                 Error::Deadline => Some(Terminal::DeadlineReached),
@@ -620,28 +633,28 @@ impl<
             };
             if let Some(t) = terminal {
                 if matches!(e, Error::BudgetAtLimit | Error::ReservationDenied) {
-                    let r = self.store.check(c, self.clock.now(), true).await?;
+                    let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
                     if let ReservationPolicy::Wait { until } = r.spec.budget
                         && self.clock.now() < until
                     {
                         self.store.wait(c, "budget", self.clock.now()).await?;
-                        return self.store.get(&c.run).await;
+                        return Box::pin(self.store.get(&c.run)).await;
                     }
                     if r.spec.budget == ReservationPolicy::EndAccount {
                         self.store.exhaust(c, self.clock.now()).await?;
                     }
                 }
                 self.store.terminate(c, t, self.clock.now()).await?;
-                return self.store.get(&c.run).await;
+                return Box::pin(self.store.get(&c.run)).await;
             }
         }
         result
     }
     async fn drive_inner(&self, c: &Claim) -> Result<RunRecord> {
-        let r = self.store.check(c, self.clock.now(), false).await?;
+        let r = Box::pin(self.store.check(c, self.clock.now(), false)).await?;
         if matches!(r.state, RunState::Terminal(_)) {
-            self.reconcile(c).await?;
-            return self.store.get(&c.run).await;
+            Box::pin(self.reconcile(c)).await?;
+            return Box::pin(self.store.get(&c.run)).await;
         }
         let catalog = self.tools.iter().map(Tool::descriptor).collect::<Vec<_>>();
         file_tools::pin_catalog(&r, &self.policy, &self.tools)?;
@@ -711,7 +724,7 @@ impl<
             });
         let mut cursor = r.checkpoint.as_ref().map_or(0, |cp| cp.cursor);
         loop {
-            let current = self.store.check(c, self.clock.now(), true).await?;
+            let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
             if let Some(started) = repair_started(&current)
                 && self
                     .validator
@@ -723,563 +736,586 @@ impl<
             }
             let step = run.next_step().map_err(|e| Error::Invalid(e.to_string()))?;
             // Pending protocol state is recoverable before any external work.
-            self.save(c, &run, messages.clone(), cursor, &catalog)
-                .await?;
+            Box::pin(self.save(c, &run, messages.clone(), cursor, &catalog)).await?;
             match step {
                 AgentRunStep::CallModel { history, turn, .. } => {
-                    let current = self.store.get(&c.run).await?;
-                    let key = format!("{}model:{turn}", operation_prefix(&current));
-                    let existing = self.store.operation(&c.run, &key).await?;
-                    let current = self.store.get(&c.run).await?;
-                    let descriptors = file_tools::pin_catalog(&current, &self.policy, &self.tools)?;
-                    if descriptors.iter().any(|d| !catalog.contains(d)) {
-                        return Err(Error::Conflict);
-                    }
-                    let mut quoted_reserve = None;
-                    let mut quoted_prepared = None;
-                    let request = if let Some(op) = &existing {
-                        serde_json::from_value::<ModelRequest>(op.request.input.clone())
-                            .map_err(|e| Error::Invalid(e.to_string()))?
-                    } else {
-                        self.store.warnings(c, self.clock.now()).await?;
-                        let current = self.store.get(&c.run).await?;
-                        if let Some(cp) = &current.checkpoint {
-                            messages = cp.messages.clone();
-                        }
-                        let req = ModelRequest {
-                            attachments: crate::attachments::model_attachments(&messages)?,
-                            model: self.model.limits().model,
-                            messages: messages.clone(),
-                            tools: descriptors.clone(),
-                            max_output: 0,
-                            metadata: Value::Null,
-                            images: images::model_images(&current, &messages)?,
-                        };
-                        let prepared = self.model.prepare_request(&current, req).await?;
-                        let input = self.model.input_upper_bound(&prepared)?;
-                        if current.spec.compaction.as_ref().is_some_and(|policy| {
-                            self.model
-                                .limits()
-                                .context
-                                .saturating_sub(input)
-                                .saturating_sub(self.model.limits().max_output)
-                                < policy.min_remaining_tokens
-                        }) && current
-                            .checkpoint
-                            .as_ref()
-                            .is_none_or(|cp| cp.payload["compacted_for"] != key)
-                        {
-                            let data = context::CheckpointContext {
-                                store: self.store.as_ref(),
-                                claim: c,
-                                clock: &self.clock,
-                            };
-                            let access = data::Access::owner(data::Namespace {
-                                owner: c.run.clone(),
-                                agent: "driver".into(),
-                            });
-                            data.stage(&access, &key).await?;
-                            self.compact_context(c, &data, &access, &format!("compact:{key}"))
-                                .await?;
-                            messages = self
-                                .store
-                                .get(&c.run)
-                                .await?
-                                .checkpoint
-                                .ok_or(Error::Conflict)?
-                                .messages;
-                            // Re-prepare and re-quote from the committed summary on the next pass.
-                            continue;
-                        }
-                        let (cap, reserve) = self.model_budget(c, input).await?;
-                        quoted_reserve = Some(reserve);
-                        let prepared = prepared.with_max_output(cap);
-                        let request = prepared.request().clone();
-                        quoted_prepared = Some(prepared);
-                        request
-                    };
-                    let mut dispatch = if let Some(op) = &existing {
-                        self.next_attempt(c, op, self.model.retry_policy()).await?
-                    } else {
-                        let reserve = quoted_reserve.ok_or(Error::Conflict)?;
-                        let mut d = DispatchRequest::new(
-                            &key,
-                            OperationKind::Model,
-                            &request.model,
-                            serde_json::to_value(&request).unwrap(),
-                            reserve,
-                        );
-                        d.price = self.model.limits().price;
-                        let repair_remaining = repair_started(&current).and_then(|started| {
-                            self.validator.repair_policy().max_elapsed.map(|max| {
-                                started.saturating_add(max).saturating_sub(self.clock.now())
-                            })
-                        });
-                        d.timeout = Some(
-                            repair_remaining.map_or(self.model.limits().timeout, |left| {
-                                left.min(self.model.limits().timeout)
-                            }),
-                        );
-                        if let Some((scope, retention)) = self.model.recovery() {
-                            d.scope = Some(scope);
-                            d.recovery_until = Some(
-                                self.clock
-                                    .now()
-                                    .checked_add(retention)
-                                    .ok_or(Error::Conflict)?,
-                            );
-                        }
-                        d
-                    };
-                    if existing
-                        .as_ref()
-                        .is_some_and(|op| op.request.attempt != dispatch.attempt)
-                    {
-                        let mut retry_request = request.clone();
-                        let prepared = self
-                            .model
-                            .prepare_request(&current, retry_request.clone())
-                            .await?;
-                        let input = self.model.input_upper_bound(&prepared)?;
-                        let (cap, reserve) = self.model_budget(c, input).await?;
-                        retry_request.max_output = cap;
-                        quoted_prepared = Some(prepared.with_max_output(cap));
-                        dispatch.reserve = reserve;
-                        dispatch.input = serde_json::to_value(retry_request).unwrap();
-                    }
-                    let invoke_request: ModelRequest =
-                        serde_json::from_value(dispatch.input.clone())
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                    let lookup_request = PreparedModelRequest::for_lookup(invoke_request.clone())?;
-                    let result = self
-                        .dispatch(
-                            c,
-                            dispatch,
-                            "model",
-                            |ctx| async move {
-                                let prepared = if let Some(prepared) = quoted_prepared {
-                                    prepared
-                                } else {
-                                    self.model
-                                        .prepare_request(&current, invoke_request.clone())
-                                        .await?
-                                };
-                                if prepared.request() != &invoke_request {
-                                    return Err(Error::Conflict);
-                                }
-                                self.model.invoke(&ctx, prepared).await
-                            },
-                            |ctx| async move {
-                                let found = self.model.lookup(&ctx, lookup_request).await?;
-                                if let Lookup::NotFound { scope } = &found
-                                    && ctx.recovery_proof.is_none()
-                                    && self.model.recovery().as_ref().map(|r| &r.0) != Some(scope)
-                                {
-                                    return Ok(Lookup::Unknown);
-                                }
-                                Ok(found)
-                            },
-                        )
-                        .await?;
-                    let output = completed(result)?;
-                    let reply: ModelReply = serde_json::from_value(output)
-                        .map_err(|e| Error::Invalid(e.to_string()))?;
-                    if reply.metadata["stop_reason"] == "max_tokens" {
-                        let current = self.store.check(c, self.clock.now(), true).await?;
-                        let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
-                        let count = cp.payload["continuations"].as_u64().unwrap_or(0);
-                        if current
-                            .spec
-                            .continuation
-                            .max_continuations
-                            .is_some_and(|max| count >= max)
-                        {
-                            return Err(Error::Invalid("MODEL_CONTINUATION_LIMIT".into()));
-                        }
-                        if !reply.metadata.is_null() {
-                            messages.push(Message {
-                                role: "provider".into(),
-                                text: String::new(),
-                                call_id: None,
-                                tool: None,
-                                data: reply.metadata,
-                            });
-                        }
-                        if !reply.text.is_empty() {
-                            let mut partial = Message::text("assistant", reply.text);
-                            partial.data = serde_json::json!({"continuation":true});
-                            messages.push(partial);
-                        }
-                        let instruction = current.spec.continuation.instruction;
-                        messages.push(Message::text("user", &instruction));
-                        run = AgentRun::from_spec(&protocol_spec, instruction, None);
-                        cp.payload["protocol"] =
-                            serde_json::to_value(&run).map_err(|_| Error::Storage)?;
-                        cp.payload["continuations"] =
-                            serde_json::json!(count.checked_add(1).ok_or(Error::Conflict)?);
-                        cp.messages = messages.clone();
-                        cp.cursor = cursor.checked_add(1).ok_or(Error::Conflict)?;
-                        cursor = cp.cursor;
-                        self.store
-                            .checkpoint(c, current.revision, cp, self.clock.now())
-                            .await?;
-                        continue;
-                    }
-                    if !reply.complete {
-                        return Err(Error::Invalid("incomplete model stream".into()));
-                    }
-                    let definitions = request
-                        .tools
-                        .iter()
-                        .map(|d| {
-                            Ok(Arc::new(ToolDefinition::new(
-                                ToolName::new(d.name.clone())
-                                    .map_err(|e| Error::Invalid(e.to_string()))?,
-                                d.name.clone(),
-                                d.input_schema.clone(),
-                            )))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let prepared = prepare_request(
-                        &protocol_spec,
-                        &Default::default(),
-                        &history,
-                        definitions,
-                        None,
-                        None,
-                    )
-                    .map_err(|e| Error::Invalid(e.to_string()))?;
-                    let mut choice = vec![];
-                    if !reply.metadata.is_null() {
-                        messages.push(Message {
-                            role: "provider".into(),
-                            text: String::new(),
-                            call_id: None,
-                            tool: None,
-                            data: reply.metadata.clone(),
-                        });
-                    }
-                    if !reply.text.is_empty() {
-                        choice.push(AssistantContent::text(reply.text.clone()));
-                        messages.push(Message::text("assistant", reply.text));
-                    }
-                    for call in reply.calls {
-                        choice.push(AssistantContent::tool_call(
-                            call.id.clone(),
-                            ToolName::new(call.name.clone())
-                                .map_err(|e| Error::Invalid(e.to_string()))?,
-                            call.arguments.clone(),
-                        ));
-                        messages.push(Message {
-                            role: "assistant".into(),
-                            text: String::new(),
-                            call_id: Some(call.id),
-                            tool: Some(call.name),
-                            data: call.arguments,
-                        });
-                    }
-                    let response = CompletionResponse::new(
-                        choice,
-                        ProtocolUsage::default(),
-                        Origin::new("host.chat", "host", self.model.limits().model),
-                        reply.metadata,
-                    )
-                    .with_finish_reason(FinishReason::Stop);
-                    run.model_response(ModelTurn::from_response(&response, &prepared))
-                        .map_err(|e| Error::Invalid(e.to_string()))?;
-                    cursor += 1;
-                    self.save(c, &run, messages.clone(), cursor, &catalog)
-                        .await?;
+                    Box::pin(self.drive_model(
+                        c,
+                        &mut run,
+                        &mut messages,
+                        &mut cursor,
+                        &catalog,
+                        (history, turn),
+                    ))
+                    .await?;
                 }
                 AgentRunStep::CallTools { calls } => {
-                    for call in calls {
-                        let (name, id, input) = match &call {
-                            PendingToolCall::Execute(call) => (
-                                call.name().to_string(),
-                                call.id().to_string(),
-                                call.arguments(),
-                            ),
-                            PendingToolCall::Malformed(call) => (
-                                call.name().to_string(),
-                                call.id().to_string(),
-                                serde_json::from_str(call.raw_arguments())
-                                    .map_err(|_| Error::Conflict)?,
-                            ),
-                            _ => return Err(Error::Unsupported("pending tool call".into())),
-                        };
-                        let tool = self
-                            .tools
-                            .iter()
-                            .find(|t| t.descriptor().name == name)
-                            .ok_or_else(|| Error::Unsupported(name.clone()))?;
-                        let descriptor = tool.descriptor();
-                        let current = self.store.check(c, self.clock.now(), true).await?;
-                        self.policy.authorize(
-                            &current,
-                            &descriptor.name,
-                            &descriptor.permission,
-                        )?;
-                        let prefix = operation_prefix(&current);
-                        let model_key = format!("{prefix}model:{}", run.turn());
-                        let presented = self
-                            .store
-                            .operation(&c.run, &model_key)
-                            .await?
-                            .ok_or(Error::Conflict)?;
-                        let offered: ModelRequest = serde_json::from_value(presented.request.input)
-                            .map_err(|_| Error::Conflict)?;
-                        if !offered.tools.contains(&descriptor) || !catalog.contains(&descriptor) {
-                            return Err(Error::Conflict);
-                        }
-                        let key = format!("{prefix}tool:{}:{id}", run.turn());
-                        let mut diagnostics = schema_diagnostics(&input, &descriptor.input_schema)?;
-                        if matches!(call, PendingToolCall::Malformed(_)) && diagnostics.is_empty() {
-                            diagnostics =
-                                schema_diagnostics(&input, &serde_json::json!({"type":"object"}))?;
-                        }
-                        if !diagnostics.is_empty() {
-                            let output = serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
-                            let policy = self.validator.repair_policy();
-                            let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
-                            cp.payload["last_tool_validation"] = serde_json::json!({"candidate":input,"repairable":true,"diagnostics":diagnostics});
-                            let started = repair_started(&current).unwrap_or(self.clock.now());
-                            if policy
-                                .max_repairs
-                                .is_some_and(|max| repair_count(&current) >= max)
-                                || policy.max_elapsed.is_some_and(|max| {
-                                    self.clock.now().saturating_sub(started) >= max
-                                })
-                            {
-                                self.store
-                                    .checkpoint(c, current.revision, cp, self.clock.now())
-                                    .await?;
-                                return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
-                            }
-                            messages.push(Message {
-                                role: "tool".into(),
-                                text: String::new(),
-                                call_id: Some(id),
-                                tool: Some(name),
-                                data: output.clone(),
-                            });
-                            let answer = match call {
-                                PendingToolCall::Execute(call) => {
-                                    call.answer(ToolResult::failed(ToolExecutionError::new(
-                                        ToolErrorKind::InvalidArgs,
-                                        output.to_string(),
-                                    )))
-                                }
-                                PendingToolCall::Malformed(call) => call.answer(Some(
-                                    runtrell_protocol::run::InvalidToolCallAction::Retry {
-                                        feedback: output.to_string(),
-                                    },
-                                )),
-                                _ => return Err(Error::Unsupported("pending tool call".into())),
-                            };
-                            run.answer(answer)
-                                .map_err(|e| Error::Invalid(e.to_string()))?;
-                            cursor += 1;
-                            let count = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0);
-                            cp.payload["tool_repair"] = serde_json::json!({"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started});
-                            cp.payload["protocol"] =
-                                serde_json::to_value(&run).map_err(|_| Error::Storage)?;
-                            cp.messages = messages.clone();
-                            cp.cursor = cursor;
-                            self.store
-                                .checkpoint(c, current.revision, cp, self.clock.now())
-                                .await?;
-                            continue;
-                        }
-                        let PendingToolCall::Execute(call) = call else {
-                            return Err(Error::Conflict);
-                        };
-                        let mut d = DispatchRequest::new(
-                            &key,
-                            tool.operation_kind(),
-                            &name,
-                            input.clone(),
-                            if self.store.operation(&c.run, &key).await?.is_none() {
-                                let quote = tool.quote(&current, &input).await?;
-                                Amount::new(
-                                    quote.tokens.max(descriptor.reserve.tokens),
-                                    quote.micro_usd.max(descriptor.reserve.micro_usd),
-                                )
-                            } else {
-                                descriptor.reserve
-                            },
-                        );
-                        d.quantities = descriptor.quantities.clone();
-                        d.version = descriptor.version.clone();
-                        d.scope = Some(file_tools::catalog_digest(&descriptor));
-                        d.account_binding = descriptor.account.clone();
-                        d.timeout = Some(descriptor.timeout);
-                        let old = self.store.operation(&c.run, &key).await?;
-                        if let Some(op) = &old
-                            && op.request.input != input
-                        {
-                            return Err(Error::Conflict);
-                        }
-                        let lookup_input = input.clone();
-                        if let Some(op) = &old {
-                            d = self.next_attempt(c, op, descriptor.retry.clone()).await?;
-                        }
-                        let result = self
-                            .dispatch(
-                                c,
-                                d,
-                                &descriptor.permission,
-                                |ctx| async move { tool.invoke(&ctx, input).await },
-                                |ctx| async move { tool.lookup(&ctx, lookup_input).await },
-                            )
-                            .await?;
-                        let output = completed(result)?;
-                        let current = self.store.get(&c.run).await?;
-                        tool.authorize_result(&current, &output).await?;
-                        validate_schema(&output, &descriptor.output_schema)?;
-                        if serde_json::to_vec(&output).unwrap().len() > descriptor.max_output_bytes
-                        {
-                            return Err(Error::Invalid(
-                                "tool output exceeds declared limit".into(),
-                            ));
-                        }
-                        let mut candidate_messages = messages.clone();
-                        candidate_messages.push(Message {
-                            role: "tool".into(),
-                            text: String::new(),
-                            call_id: Some(call.id().to_string()),
-                            tool: Some(name),
-                            data: output.clone(),
-                        });
-                        let admission = self.model.check_input_attachments(
-                            &crate::attachments::model_attachments(&candidate_messages)?,
-                            &images::model_images(&current, &candidate_messages)?,
-                        );
-                        let (output, answer) = match admission {
-                            Ok(()) => (
-                                output.clone(),
-                                ToolResult::success(ToolOutput::text(output.to_string())),
-                            ),
-                            Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => {
-                                // Preserve the operation's exact result and expose its references
-                                // as text, but do not activate an over-limit binary input.
-                                let feedback = serde_json::json!({"code":code,"repairable":true,"hint":"Open fewer files or a narrower page range with the same tool.","result":output});
-                                let answer = ToolResult::failed(ToolExecutionError::new(
-                                    ToolErrorKind::InvalidArgs,
-                                    feedback.to_string(),
-                                ));
-                                (feedback, answer)
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        candidate_messages.last_mut().ok_or(Error::Conflict)?.data = output;
-                        messages = candidate_messages;
-                        run.answer(call.answer(answer))
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                        cursor += 1;
-                        self.save(c, &run, messages.clone(), cursor, &catalog)
-                            .await?;
-                    }
+                    Box::pin(self.drive_tools(
+                        c,
+                        &mut run,
+                        &mut messages,
+                        &mut cursor,
+                        &catalog,
+                        calls,
+                    ))
+                    .await?;
                 }
                 AgentRunStep::Done(candidate) => {
-                    let raw = candidate.output();
-                    let parsed = schema::parse_json(raw.as_bytes());
-                    // Bind syntax failures to the exact raw string, never to a
-                    // fabricated object. A valid JSON string remains a normal value.
-                    let output = parsed
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_else(|_| Value::String(raw));
-                    let current = self.store.check(c, self.clock.now(), true).await?;
-                    self.policy.authorize(&current, "finalize", "finalize")?;
-                    // No call-count gate: only current budget, deadline and trusted receipts.
-                    self.store.finalization_allowed(c, self.clock.now()).await?;
-                    let validator = self.validator.clone();
-                    let validation_run = current.clone();
-                    let validation_output = output.clone();
-                    let receipt = tokio::task::spawn_blocking(move || match parsed {
-                        Ok(_) => validator.validate(&validation_run, &validation_output),
-                        Err(diagnostics) => Ok(ValidationReceipt {
-                            repairable: true,
-                            hash: digest(&validation_output),
-                            basis_revision: validation_run.spec.basis_revision,
-                            config_version: validation_run.spec.config_version,
-                            validator: validation_run.spec.validator,
-                            validator_version: validation_run.spec.validator_version,
-                            passed: false,
-                            diagnostics,
-                        }),
-                    })
-                    .await
-                    .map_err(|_| Error::Storage)??;
-                    if receipt.hash != digest(&output)
-                        || receipt.basis_revision != current.spec.basis_revision
-                        || receipt.config_version != current.spec.config_version
-                        || receipt.validator != current.spec.validator
-                        || receipt.validator_version != current.spec.validator_version
-                    {
-                        return Err(Error::Conflict);
-                    }
-                    if !receipt.passed {
-                        if !receipt.repairable {
-                            return self
-                                .validation_failure(
-                                    c,
-                                    &current,
-                                    output,
-                                    receipt,
-                                    "VALIDATION_UNREPAIRABLE",
-                                )
-                                .await;
-                        }
-                        let previous = current
-                            .checkpoint
-                            .as_ref()
-                            .map(|cp| cp.payload["repair"].clone())
-                            .unwrap_or(Value::Null);
-                        let count = previous["count"].as_u64().unwrap_or(0);
-                        let started = repair_started(&current).unwrap_or(self.clock.now());
-                        let policy = self.validator.repair_policy();
-                        if policy
-                            .max_repairs
-                            .is_some_and(|max| repair_count(&current) >= max)
-                            || policy
-                                .max_elapsed
-                                .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
-                        {
-                            return self
-                                .validation_failure(
-                                    c,
-                                    &current,
-                                    output,
-                                    receipt,
-                                    "VALIDATION_REPAIR_LIMIT",
-                                )
-                                .await;
-                        }
-                        let feedback = serde_json::json!({"candidate":output,"diagnostics":receipt.diagnostics,"instruction":"Correct the candidate and submit it for validation again"});
-                        messages.push(Message::text("user", feedback.to_string()));
-                        let next = AgentRun::from_spec(&protocol_spec, feedback.to_string(), None);
-                        let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
-                        cp.payload["protocol"] =
-                            serde_json::to_value(next).map_err(|_| Error::Storage)?;
-                        cp.payload["repair"] = serde_json::json!({"schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started,"candidate":output,"receipt":receipt});
-                        cp.messages = messages;
-                        self.store
-                            .checkpoint(c, current.revision, cp, self.clock.now())
-                            .await?;
-                        return Err(Error::Pending("validation repair".into()));
-                    }
-                    let finalizer = self.finalizer.clone();
-                    let completion = tokio::task::spawn_blocking(move || {
-                        finalizer.finalize(&current, output, receipt)
-                    })
-                    .await
-                    .map_err(|_| Error::Storage)??;
-                    self.store.finalize(c, completion, self.clock.now()).await?;
-                    return self.store.get(&c.run).await;
+                    return Box::pin(self.finalize_candidate(c, candidate.output(), messages))
+                        .await;
                 }
             }
         }
+    }
+
+    async fn finalize_candidate(
+        &self,
+        c: &Claim,
+        raw: String,
+        mut messages: Vec<Message>,
+    ) -> Result<RunRecord> {
+        let protocol_spec = ProtocolSpec::new();
+        let parsed = schema::parse_json(raw.as_bytes());
+        // Bind syntax failures to the exact raw string, never to a
+        // fabricated object. A valid JSON string remains a normal value.
+        let output = parsed
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|_| Value::String(raw));
+        let current = self.store.check(c, self.clock.now(), true).await?;
+        self.policy.authorize(&current, "finalize", "finalize")?;
+        // No call-count gate: only current budget, deadline and trusted receipts.
+        self.store.finalization_allowed(c, self.clock.now()).await?;
+        let validator = self.validator.clone();
+        let validation_run = current.clone();
+        let validation_output = output.clone();
+        let receipt = tokio::task::spawn_blocking(move || match parsed {
+            Ok(_) => validator.validate(&validation_run, &validation_output),
+            Err(diagnostics) => Ok(ValidationReceipt {
+                repairable: true,
+                hash: digest(&validation_output),
+                basis_revision: validation_run.spec.basis_revision,
+                config_version: validation_run.spec.config_version,
+                validator: validation_run.spec.validator,
+                validator_version: validation_run.spec.validator_version,
+                passed: false,
+                diagnostics,
+            }),
+        })
+        .await
+        .map_err(|_| Error::Storage)??;
+        if receipt.hash != digest(&output)
+            || receipt.basis_revision != current.spec.basis_revision
+            || receipt.config_version != current.spec.config_version
+            || receipt.validator != current.spec.validator
+            || receipt.validator_version != current.spec.validator_version
+        {
+            return Err(Error::Conflict);
+        }
+        if !receipt.passed {
+            if !receipt.repairable {
+                return self
+                    .validation_failure(c, &current, output, receipt, "VALIDATION_UNREPAIRABLE")
+                    .await;
+            }
+            let previous = current
+                .checkpoint
+                .as_ref()
+                .map(|cp| cp.payload["repair"].clone())
+                .unwrap_or(Value::Null);
+            let count = previous["count"].as_u64().unwrap_or(0);
+            let started = repair_started(&current).unwrap_or(self.clock.now());
+            let policy = self.validator.repair_policy();
+            if policy
+                .max_repairs
+                .is_some_and(|max| repair_count(&current) >= max)
+                || policy
+                    .max_elapsed
+                    .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
+            {
+                return self
+                    .validation_failure(c, &current, output, receipt, "VALIDATION_REPAIR_LIMIT")
+                    .await;
+            }
+            let feedback = serde_json::json!({"candidate":output,"diagnostics":receipt.diagnostics,"instruction":"Correct the candidate and submit it for validation again"});
+            messages.push(Message::text("user", feedback.to_string()));
+            let next = AgentRun::from_spec(&protocol_spec, feedback.to_string(), None);
+            let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+            cp.payload["protocol"] = serde_json::to_value(next).map_err(|_| Error::Storage)?;
+            cp.payload["repair"] = serde_json::json!({"schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started,"candidate":output,"receipt":receipt});
+            cp.messages = messages;
+            self.store
+                .checkpoint(c, current.revision, cp, self.clock.now())
+                .await?;
+            return Err(Error::Pending("validation repair".into()));
+        }
+        let finalizer = self.finalizer.clone();
+        let completion =
+            tokio::task::spawn_blocking(move || finalizer.finalize(&current, output, receipt))
+                .await
+                .map_err(|_| Error::Storage)??;
+        self.store.finalize(c, completion, self.clock.now()).await?;
+        self.store.get(&c.run).await
+    }
+
+    // Separate poll frames keep branch-local request preparation and decoding
+    // from accumulating on the loop's stack while a child adapter is polled.
+    async fn drive_model(
+        &self,
+        c: &Claim,
+        run: &mut AgentRun,
+        messages: &mut Vec<Message>,
+        cursor: &mut u64,
+        catalog: &[ToolDescriptor],
+        (history, turn): (Vec<Arc<runtrell_protocol::message::Message>>, usize),
+    ) -> Result<()> {
+        let protocol_spec = ProtocolSpec::new();
+        let current = Box::pin(self.store.get(&c.run)).await?;
+        let key = format!("{}model:{turn}", operation_prefix(&current));
+        let existing = Box::pin(self.store.operation(&c.run, &key)).await?;
+        let current = Box::pin(self.store.get(&c.run)).await?;
+        let descriptors = file_tools::pin_catalog(&current, &self.policy, &self.tools)?;
+        if descriptors.iter().any(|d| !catalog.contains(d)) {
+            return Err(Error::Conflict);
+        }
+        let mut quoted_reserve = None;
+        let mut quoted_prepared = None;
+        let request = if let Some(op) = &existing {
+            serde_json::from_value::<ModelRequest>(op.request.input.clone())
+                .map_err(|e| Error::Invalid(e.to_string()))?
+        } else {
+            Box::pin(self.store.warnings(c, self.clock.now())).await?;
+            let current = Box::pin(self.store.get(&c.run)).await?;
+            if let Some(cp) = &current.checkpoint {
+                *messages = cp.messages.clone();
+            }
+            let req = ModelRequest {
+                attachments: crate::attachments::model_attachments(messages)?,
+                model: self.model.limits().model,
+                messages: messages.clone(),
+                tools: descriptors.clone(),
+                max_output: 0,
+                metadata: Value::Null,
+                images: images::model_images(&current, messages)?,
+            };
+            let prepared = Box::pin(self.model.prepare_request(&current, req)).await?;
+            let input = self.model.input_upper_bound(&prepared)?;
+            if current.spec.compaction.as_ref().is_some_and(|policy| {
+                self.model
+                    .limits()
+                    .context
+                    .saturating_sub(input)
+                    .saturating_sub(self.model.limits().max_output)
+                    < policy.min_remaining_tokens
+            }) && current
+                .checkpoint
+                .as_ref()
+                .is_none_or(|cp| cp.payload["compacted_for"] != key)
+            {
+                let data = context::CheckpointContext {
+                    store: self.store.as_ref(),
+                    claim: c,
+                    clock: &self.clock,
+                };
+                let access = data::Access::owner(data::Namespace {
+                    owner: c.run.clone(),
+                    agent: "driver".into(),
+                });
+                data.stage(&access, &key).await?;
+                Box::pin(self.compact_context(c, &data, &access, &format!("compact:{key}")))
+                    .await?;
+                *messages = Box::pin(self.store.get(&c.run))
+                    .await?
+                    .checkpoint
+                    .ok_or(Error::Conflict)?
+                    .messages;
+                // Re-prepare and re-quote from the committed summary on the next pass.
+                return Ok(());
+            }
+            let (cap, reserve) = Box::pin(self.model_budget(c, input)).await?;
+            quoted_reserve = Some(reserve);
+            let prepared = prepared.with_max_output(cap);
+            let request = prepared.request().clone();
+            quoted_prepared = Some(prepared);
+            request
+        };
+        let mut dispatch = if let Some(op) = &existing {
+            Box::pin(self.next_attempt(c, op, self.model.retry_policy())).await?
+        } else {
+            let reserve = quoted_reserve.ok_or(Error::Conflict)?;
+            let mut d = DispatchRequest::new(
+                &key,
+                OperationKind::Model,
+                &request.model,
+                serde_json::to_value(&request).unwrap(),
+                reserve,
+            );
+            d.price = self.model.limits().price;
+            let repair_remaining = repair_started(&current).and_then(|started| {
+                self.validator
+                    .repair_policy()
+                    .max_elapsed
+                    .map(|max| started.saturating_add(max).saturating_sub(self.clock.now()))
+            });
+            d.timeout = Some(
+                repair_remaining.map_or(self.model.limits().timeout, |left| {
+                    left.min(self.model.limits().timeout)
+                }),
+            );
+            if let Some((scope, retention)) = self.model.recovery() {
+                d.scope = Some(scope);
+                d.recovery_until = Some(
+                    self.clock
+                        .now()
+                        .checked_add(retention)
+                        .ok_or(Error::Conflict)?,
+                );
+            }
+            d
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|op| op.request.attempt != dispatch.attempt)
+        {
+            let mut retry_request = request.clone();
+            let prepared =
+                Box::pin(self.model.prepare_request(&current, retry_request.clone())).await?;
+            let input = self.model.input_upper_bound(&prepared)?;
+            let (cap, reserve) = Box::pin(self.model_budget(c, input)).await?;
+            retry_request.max_output = cap;
+            quoted_prepared = Some(prepared.with_max_output(cap));
+            dispatch.reserve = reserve;
+            dispatch.input = serde_json::to_value(retry_request).unwrap();
+        }
+        let invoke_request: ModelRequest = serde_json::from_value(dispatch.input.clone())
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        let lookup_request = PreparedModelRequest::for_lookup(invoke_request.clone())?;
+        let result = Box::pin(self.dispatch(
+            c,
+            dispatch,
+            "model",
+            |ctx| async move {
+                let prepared = if let Some(prepared) = quoted_prepared {
+                    prepared
+                } else {
+                    Box::pin(self.model.prepare_request(&current, invoke_request.clone())).await?
+                };
+                if prepared.request() != &invoke_request {
+                    return Err(Error::Conflict);
+                }
+                self.model.invoke(&ctx, prepared).await
+            },
+            |ctx| async move {
+                let found = self.model.lookup(&ctx, lookup_request).await?;
+                if let Lookup::NotFound { scope } = &found
+                    && ctx.recovery_proof.is_none()
+                    && self.model.recovery().as_ref().map(|r| &r.0) != Some(scope)
+                {
+                    return Ok(Lookup::Unknown);
+                }
+                Ok(found)
+            },
+        ))
+        .await?;
+        let output = completed(result)?;
+        let reply: ModelReply =
+            serde_json::from_value(output).map_err(|e| Error::Invalid(e.to_string()))?;
+        if reply.metadata["stop_reason"] == "max_tokens" {
+            let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+            let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+            let count = cp.payload["continuations"].as_u64().unwrap_or(0);
+            if current
+                .spec
+                .continuation
+                .max_continuations
+                .is_some_and(|max| count >= max)
+            {
+                return Err(Error::Invalid("MODEL_CONTINUATION_LIMIT".into()));
+            }
+            if !reply.metadata.is_null() {
+                messages.push(Message {
+                    role: "provider".into(),
+                    text: String::new(),
+                    call_id: None,
+                    tool: None,
+                    data: reply.metadata,
+                });
+            }
+            if !reply.text.is_empty() {
+                let mut partial = Message::text("assistant", reply.text);
+                partial.data = serde_json::json!({"continuation":true});
+                messages.push(partial);
+            }
+            let instruction = current.spec.continuation.instruction;
+            messages.push(Message::text("user", &instruction));
+            *run = AgentRun::from_spec(&protocol_spec, instruction, None);
+            cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
+            cp.payload["continuations"] =
+                serde_json::json!(count.checked_add(1).ok_or(Error::Conflict)?);
+            cp.messages = messages.clone();
+            cp.cursor = cursor.checked_add(1).ok_or(Error::Conflict)?;
+            *cursor = cp.cursor;
+            Box::pin(
+                self.store
+                    .checkpoint(c, current.revision, cp, self.clock.now()),
+            )
+            .await?;
+            return Ok(());
+        }
+        if !reply.complete {
+            return Err(Error::Invalid("incomplete model stream".into()));
+        }
+        let definitions = request
+            .tools
+            .iter()
+            .map(|d| {
+                Ok(Arc::new(ToolDefinition::new(
+                    ToolName::new(d.name.clone()).map_err(|e| Error::Invalid(e.to_string()))?,
+                    d.name.clone(),
+                    d.input_schema.clone(),
+                )))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let prepared = prepare_request(
+            &protocol_spec,
+            &Default::default(),
+            &history,
+            definitions,
+            None,
+            None,
+        )
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+        let mut choice = vec![];
+        if !reply.metadata.is_null() {
+            messages.push(Message {
+                role: "provider".into(),
+                text: String::new(),
+                call_id: None,
+                tool: None,
+                data: reply.metadata.clone(),
+            });
+        }
+        if !reply.text.is_empty() {
+            choice.push(AssistantContent::text(reply.text.clone()));
+            messages.push(Message::text("assistant", reply.text));
+        }
+        for call in reply.calls {
+            choice.push(AssistantContent::tool_call(
+                call.id.clone(),
+                ToolName::new(call.name.clone()).map_err(|e| Error::Invalid(e.to_string()))?,
+                call.arguments.clone(),
+            ));
+            messages.push(Message {
+                role: "assistant".into(),
+                text: String::new(),
+                call_id: Some(call.id),
+                tool: Some(call.name),
+                data: call.arguments,
+            });
+        }
+        let response = CompletionResponse::new(
+            choice,
+            ProtocolUsage::default(),
+            Origin::new("host.chat", "host", self.model.limits().model),
+            reply.metadata,
+        )
+        .with_finish_reason(FinishReason::Stop);
+        run.model_response(ModelTurn::from_response(&response, &prepared))
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        *cursor += 1;
+        Box::pin(self.save(c, run, messages.clone(), *cursor, catalog)).await?;
+        Ok(())
+    }
+
+    async fn drive_tools(
+        &self,
+        c: &Claim,
+        run: &mut AgentRun,
+        messages: &mut Vec<Message>,
+        cursor: &mut u64,
+        catalog: &[ToolDescriptor],
+        calls: Vec<PendingToolCall>,
+    ) -> Result<()> {
+        for call in calls {
+            let (name, id, input) = match &call {
+                PendingToolCall::Execute(call) => (
+                    call.name().to_string(),
+                    call.id().to_string(),
+                    call.arguments(),
+                ),
+                PendingToolCall::Malformed(call) => (
+                    call.name().to_string(),
+                    call.id().to_string(),
+                    serde_json::from_str(call.raw_arguments()).map_err(|_| Error::Conflict)?,
+                ),
+                _ => return Err(Error::Unsupported("pending tool call".into())),
+            };
+            let tool = self
+                .tools
+                .iter()
+                .find(|t| t.descriptor().name == name)
+                .ok_or_else(|| Error::Unsupported(name.clone()))?;
+            let descriptor = tool.descriptor();
+            let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+            self.policy
+                .authorize(&current, &descriptor.name, &descriptor.permission)?;
+            let prefix = operation_prefix(&current);
+            let model_key = format!("{prefix}model:{}", run.turn());
+            let presented = Box::pin(self.store.operation(&c.run, &model_key))
+                .await?
+                .ok_or(Error::Conflict)?;
+            let offered: ModelRequest =
+                serde_json::from_value(presented.request.input).map_err(|_| Error::Conflict)?;
+            if !offered.tools.contains(&descriptor) || !catalog.contains(&descriptor) {
+                return Err(Error::Conflict);
+            }
+            let key = format!("{prefix}tool:{}:{id}", run.turn());
+            let mut diagnostics = schema_diagnostics(&input, &descriptor.input_schema)?;
+            if matches!(call, PendingToolCall::Malformed(_)) && diagnostics.is_empty() {
+                diagnostics = schema_diagnostics(&input, &serde_json::json!({"type":"object"}))?;
+            }
+            if !diagnostics.is_empty() {
+                let output =
+                    serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
+                let policy = self.validator.repair_policy();
+                let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+                cp.payload["last_tool_validation"] = serde_json::json!({"candidate":input,"repairable":true,"diagnostics":diagnostics});
+                let started = repair_started(&current).unwrap_or(self.clock.now());
+                if policy
+                    .max_repairs
+                    .is_some_and(|max| repair_count(&current) >= max)
+                    || policy
+                        .max_elapsed
+                        .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
+                {
+                    Box::pin(
+                        self.store
+                            .checkpoint(c, current.revision, cp, self.clock.now()),
+                    )
+                    .await?;
+                    return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
+                }
+                messages.push(Message {
+                    role: "tool".into(),
+                    text: String::new(),
+                    call_id: Some(id),
+                    tool: Some(name),
+                    data: output.clone(),
+                });
+                let answer = match call {
+                    PendingToolCall::Execute(call) => call.answer(ToolResult::failed(
+                        ToolExecutionError::new(ToolErrorKind::InvalidArgs, output.to_string()),
+                    )),
+                    PendingToolCall::Malformed(call) => {
+                        call.answer(Some(runtrell_protocol::run::InvalidToolCallAction::Retry {
+                            feedback: output.to_string(),
+                        }))
+                    }
+                    _ => return Err(Error::Unsupported("pending tool call".into())),
+                };
+                run.answer(answer)
+                    .map_err(|e| Error::Invalid(e.to_string()))?;
+                *cursor += 1;
+                let count = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0);
+                cp.payload["tool_repair"] = serde_json::json!({"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started});
+                cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
+                cp.messages = messages.clone();
+                cp.cursor = *cursor;
+                Box::pin(
+                    self.store
+                        .checkpoint(c, current.revision, cp, self.clock.now()),
+                )
+                .await?;
+                continue;
+            }
+            let PendingToolCall::Execute(call) = call else {
+                return Err(Error::Conflict);
+            };
+            let mut d = DispatchRequest::new(
+                &key,
+                tool.operation_kind(),
+                &name,
+                input.clone(),
+                if Box::pin(self.store.operation(&c.run, &key))
+                    .await?
+                    .is_none()
+                {
+                    let quote = tool.quote(&current, &input).await?;
+                    Amount::new(
+                        quote.tokens.max(descriptor.reserve.tokens),
+                        quote.micro_usd.max(descriptor.reserve.micro_usd),
+                    )
+                } else {
+                    descriptor.reserve
+                },
+            );
+            d.quantities = descriptor.quantities.clone();
+            d.version = descriptor.version.clone();
+            d.scope = Some(file_tools::catalog_digest(&descriptor));
+            d.account_binding = descriptor.account.clone();
+            d.timeout = Some(descriptor.timeout);
+            let old = Box::pin(self.store.operation(&c.run, &key)).await?;
+            if let Some(op) = &old
+                && op.request.input != input
+            {
+                return Err(Error::Conflict);
+            }
+            let lookup_input = input.clone();
+            if let Some(op) = &old {
+                d = Box::pin(self.next_attempt(c, op, descriptor.retry.clone())).await?;
+            }
+            let result = Box::pin(self.dispatch(
+                c,
+                d,
+                &descriptor.permission,
+                |ctx| async move { tool.invoke(&ctx, input).await },
+                |ctx| async move { tool.lookup(&ctx, lookup_input).await },
+            ))
+            .await?;
+            let output = completed(result)?;
+            let current = Box::pin(self.store.get(&c.run)).await?;
+            tool.authorize_result(&current, &output).await?;
+            validate_schema(&output, &descriptor.output_schema)?;
+            if serde_json::to_vec(&output).unwrap().len() > descriptor.max_output_bytes {
+                return Err(Error::Invalid("tool output exceeds declared limit".into()));
+            }
+            let mut candidate_messages = messages.clone();
+            candidate_messages.push(Message {
+                role: "tool".into(),
+                text: String::new(),
+                call_id: Some(call.id().to_string()),
+                tool: Some(name),
+                data: output.clone(),
+            });
+            let admission = self.model.check_input_attachments(
+                &crate::attachments::model_attachments(&candidate_messages)?,
+                &images::model_images(&current, &candidate_messages)?,
+            );
+            let (output, answer) = match admission {
+                Ok(()) => (
+                    output.clone(),
+                    ToolResult::success(ToolOutput::text(output.to_string())),
+                ),
+                Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => {
+                    // Preserve the operation's exact result and expose its references
+                    // as text, but do not activate an over-limit binary input.
+                    let feedback = serde_json::json!({"code":code,"repairable":true,"hint":"Open fewer files or a narrower page range with the same tool.","result":output});
+                    let answer = ToolResult::failed(ToolExecutionError::new(
+                        ToolErrorKind::InvalidArgs,
+                        feedback.to_string(),
+                    ));
+                    (feedback, answer)
+                }
+                Err(error) => return Err(error),
+            };
+            candidate_messages.last_mut().ok_or(Error::Conflict)?.data = output;
+            *messages = candidate_messages;
+            run.answer(call.answer(answer))
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+            *cursor += 1;
+            Box::pin(self.save(c, run, messages.clone(), *cursor, catalog)).await?;
+        }
+        Ok(())
     }
 }
 fn operation_prefix(run: &RunRecord) -> String {
@@ -1369,8 +1405,8 @@ impl<
             metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water,"context_digest":digest(&serde_json::to_value(&base).map_err(|_| Error::Storage)?)}),
             images: vec![],
         };
-        let current = self.store.get(&c.run).await?;
-        let d = if let Some(op) = self.store.operation(&c.run, key).await? {
+        let current = Box::pin(self.store.get(&c.run)).await?;
+        let d = if let Some(op) = Box::pin(self.store.operation(&c.run, key)).await? {
             let stored: ModelRequest =
                 serde_json::from_value(op.request.input.clone()).map_err(|_| Error::Conflict)?;
             if stored.metadata != request.metadata
@@ -1379,13 +1415,13 @@ impl<
             {
                 return Err(Error::Conflict);
             }
-            self.next_attempt(c, &op, self.model.retry_policy()).await?
+            Box::pin(self.next_attempt(c, &op, self.model.retry_policy())).await?
         } else {
-            let prepared = self.model.prepare_request(&current, request).await?;
+            let prepared = Box::pin(self.model.prepare_request(&current, request)).await?;
             let input = self.model.input_upper_bound(&prepared)?;
             let (cap, reserve) = limits.cap_for_policy(
                 input,
-                self.store.remaining(c, self.clock.now()).await?,
+                Box::pin(self.store.remaining(c, self.clock.now())).await?,
                 &current.spec.budget,
             )?;
             let request = prepared.with_max_output(cap);
@@ -1404,27 +1440,24 @@ impl<
         let request: ModelRequest =
             serde_json::from_value(d.input.clone()).map_err(|_| Error::Conflict)?;
         let lookup = PreparedModelRequest::for_lookup(request.clone())?;
-        let result = self
-            .dispatch(
-                c,
-                d,
-                "model",
-                |ctx| async move {
-                    let prepared = self
-                        .model
-                        .prepare_request(&current, request.clone())
-                        .await?;
-                    if prepared.request() != &request {
-                        return Err(Error::Conflict);
-                    }
-                    self.model.invoke(&ctx, prepared).await
-                },
-                |ctx| async move { self.model.lookup(&ctx, lookup).await },
-            )
-            .await?;
+        let result = Box::pin(self.dispatch(
+            c,
+            d,
+            "model",
+            |ctx| async move {
+                let prepared =
+                    Box::pin(self.model.prepare_request(&current, request.clone())).await?;
+                if prepared.request() != &request {
+                    return Err(Error::Conflict);
+                }
+                self.model.invoke(&ctx, prepared).await
+            },
+            |ctx| async move { self.model.lookup(&ctx, lookup).await },
+        ))
+        .await?;
         let reply: ModelReply = serde_json::from_value(completed(result)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
-        self.store.check(c, self.clock.now(), true).await?;
+        Box::pin(self.store.check(c, self.clock.now(), true)).await?;
         if !reply.complete || reply.metadata["stop_reason"] == "max_tokens" {
             return Err(Error::Invalid("PARTIAL_SUMMARY".into()));
         }
