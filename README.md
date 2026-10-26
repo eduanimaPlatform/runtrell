@@ -160,6 +160,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 cargo run -p runtrell-testkit --example support_decision
 cargo run -p runtrell-testkit --example alternate_host
+cargo run -p runtrell-postgres --example chat_host # disposable PostgreSQL required
 cargo run -p xtask -- trace
 cargo run -p xtask -- hashes
 cargo package --workspace --list --allow-dirty # パッケージ内容の一覧確認

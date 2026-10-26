@@ -83,6 +83,7 @@ jobs:
         run: |
           cargo run -p runtrell-testkit --locked ${{ matrix.example_args }} --example support_decision
           cargo run -p runtrell-testkit --locked ${{ matrix.example_args }} --example alternate_host
+          cargo run -p runtrell-postgres --locked ${{ matrix.example_args }} --example chat_host
       - name: Trace and pinned source hashes
         run: |
           cargo run -p xtask --locked -- trace

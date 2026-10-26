@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
 description = "PostgreSQL durable control store for Runtrell"
-include = ["src/**", "migrations/**", "Cargo.toml", "LICENSE", "NOTICE"]
+include = ["src/**", "migrations/**", "examples/**", "Cargo.toml", "LICENSE", "NOTICE"]
 
 [dependencies]
 runtrell = { path = "../runtrell", version = "0.1.0" }
