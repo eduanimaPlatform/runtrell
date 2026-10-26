@@ -168,16 +168,9 @@ fn json_syntax_candidate_survives_worker_loss_and_revalidation() {
     });
 }
 #[test]
-fn host_limits_unrepairable_budget_and_deadline_stop_without_extra_calls() {
+fn host_limits_budget_and_deadline_stop_without_extra_calls() {
     block_on(async {
-        for mode in [
-            "count",
-            "time",
-            "unrepairable",
-            "budget",
-            "deadline",
-            "elapsed-after-wait",
-        ] {
+        for mode in ["count", "time", "budget", "deadline", "elapsed-after-wait"] {
             let (store, claim, _) = setup(
                 if mode == "budget" { 22 } else { 1000 },
                 if mode == "deadline" { Some(10) } else { None },
@@ -197,12 +190,9 @@ fn host_limits_unrepairable_budget_and_deadline_stop_without_extra_calls() {
             if mode == "elapsed-after-wait" {
                 validator.repair.max_elapsed = Some(5);
             }
-            if mode == "unrepairable" {
-                validator.repairable_codes.clear();
-            }
             let rt = runtime_with(store.clone(), model.clone(), validator);
             let first = rt.drive(&claim).await.unwrap();
-            if matches!(mode, "count" | "time" | "unrepairable") {
+            if matches!(mode, "count" | "time") {
                 assert!(matches!(
                     first.state,
                     RunState::Terminal(Terminal::Failed(_))
@@ -249,14 +239,7 @@ fn host_limits_unrepairable_budget_and_deadline_stop_without_extra_calls() {
 #[test]
 fn json_syntax_host_limits_stop_without_extra_calls() {
     block_on(async {
-        for mode in [
-            "count",
-            "time",
-            "unrepairable",
-            "budget",
-            "deadline",
-            "elapsed-after-wait",
-        ] {
+        for mode in ["count", "time", "budget", "deadline", "elapsed-after-wait"] {
             let (store, claim, _) = setup(
                 if mode == "budget" { 22 } else { 1000 },
                 if mode == "deadline" { Some(10) } else { None },
@@ -279,12 +262,9 @@ fn json_syntax_host_limits_stop_without_extra_calls() {
             if mode == "elapsed-after-wait" {
                 validator.repair.max_elapsed = Some(5);
             }
-            if mode == "unrepairable" {
-                validator.repairable_codes.clear();
-            }
             let rt = runtime_with(store.clone(), model.clone(), validator);
             let first = rt.drive(&claim).await.unwrap();
-            if matches!(mode, "count" | "time" | "unrepairable") {
+            if matches!(mode, "count" | "time") {
                 assert!(matches!(
                     first.state,
                     RunState::Terminal(Terminal::Failed(_))

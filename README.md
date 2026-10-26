@@ -26,6 +26,18 @@ Hosts implement `ModelPort`/`Tool`/`Policy`/`Validator`/`Finalizer` and supply a
 Finalizer receipt establish Run success. External application, cancellation,
 stopping, reclamation and settlement remain distinct records.
 
+The ordinary driver continues `max_tokens` responses after settling usage,
+discarding partial tool calls and reserving a newly sized request. Hosts set
+`RunSpec.continuation` for the instruction and an optional continuation limit.
+`RunSpec.compaction` enables automatic context summaries at a host threshold;
+`ModelPort::compaction_limits` selects the summary model, which the host port
+routes by request model. Original history and the active summary remain in the
+same Run checkpoint and survive resume. See [driver contracts](docs/design/api.md).
+Schema failures return JSON Pointer, cause and hint diagnostics for repair.
+Host validators classify custom failures with `ValidationReceipt.repairable`.
+Repair counts have no default limit; `RepairPolicy` supplies optional host limits.
+Storage, authorization and evidence failures remain separate errors.
+
 ## PostgreSQL transaction API
 
 | API | Stages in the host's `sqlx::Transaction<'_, Postgres>` |

@@ -108,6 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             out.push_str("\n\n<!-- generated-contracts -->\n## Rust契約定義\n\n`cargo run -p xtask -- api-doc`で公開ソースから生成。型の全保存フィールド、Result/Errorとenumは[api.rs](../../crates/runtrell/src/api.rs)を参照する。以下は同じ正本の抜粋であり独立した仕様ではない。\n\n```rust\n");
             for name in [
                 "RunSpec",
+                "ContinuationPolicy",
+                "CompactionPolicy",
                 "RunHandle",
                 "ToolContext",
                 "RecoveryProof",
@@ -225,10 +227,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "postgres/src/engine.rs::{start_in,create_account_in,create_account_with_policy_in,terminate_in,finalize_in}; persistence.rs::tx_in",
                         "postgres/tests/transaction.rs: host SQLとRun/口座のcommit・rollback・SQL失敗・同値受付/異値拒否・共有口座・親子Run・終端/後続Run境界・別process再open。耐久成功はhostのouter commit後。電源断/failoverは未検証",
                     )
-                } else if ["RUN-07", "VAL-06"].contains(&id.as_str()) {
+                } else if ["RUN-06", "RUN-07", "A11", "A19", "VAL-06"].contains(&id.as_str()) {
                     (
-                        "driver.rs / schema.rs / api.rs / Memory・Pg checkpoint",
-                        "testkit/tests/repair.rs::json_syntax_candidate_survives_worker_loss_and_revalidation、json_syntax_host_limits_stop_without_extra_calls。Pg::json_syntax_repair_reopens_with_independent_pool_and_runtime、Memory/Pg::json_artifact_syntax_repairs_with_new_runtime。位置・原因・候補保存、別Runtime/別Pg pool再開、追加予約・一度だけ精算。実行証拠は末尾rt-4a参照",
+                        "driver.rs / driver/context.rs / schema.rs / api.rs / ContextStore / Memory・Pg checkpoint",
+                        "testkit/tests/repair.rs、driver_loop.rs、共有driver_contractsをMemory/Pgで実行。JSON/schema位置・原因・hint、receipt.repairable、明示上限・既定上限なし、保存/認可/証跡失敗の分離。通常loopのmax_tokens追加予約・精算、閾値で自動圧縮・元履歴保持・独立Pg poolからsummary再開。実Provider未実行",
                     )
                 } else if budget_scope {
                     (

@@ -3,6 +3,51 @@ use runtrell_postgres::PgStore;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
+async fn driver_token_continuation() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::driver_contracts::token_continuation(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn driver_continuation_budget_and_host_limit() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::driver_contracts::continuation_stops(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn driver_continuation_deadline() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::driver_contracts::continuation_deadline(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn driver_host_receipt_classification() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::driver_contracts::receipt_classification(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn driver_tool_schema_repairs() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::driver_contracts::tool_repairs(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn driver_automatic_context_reopens_with_independent_pool() {
+    use std::sync::Arc;
+    let (pool, schema, store, _, _) = setup().await;
+    let store = Arc::new(store);
+    let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
+    let independent = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .unwrap();
+    let reopened = Arc::new(
+        PgStore::open(independent, &schema, Capacity::default())
+            .await
+            .unwrap(),
+    );
+    runtrell_testkit::driver_contracts::automatic_compaction(store, reopened).await;
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn empty_database_initializes_and_reopens() {
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL")
         .expect("RUNTRELL_TEST_DATABASE_URL must name the dedicated disposable database");

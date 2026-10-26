@@ -34,9 +34,12 @@ unknown. ModelReply.complete is false for filtered/unknown stops so the stock
 driver cannot accept them as candidates. A fully received max_tokens reply remains
 complete with an explicit truncation reason; it does not claim semantic completion.
 Truncated/filtered/unknown responses never expose executable tool calls. Stop reason
-is saved in metadata. A host consuming
-ModelPort directly can continue max_tokens with the saved history; the stock driver
-still applies its normal candidate validation/repair policy.
+is saved in metadata. The ordinary driver settles a max_tokens response, appends
+the host-configured continuation instruction, and re-quotes a new operation.
+Partial calls are neither executed nor replayed as complete calls. Budget,
+deadline and optional host continuation limits govern further sends. Automatic
+compaction uses the host port's compaction_limits and routes summary requests by
+model; active continuation state and original history remain Run-bound.
 
 Usage uses the runtime Usage type: cached/image input are subsets of input;
 reasoning/image output are subsets of output; cached image input is their input

@@ -325,6 +325,8 @@ pub struct RunSpec {
     pub validator_version: String,
     pub budget: ReservationPolicy,
     pub scheduling: SchedulingPolicy,
+    pub continuation: ContinuationPolicy,
+    pub compaction: Option<CompactionPolicy>,
 }
 impl RunSpec {
     pub fn new(tenant: &str, key: &str, account: String, input: &str) -> Self {
@@ -347,8 +349,30 @@ impl RunSpec {
             validator_version: "1".into(),
             budget: ReservationPolicy::default(),
             scheduling: SchedulingPolicy::default(),
+            continuation: ContinuationPolicy::default(),
+            compaction: None,
         }
     }
+}
+/// Successful token-limited responses start new, separately reserved turns.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationPolicy {
+    pub instruction: String,
+    pub max_continuations: Option<u64>,
+}
+impl Default for ContinuationPolicy {
+    fn default() -> Self {
+        Self {
+            instruction: "Continue from the previous response and complete the task.".into(),
+            max_continuations: None,
+        }
+    }
+}
+/// Compact before a new model turn when context headroom falls below this value.
+/// The host selects the summary model through ModelPort::compaction_limits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionPolicy {
+    pub min_remaining_tokens: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Trigger {
@@ -742,6 +766,8 @@ pub struct ValidationReceipt {
     pub validator: String,
     pub validator_version: String,
     pub passed: bool,
+    /// Trusted validator classification, bound to the same candidate and version.
+    pub repairable: bool,
     pub diagnostics: Vec<Diagnostic>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -768,6 +794,11 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    /// A host port may route summary requests to a different configured model.
+    /// prepare/invoke/lookup must route by the request's model, including recovery.
+    fn compaction_limits(&self) -> ModelLimits {
+        self.limits()
+    }
     /// Resolve and authorize all attachments before sizing and reservation.
     fn prepare_request(
         &self,
@@ -878,13 +909,6 @@ pub struct RepairPolicy {
 pub trait Validator: Send + Sync {
     fn repair_policy(&self) -> RepairPolicy {
         RepairPolicy::default()
-    }
-    fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
-        !diagnostics.is_empty()
-            && diagnostics.iter().all(|d| {
-                d.severity == "error"
-                    && matches!(d.code.as_str(), "SCHEMA_VALIDATION" | "JSON_SYNTAX")
-            })
     }
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt>;
 }

@@ -996,6 +996,12 @@ impl DataStore {
         let diagnostics = validator.check(target)?;
         let key = validator.key();
         let receipt = ValidationReceipt {
+            repairable: diagnostics.iter().any(|d| d.severity == "error")
+                && diagnostics.iter().all(|d| {
+                    matches!(d.severity.as_str(), "info" | "warning")
+                        || (d.severity == "error"
+                            && matches!(d.code.as_str(), "SCHEMA_VALIDATION" | "JSON_SYNTAX"))
+                }),
             hash: digest(&target.output()),
             basis_revision: target.basis_revision,
             config_version: target.config_version.clone(),

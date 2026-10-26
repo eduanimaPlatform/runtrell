@@ -127,22 +127,21 @@ impl Validator for ValidationChain {
     fn repair_policy(&self) -> RepairPolicy {
         self.repair.clone()
     }
-    fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
-        !diagnostics.is_empty()
-            && diagnostics.iter().all(|d| {
-                matches!(d.severity.as_str(), "info" | "warning")
-                    || (d.severity == "error" && self.repairable_codes.contains(&d.code))
-            })
-            && diagnostics.iter().any(|d| d.severity == "error")
-    }
     fn validate(&self, run: &RunRecord, value: &Value) -> Result<ValidationReceipt> {
         let mut diagnostics = schema_diagnostics(value, &self.schema)?;
         let mut passed = diagnostics.is_empty();
-        for validator in &self.validators {
-            let receipt = validator.validator.validate(run, value)?;
-            verify_receipt(run, value, &receipt, &validator.key)?;
-            passed &= receipt.passed;
-            diagnostics.extend(receipt.diagnostics);
+        let mut repairable = true;
+        // Typed host validators only consume candidates that passed the schema.
+        if passed {
+            for validator in &self.validators {
+                let receipt = validator.validator.validate(run, value)?;
+                verify_receipt(run, value, &receipt, &validator.key)?;
+                passed &= receipt.passed;
+                repairable &= receipt.passed
+                    || receipt.repairable
+                    || self.codes_repairable(&receipt.diagnostics);
+                diagnostics.extend(receipt.diagnostics);
+            }
         }
         Ok(ValidationReceipt {
             hash: digest(value),
@@ -151,8 +150,19 @@ impl Validator for ValidationChain {
             validator: run.spec.validator.clone(),
             validator_version: run.spec.validator_version.clone(),
             passed,
+            repairable: !passed && repairable,
             diagnostics,
         })
+    }
+}
+impl ValidationChain {
+    fn codes_repairable(&self, diagnostics: &[Diagnostic]) -> bool {
+        !diagnostics.is_empty()
+            && diagnostics.iter().all(|d| {
+                matches!(d.severity.as_str(), "info" | "warning")
+                    || (d.severity == "error" && self.repairable_codes.contains(&d.code))
+            })
+            && diagnostics.iter().any(|d| d.severity == "error")
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

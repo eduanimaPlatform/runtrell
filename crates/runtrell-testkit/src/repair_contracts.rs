@@ -18,6 +18,7 @@ pub async fn json_artifact_repair_contract<S: ControlStore>(store: Arc<S>) {
             }
             let diagnostics = schema::json_artifact_diagnostics(&bytes.bytes, &artifact)?;
             Ok(ValidationReceipt {
+                repairable: !diagnostics.is_empty(),
                 hash: digest(candidate),
                 basis_revision: run.spec.basis_revision,
                 config_version: run.spec.config_version.clone(),

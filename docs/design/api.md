@@ -46,7 +46,11 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postgres JSONB再読取りのキー順変更でもreceiptを同じ候補へ照合する。array順と値の違いは保持する。Artifactのraw bytes hashは従来どおりbytesそのものに結び付ける。
 
-修正可否のcodeと回数・時間はhostのValidator/RepairPolicyが供給する。既定ValidatorはJSON_SYNTAXとSCHEMA_VALIDATIONを修正可能とし、ValidationChainはhostがrepairable_codesへ明示する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validationへ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。
+修正可否はhostのValidationReceipt.repairableへ束縛する。JSON_SYNTAXはdriverが修正可能とし、ValidationChainはschema違反およびhostがrepairable_codesへ明示するcodeと、子validatorのreceipt分類を統合する。型付きhost validatorはschema合格後にだけ実行する。修正回数・時間はRepairPolicyの任意上限だけを使い、既定上限を持たない。tool入力（非objectを含む）と最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。保存・認可・証跡不一致のErrorは修正診断へ変換しない。
+
+通常driverはmetadata.stop_reason=max_tokensを継続可能な応答として扱う。usageを先に精算し、応答のtool callは採用しない。RunSpec.continuationの文面（汎用の短文を既定）を履歴へ追加して別operationを作り、出力枠を再見積りする。回数の固定上限はなく、任意max_continuations・予算・deadlineで停止する。
+
+RunSpec.compactionは入力見積りと通常出力上限を除いたcontext余裕の閾値を設定する。ModelPort.compaction_limitsでhostが圧縮モデル・価格・上限を選び、portはrequest.modelでprepare/invoke/lookupを配送する（既定は通常モデル）。通常loopは新しいmodel要求の前にcompact_contextを自動実行し、summaryと有効なモデル入力を同じcheckpoint CASで保存する。checkpoint内のContextStoreは元の履歴を保持し、context_ownerでRunへ束縛する。別Runへコピーされたsummaryは再開前に拒否する。圧縮はtool処理が完了したモデル境界で行い、直近のtool交換・Provider継続状態・固定RunSpecと口座は要約に委ねず保持する。保存済み圧縮結果の復旧では再予約・再送せず元operationを照合する。
 
 成果物bytesはhostが保存adapterで取得し、TargetValidator等から`schema::json_artifact_diagnostics`を利用する。同じ構文診断にArtifact IDを付け、参照のhash/bytesと不一致ならConflictで拒否する。対象選択・保存先・検証基準はhostの責任、構文判定と修正機構は共通基盤。試験の成果物保存はMemory DataStoreで、Postgresは制御checkpoint/操作台帳を担う。
 
@@ -85,6 +89,17 @@ pub struct RunSpec {
     pub validator_version: String,
     pub budget: ReservationPolicy,
     pub scheduling: SchedulingPolicy,
+    pub continuation: ContinuationPolicy,
+    pub compaction: Option<CompactionPolicy>,
+}
+
+pub struct ContinuationPolicy {
+    pub instruction: String,
+    pub max_continuations: Option<u64>,
+}
+
+pub struct CompactionPolicy {
+    pub min_remaining_tokens: u64,
 }
 
 pub struct RunHandle {
@@ -168,6 +183,8 @@ pub struct ValidationReceipt {
     pub validator: String,
     pub validator_version: String,
     pub passed: bool,
+    /// Trusted validator classification, bound to the same candidate and version.
+    pub repairable: bool,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -202,6 +219,11 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    /// A host port may route summary requests to a different configured model.
+    /// prepare/invoke/lookup must route by the request's model, including recovery.
+    fn compaction_limits(&self) -> ModelLimits {
+        self.limits()
+    }
     /// Resolve and authorize all attachments before sizing and reservation.
     fn prepare_request(
         &self,
@@ -312,13 +334,6 @@ pub struct RepairPolicy {
 pub trait Validator: Send + Sync {
     fn repair_policy(&self) -> RepairPolicy {
         RepairPolicy::default()
-    }
-    fn repairable(&self, diagnostics: &[Diagnostic]) -> bool {
-        !diagnostics.is_empty()
-            && diagnostics.iter().all(|d| {
-                d.severity == "error"
-                    && matches!(d.code.as_str(), "SCHEMA_VALIDATION" | "JSON_SYNTAX")
-            })
     }
     fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt>;
 }

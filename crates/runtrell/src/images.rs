@@ -349,6 +349,9 @@ pub struct ImageModel<M, S, P, R> {
 impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
     for ImageModel<M, S, P, R>
 {
+    fn compaction_limits(&self) -> ModelLimits {
+        self.inner.compaction_limits()
+    }
     fn limits(&self) -> ModelLimits {
         self.inner.limits()
     }

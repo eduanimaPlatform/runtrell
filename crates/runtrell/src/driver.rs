@@ -11,6 +11,7 @@ use runtrell_protocol::{
 };
 use serde_json::Value;
 use std::{future::Future, sync::Arc};
+mod context;
 
 /// Durable-ordering driver; durability is a property of the supplied ControlStore.
 /// Native adapters must not hide retries or bypass dispatch for billable calls.
@@ -442,16 +443,12 @@ impl<
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let repair_deadline = r
-            .checkpoint
-            .as_ref()
-            .and_then(|cp| cp.payload["repair"]["started"].as_u64())
-            .and_then(|started| {
-                self.validator
-                    .repair_policy()
-                    .max_elapsed
-                    .map(|elapsed| started.saturating_add(elapsed))
-            });
+        let repair_deadline = repair_started(&r).and_then(|started| {
+            self.validator
+                .repair_policy()
+                .max_elapsed
+                .map(|elapsed| started.saturating_add(elapsed))
+        });
         let deadline = match (deadline, repair_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -474,12 +471,17 @@ impl<
         catalog: &[ToolDescriptor],
     ) -> Result<()> {
         let r = self.store.check(c, self.clock.now(), true).await?;
-        let repair = r
+        let mut payload = r
             .checkpoint
             .as_ref()
-            .map(|cp| cp.payload["repair"].clone())
-            .unwrap_or(Value::Null);
-        let payload = serde_json::json!({"protocol":run,"catalog":catalog,"model":self.model.limits(),"repair":repair});
+            .map(|cp| cp.payload.clone())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        payload["protocol"] = serde_json::to_value(run).map_err(|_| Error::Storage)?;
+        payload["catalog"] = serde_json::to_value(catalog).map_err(|_| Error::Storage)?;
+        payload["model"] = serde_json::to_value(self.model.limits()).map_err(|_| Error::Storage)?;
+        payload["compaction_model"] =
+            serde_json::to_value(self.model.compaction_limits()).map_err(|_| Error::Storage)?;
         self.store
             .checkpoint(
                 c,
@@ -627,6 +629,13 @@ impl<
         }
         let catalog = self.tools.iter().map(Tool::descriptor).collect::<Vec<_>>();
         file_tools::pin_catalog(&r, &self.policy, &self.tools)?;
+        if let Some(cp) = &r.checkpoint
+            && !cp.payload["context"].is_null()
+            && cp.payload["context_owner"]
+                != serde_json::to_value(&c.run).map_err(|_| Error::Storage)?
+        {
+            return Err(Error::PermissionDenied);
+        }
         if let Some(repair) = r.checkpoint.as_ref().map(|cp| &cp.payload["repair"])
             && !repair.is_null()
         {
@@ -662,6 +671,8 @@ impl<
                     )
                     .unwrap()
                     || cp.payload["model"] != serde_json::to_value(self.model.limits()).unwrap()
+                    || cp.payload["compaction_model"]
+                        != serde_json::to_value(self.model.compaction_limits()).unwrap()
                 {
                     return Err(Error::Unsupported("saved configuration unavailable".into()));
                 }
@@ -685,10 +696,7 @@ impl<
         let mut cursor = r.checkpoint.as_ref().map_or(0, |cp| cp.cursor);
         loop {
             let current = self.store.check(c, self.clock.now(), true).await?;
-            if let Some(started) = current
-                .checkpoint
-                .as_ref()
-                .and_then(|cp| cp.payload["repair"]["started"].as_u64())
+            if let Some(started) = repair_started(&current)
                 && self
                     .validator
                     .repair_policy()
@@ -704,16 +712,7 @@ impl<
             match step {
                 AgentRunStep::CallModel { history, turn, .. } => {
                     let current = self.store.get(&c.run).await?;
-                    let repairs = current
-                        .checkpoint
-                        .as_ref()
-                        .and_then(|cp| cp.payload["repair"]["count"].as_u64())
-                        .unwrap_or(0);
-                    let key = if repairs == 0 {
-                        format!("model:{turn}")
-                    } else {
-                        format!("repair:{repairs}:model:{turn}")
-                    };
+                    let key = format!("{}model:{turn}", operation_prefix(&current));
                     let existing = self.store.operation(&c.run, &key).await?;
                     let current = self.store.get(&c.run).await?;
                     let descriptors = file_tools::pin_catalog(&current, &self.policy, &self.tools)?;
@@ -740,6 +739,40 @@ impl<
                         };
                         let prepared = self.model.prepare_request(&current, req).await?;
                         let input = self.model.input_upper_bound(&prepared)?;
+                        if current.spec.compaction.as_ref().is_some_and(|policy| {
+                            self.model
+                                .limits()
+                                .context
+                                .saturating_sub(input)
+                                .saturating_sub(self.model.limits().max_output)
+                                < policy.min_remaining_tokens
+                        }) && current
+                            .checkpoint
+                            .as_ref()
+                            .is_none_or(|cp| cp.payload["compacted_for"] != key)
+                        {
+                            let data = context::CheckpointContext {
+                                store: self.store.as_ref(),
+                                claim: c,
+                                clock: &self.clock,
+                            };
+                            let access = data::Access::owner(data::Namespace {
+                                owner: c.run.clone(),
+                                agent: "driver".into(),
+                            });
+                            data.stage(&access, &key).await?;
+                            self.compact_context(c, &data, &access, &format!("compact:{key}"))
+                                .await?;
+                            messages = self
+                                .store
+                                .get(&c.run)
+                                .await?
+                                .checkpoint
+                                .ok_or(Error::Conflict)?
+                                .messages;
+                            // Re-prepare and re-quote from the committed summary on the next pass.
+                            continue;
+                        }
                         let (cap, reserve) = self.model_budget(c, input).await?;
                         quoted_reserve = Some(reserve);
                         prepared.with_max_output(cap).request().clone()
@@ -756,15 +789,11 @@ impl<
                             reserve,
                         );
                         d.price = self.model.limits().price;
-                        let repair_remaining = current
-                            .checkpoint
-                            .as_ref()
-                            .and_then(|cp| cp.payload["repair"]["started"].as_u64())
-                            .and_then(|started| {
-                                self.validator.repair_policy().max_elapsed.map(|max| {
-                                    started.saturating_add(max).saturating_sub(self.clock.now())
-                                })
-                            });
+                        let repair_remaining = repair_started(&current).and_then(|started| {
+                            self.validator.repair_policy().max_elapsed.map(|max| {
+                                started.saturating_add(max).saturating_sub(self.clock.now())
+                            })
+                        });
                         d.timeout = Some(
                             repair_remaining.map_or(self.model.limits().timeout, |left| {
                                 left.min(self.model.limits().timeout)
@@ -823,6 +852,45 @@ impl<
                     let output = completed(result)?;
                     let reply: ModelReply = serde_json::from_value(output)
                         .map_err(|e| Error::Invalid(e.to_string()))?;
+                    if reply.metadata["stop_reason"] == "max_tokens" {
+                        let current = self.store.check(c, self.clock.now(), true).await?;
+                        let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+                        let count = cp.payload["continuations"].as_u64().unwrap_or(0);
+                        if current
+                            .spec
+                            .continuation
+                            .max_continuations
+                            .is_some_and(|max| count >= max)
+                        {
+                            return Err(Error::Invalid("MODEL_CONTINUATION_LIMIT".into()));
+                        }
+                        if !reply.metadata.is_null() {
+                            messages.push(Message {
+                                role: "provider".into(),
+                                text: String::new(),
+                                call_id: None,
+                                tool: None,
+                                data: reply.metadata,
+                            });
+                        }
+                        if !reply.text.is_empty() {
+                            messages.push(Message::text("assistant", reply.text));
+                        }
+                        let instruction = current.spec.continuation.instruction;
+                        messages.push(Message::text("user", &instruction));
+                        run = AgentRun::from_spec(&protocol_spec, instruction, None);
+                        cp.payload["protocol"] =
+                            serde_json::to_value(&run).map_err(|_| Error::Storage)?;
+                        cp.payload["continuations"] =
+                            serde_json::json!(count.checked_add(1).ok_or(Error::Conflict)?);
+                        cp.messages = messages.clone();
+                        cp.cursor = cursor.checked_add(1).ok_or(Error::Conflict)?;
+                        cursor = cp.cursor;
+                        self.store
+                            .checkpoint(c, current.revision, cp, self.clock.now())
+                            .await?;
+                        continue;
+                    }
                     if !reply.complete {
                         return Err(Error::Invalid("incomplete model stream".into()));
                     }
@@ -891,10 +959,20 @@ impl<
                 }
                 AgentRunStep::CallTools { calls } => {
                     for call in calls {
-                        let PendingToolCall::Execute(call) = call else {
-                            return Err(Error::Invalid("malformed tool arguments".into()));
+                        let (name, id, input) = match &call {
+                            PendingToolCall::Execute(call) => (
+                                call.name().to_string(),
+                                call.id().to_string(),
+                                call.arguments(),
+                            ),
+                            PendingToolCall::Malformed(call) => (
+                                call.name().to_string(),
+                                call.id().to_string(),
+                                serde_json::from_str(call.raw_arguments())
+                                    .map_err(|_| Error::Conflict)?,
+                            ),
+                            _ => return Err(Error::Unsupported("pending tool call".into())),
                         };
-                        let name = call.name().to_string();
                         let tool = self
                             .tools
                             .iter()
@@ -907,16 +985,7 @@ impl<
                             &descriptor.name,
                             &descriptor.permission,
                         )?;
-                        let repairs = current
-                            .checkpoint
-                            .as_ref()
-                            .and_then(|cp| cp.payload["repair"]["count"].as_u64())
-                            .unwrap_or(0);
-                        let prefix = if repairs == 0 {
-                            String::new()
-                        } else {
-                            format!("repair:{repairs}:")
-                        };
+                        let prefix = operation_prefix(&current);
                         let model_key = format!("{prefix}model:{}", run.turn());
                         let presented = self
                             .store
@@ -928,28 +997,68 @@ impl<
                         if !offered.tools.contains(&descriptor) || !catalog.contains(&descriptor) {
                             return Err(Error::Conflict);
                         }
-                        let key = format!("{prefix}tool:{}:{}", run.turn(), call.id());
-                        let input = call.arguments();
-                        let diagnostics = schema_diagnostics(&input, &descriptor.input_schema)?;
+                        let key = format!("{prefix}tool:{}:{id}", run.turn());
+                        let mut diagnostics = schema_diagnostics(&input, &descriptor.input_schema)?;
+                        if matches!(call, PendingToolCall::Malformed(_)) && diagnostics.is_empty() {
+                            diagnostics =
+                                schema_diagnostics(&input, &serde_json::json!({"type":"object"}))?;
+                        }
                         if !diagnostics.is_empty() {
                             let output = serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
+                            let policy = self.validator.repair_policy();
+                            let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+                            cp.payload["last_tool_validation"] = serde_json::json!({"candidate":input,"repairable":true,"diagnostics":diagnostics});
+                            let started = repair_started(&current).unwrap_or(self.clock.now());
+                            if policy
+                                .max_repairs
+                                .is_some_and(|max| repair_count(&current) >= max)
+                                || policy.max_elapsed.is_some_and(|max| {
+                                    self.clock.now().saturating_sub(started) >= max
+                                })
+                            {
+                                self.store
+                                    .checkpoint(c, current.revision, cp, self.clock.now())
+                                    .await?;
+                                return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
+                            }
                             messages.push(Message {
                                 role: "tool".into(),
                                 text: String::new(),
-                                call_id: Some(call.id().to_string()),
+                                call_id: Some(id),
                                 tool: Some(name),
                                 data: output.clone(),
                             });
-                            run.answer(call.answer(ToolResult::failed(ToolExecutionError::new(
-                                ToolErrorKind::InvalidArgs,
-                                output.to_string(),
-                            ))))
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
+                            let answer = match call {
+                                PendingToolCall::Execute(call) => {
+                                    call.answer(ToolResult::failed(ToolExecutionError::new(
+                                        ToolErrorKind::InvalidArgs,
+                                        output.to_string(),
+                                    )))
+                                }
+                                PendingToolCall::Malformed(call) => call.answer(Some(
+                                    runtrell_protocol::run::InvalidToolCallAction::Retry {
+                                        feedback: output.to_string(),
+                                    },
+                                )),
+                                _ => return Err(Error::Unsupported("pending tool call".into())),
+                            };
+                            run.answer(answer)
+                                .map_err(|e| Error::Invalid(e.to_string()))?;
                             cursor += 1;
-                            self.save(c, &run, messages.clone(), cursor, &catalog)
+                            let count = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0);
+                            cp.payload["tool_repair"] = serde_json::json!({"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started});
+                            cp.payload["protocol"] =
+                                serde_json::to_value(&run).map_err(|_| Error::Storage)?;
+                            cp.messages = messages.clone();
+                            cp.cursor = cursor;
+                            self.store
+                                .checkpoint(c, current.revision, cp, self.clock.now())
                                 .await?;
                             continue;
                         }
+                        let PendingToolCall::Execute(call) = call else {
+                            return Err(Error::Conflict);
+                        };
                         let mut d = DispatchRequest::new(
                             &key,
                             tool.operation_kind(),
@@ -1034,6 +1143,7 @@ impl<
                     let receipt = tokio::task::spawn_blocking(move || match parsed {
                         Ok(_) => validator.validate(&validation_run, &validation_output),
                         Err(diagnostics) => Ok(ValidationReceipt {
+                            repairable: true,
                             hash: digest(&validation_output),
                             basis_revision: validation_run.spec.basis_revision,
                             config_version: validation_run.spec.config_version,
@@ -1054,7 +1164,7 @@ impl<
                         return Err(Error::Conflict);
                     }
                     if !receipt.passed {
-                        if !self.validator.repairable(&receipt.diagnostics) {
+                        if !receipt.repairable {
                             return self
                                 .validation_failure(
                                     c,
@@ -1071,9 +1181,11 @@ impl<
                             .map(|cp| cp.payload["repair"].clone())
                             .unwrap_or(Value::Null);
                         let count = previous["count"].as_u64().unwrap_or(0);
-                        let started = previous["started"].as_u64().unwrap_or(self.clock.now());
+                        let started = repair_started(&current).unwrap_or(self.clock.now());
                         let policy = self.validator.repair_policy();
-                        if policy.max_repairs.is_some_and(|max| count >= max)
+                        if policy
+                            .max_repairs
+                            .is_some_and(|max| repair_count(&current) >= max)
                             || policy
                                 .max_elapsed
                                 .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
@@ -1114,6 +1226,33 @@ impl<
         }
     }
 }
+fn operation_prefix(run: &RunRecord) -> String {
+    let mut prefix = String::new();
+    if let Some(cp) = &run.checkpoint {
+        if let Some(count) = cp.payload["repair"]["count"].as_u64().filter(|n| *n > 0) {
+            prefix.push_str(&format!("repair:{count}:"));
+        }
+        if let Some(count) = cp.payload["continuations"].as_u64().filter(|n| *n > 0) {
+            prefix.push_str(&format!("continue:{count}:"));
+        }
+    }
+    prefix
+}
+fn repair_started(run: &RunRecord) -> Option<u64> {
+    let cp = run.checkpoint.as_ref()?;
+    ["repair", "tool_repair"]
+        .iter()
+        .filter_map(|key| cp.payload[key]["started"].as_u64())
+        .min()
+}
+fn repair_count(run: &RunRecord) -> u64 {
+    run.checkpoint.as_ref().map_or(0, |cp| {
+        cp.payload["repair"]["count"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0))
+    })
+}
 fn completed(result: ExternalResult) -> Result<Value> {
     match result {
         ExternalResult::Applied { output, .. } => Ok(output),
@@ -1150,7 +1289,7 @@ impl<
             return Err(Error::PermissionDenied);
         }
         let base = data.context(access).await?;
-        let limits = self.model.limits();
+        let limits = self.model.compaction_limits();
         let request = ModelRequest {
             model: limits.model.clone(),
             messages: vec![
@@ -1160,29 +1299,54 @@ impl<
                 ),
                 Message::text(
                     "user",
-                    serde_json::to_string(&base).map_err(|_| Error::Storage)?,
+                    // Fixed constraints, pending state and artifact provenance stay
+                    // outside the summary; do not consume context by quoting them twice.
+                    serde_json::to_string(
+                        &serde_json::json!({"purpose":base.purpose,"history":base.history}),
+                    )
+                    .map_err(|_| Error::Storage)?,
                 ),
             ],
             tools: vec![],
             max_output: 0,
-            metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water}),
+            metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water,"context_digest":digest(&serde_json::to_value(&base).map_err(|_| Error::Storage)?)}),
             images: vec![],
         };
         let current = self.store.get(&c.run).await?;
-        let prepared = self.model.prepare_request(&current, request).await?;
-        let input = self.model.input_upper_bound(&prepared)?;
-        let (cap, reserve) = self.model_budget(c, input).await?;
-        let request = prepared.with_max_output(cap);
-        let mut d = DispatchRequest::new(
-            key,
-            OperationKind::Compaction,
-            &limits.model,
-            serde_json::to_value(request.request()).map_err(|_| Error::Storage)?,
-            reserve,
-        );
-        d.version = "context-summary-1".into();
-        d.price = limits.price;
-        d.timeout = Some(limits.timeout);
+        let d = if let Some(op) = self.store.operation(&c.run, key).await? {
+            let stored: ModelRequest =
+                serde_json::from_value(op.request.input.clone()).map_err(|_| Error::Conflict)?;
+            if stored.metadata != request.metadata
+                || stored.model != limits.model
+                || op.request.kind != OperationKind::Compaction
+            {
+                return Err(Error::Conflict);
+            }
+            self.next_attempt(c, &op, self.model.retry_policy()).await?
+        } else {
+            let prepared = self.model.prepare_request(&current, request).await?;
+            let input = self.model.input_upper_bound(&prepared)?;
+            let (cap, reserve) = limits.cap_for_policy(
+                input,
+                self.store.remaining(c, self.clock.now()).await?,
+                &current.spec.budget,
+            )?;
+            let request = prepared.with_max_output(cap);
+            let mut d = DispatchRequest::new(
+                key,
+                OperationKind::Compaction,
+                &limits.model,
+                serde_json::to_value(request.request()).map_err(|_| Error::Storage)?,
+                reserve,
+            );
+            d.version = "context-summary-1".into();
+            d.price = limits.price;
+            d.timeout = Some(limits.timeout);
+            d
+        };
+        let request: ModelRequest =
+            serde_json::from_value(d.input.clone()).map_err(|_| Error::Conflict)?;
+        let request = self.model.prepare_request(&current, request).await?;
         let lookup = request.clone();
         let result = self
             .dispatch(
@@ -1196,6 +1360,9 @@ impl<
         let reply: ModelReply = serde_json::from_value(completed(result)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         self.store.check(c, self.clock.now(), true).await?;
+        if !reply.complete || reply.metadata["stop_reason"] == "max_tokens" {
+            return Err(Error::Invalid("PARTIAL_SUMMARY".into()));
+        }
         if !reply.calls.is_empty() {
             return Err(Error::Invalid("summary tool calls forbidden".into()));
         }

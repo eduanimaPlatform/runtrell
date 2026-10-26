@@ -56,6 +56,16 @@ An operation key identifies logical work; attempt identifies a billed attempt.
 Lookup/replay of one result settles that attempt once. Separately charged retry
 attempts each add their usage; provider adapters must expose them individually.
 
+A `max_tokens` response is charged before continuation. Its partial tool calls
+are discarded, and a new operation quotes input, context headroom, output limit
+and the remaining account together. The host may set a continuation count limit;
+there is no default count ceiling. Budget policy and deadline still apply.
+Automatic context summaries use Compaction operations, the host-selected summary
+model's price and limits, and the same account. A summary is committed with CAS
+only after complete measured success; unknown usage keeps the reservation.
+Schema and host-repairable failures use fresh reserved model turns, with optional
+host count/time limits shared across final-output and tool-input repairs.
+
 SchedulingPolicy defaults to priority=0 and weight=2. Priority is an integer;
 weight must be positive. Tenant rotation precedes priority, and the scheduler saves
 a shared priority streak, preserving the existing bounded priority burst. Equal priorities are FIFO; after the configured

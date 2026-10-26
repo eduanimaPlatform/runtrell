@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Credential-free host adapters; no private repositories or network access.
+pub mod driver_contracts;
 use runtrell::*;
 use serde_json::{Value, json};
 use std::{
@@ -268,6 +269,7 @@ impl Validator for DecisionValidator {
             return Err(Error::Invalid("INSUFFICIENT_EVIDENCE".into()));
         }
         Ok(ValidationReceipt {
+            repairable: false,
             hash: digest(v),
             basis_revision: r.spec.basis_revision,
             config_version: r.spec.config_version.clone(),

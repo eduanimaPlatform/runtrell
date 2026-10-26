@@ -117,6 +117,11 @@ fn chain_verifies_each_receipt_before_using_diagnostics() {
             repairable_codes: BTreeSet::new(),
         };
         assert!(chain.validate(&run, &value).unwrap().passed);
+        // Typed host validators must not turn a schema failure into an error
+        // while trying to consume a candidate that has not passed its schema.
+        let invalid = chain.validate(&run, &json!([])).unwrap();
+        assert!(!invalid.passed && invalid.repairable);
+        assert_eq!(invalid.diagnostics[0].path, "");
     });
 }
 

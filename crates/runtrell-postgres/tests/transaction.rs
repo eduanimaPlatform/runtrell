@@ -217,6 +217,7 @@ async fn successful_finalization_is_staged_fenced_and_validated() {
     let completion = Completion {
         id: "completion-1".into(),
         receipt: ValidationReceipt {
+            repairable: false,
             hash: digest(&output),
             basis_revision: spec.basis_revision,
             config_version: spec.config_version,
