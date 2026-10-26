@@ -387,3 +387,27 @@ async fn request_runtime_hash_is_not_replaced_by_a_new_backend_allowlist() {
     assert_eq!(backend.stop(&c).await.unwrap(), Progress::Confirmed);
     assert_eq!(backend.destroy(&c).await.unwrap(), Progress::Confirmed);
 }
+
+#[cfg(target_os = "macos")]
+#[path = "support/execution_tool.rs"]
+mod execution_tool;
+#[tokio::test]
+#[ignore = "requires macOS Seatbelt outside a nested sandbox"]
+#[cfg(target_os = "macos")]
+async fn macos_execution_tool_saves_and_reclaims() {
+    let root = private_root();
+    let backend = ProcessBackend::new(
+        root.path().canonicalize().unwrap(),
+        env!("CARGO_BIN_EXE_runtrell-exec-limit"),
+        "/usr/bin/sandbox-exec",
+        &["/bin/sh"],
+    )
+    .unwrap();
+    let limits = ExecutionLimits {
+        isolation: Isolation::Untrusted,
+        wall_ms: 4000,
+        output_bytes: 8192,
+        ..Default::default()
+    };
+    execution_tool::exercise(backend, limits).await;
+}

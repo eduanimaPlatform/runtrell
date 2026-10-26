@@ -807,6 +807,10 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    /// Resource admission class; execution tools reserve Sandbox slots.
+    fn operation_kind(&self) -> OperationKind {
+        OperationKind::Tool
+    }
     /// Only declared adapters are prepared; ordinary local tools need no proof.
     fn requires_recovery_preparation(&self) -> bool {
         false

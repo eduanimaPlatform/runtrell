@@ -24,7 +24,7 @@ impl DependencyPolicy {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PythonRuntime {
     executable: String,
     /// Host-verified interpreter version, bound into request arguments.
@@ -32,6 +32,9 @@ pub struct PythonRuntime {
     hash: String,
 }
 impl PythonRuntime {
+    pub(crate) fn executable(&self) -> &str {
+        &self.executable
+    }
     pub fn new(path: &str, version: &str, hash: &str) -> Result<Self> {
         if !Path::new(path).is_absolute()
             || version.is_empty()

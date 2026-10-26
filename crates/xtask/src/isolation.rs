@@ -8,6 +8,7 @@ pub fn names(suite: &str, feature: &str) -> Result<Vec<&'static str>, Box<dyn Er
     let mut names = match suite {
         "linux" => vec![
             "linux_limits_and_boundaries",
+            "linux_execution_tool_saves_and_reclaims",
             "linux_cancel_descendants_and_recover_without_registry",
             "linux_backend_process_crash",
             "linux_non_cgroup_directory_is_rejected_before_resource_acquisition",
@@ -22,7 +23,10 @@ pub fn names(suite: &str, feature: &str) -> Result<Vec<&'static str>, Box<dyn Er
             "execution::linux::tests::linux_acquisition_crash_before_identity_record",
         ],
         "macos" if feature == "default" => {
-            vec!["real_isolation_loop_output_fork_env_and_workspace_boundaries"]
+            vec![
+                "real_isolation_loop_output_fork_env_and_workspace_boundaries",
+                "macos_execution_tool_saves_and_reclaims",
+            ]
         }
         _ => return Err("unsupported isolation suite/feature".into()),
     };
@@ -121,8 +125,8 @@ mod tests {
     }
     #[test]
     fn expected_inventory_depends_on_feature() {
-        assert_eq!(names("linux", "default").unwrap().len(), 8);
-        assert_eq!(names("linux", "python").unwrap().len(), 9);
+        assert_eq!(names("linux", "default").unwrap().len(), 9);
+        assert_eq!(names("linux", "python").unwrap().len(), 10);
         for feature in ["default", "python"] {
             assert!(
                 names("linux", feature)
@@ -132,7 +136,7 @@ mod tests {
         }
         assert_eq!(names("linux-acquisition", "default").unwrap().len(), 3);
         assert_eq!(names("linux-acquisition", "python").unwrap().len(), 3);
-        assert_eq!(names("macos", "default").unwrap().len(), 1);
+        assert_eq!(names("macos", "default").unwrap().len(), 2);
         assert!(names("linux", "unknown").is_err());
     }
 }

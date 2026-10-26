@@ -48,6 +48,16 @@ JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postg
 
 成果物bytesはhostが保存adapterで取得し、TargetValidator等から`schema::json_artifact_diagnostics`を利用する。同じ構文診断にArtifact IDを付け、参照のhash/bytesと不一致ならConflictで拒否する。対象選択・保存先・検証基準はhostの責任、構文判定と修正機構は共通基盤。試験の成果物保存はMemory DataStoreで、Postgresは制御checkpoint/操作台帳を担う。
 
+## 選択可能な標準ツール（rt-5）
+
+正本は[standard_tools.rs](../../crates/runtrell/src/standard_tools.rs)と[execution/tool.rs](../../crates/runtrell/src/execution/tool.rs)。`ToolSet<S>`は空から開始し、`files(store, access)`・`validation(tool)`・`execution(tool)`で資源を接続する。接続だけでは有効化しない。`select(StandardTool)`で選び、`disable`で除外する。`ToolPreset(BTreeMap<StandardTool, ToolSettings>)`は集合と設定の既定値。後続の`settings`はそのツールの設定を置換する。timeout・出力上限・予約額・StoredOutputのinline上限を個別に指定できる。Presetと設定型はserde対応で、configuration_digestへ渡す構成本文に含められる。拡張は別途`RegisteredTool::new(custom_tool)`で追加する。通常の標準機能利用に独自Toolの実装は不要。
+
+`StandardTool::requirements`が接続・資源を宣言する。`build`は選択済みツールについてのみ不足を検査し、`ConfigDiagnostic {code, location, message, fix}`を全件返す。実行backend未接続は`EXECUTION_BACKEND_MISSING`、他の必須資源不足は`TOOL_RESOURCE_MISSING`、必要制限非対応は`EXECUTION_CAPABILITY_MISSING`。未選択の能力を補完・起動しない。storeは`StandardToolStore`の共通接続型を使うため、読取りだけの場合も同型のArtifact契約を実装するが、未選択のArtifact操作は提示しない。
+
+三つのゲートを分ける。(1) Cargo featureはコンパイルする能力。現行の標準Rust adapterは常に利用可能で、Python builder/script variantだけ`python`で追加する。(2) ToolSetの選択結果と`pin_catalog(run, policy, tools)`がAgentへ提示する定義。(3) 現在の`Policy::authorize`が個々のdispatch・開始・再開・保存を認可する。featureや選択は認可の代わりにならない。
+
+`Tool::operation_kind`は通常Tool、ExecutionToolはSandbox。RegisteredTool・設定adapter・StoredOutputToolはこれを保持する。driverはSandbox toolでも同じcatalog digest・account・version・operation kindを照合して取消・復旧へ配送する。低水準`execute_backend`は引き続きhostが明示的に実行する共通契約であり、モデル向けtoolの互換wrapperではない。hostはExecutionToolとRuntimeへ同じControlStore・Policy・Clockを接続する。
+
 <!-- generated-contracts -->
 ## Rust契約定義
 
@@ -230,6 +240,10 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    /// Resource admission class; execution tools reserve Sandbox slots.
+    fn operation_kind(&self) -> OperationKind {
+        OperationKind::Tool
+    }
     /// Only declared adapters are prepared; ordinary local tools need no proof.
     fn requires_recovery_preparation(&self) -> bool {
         false

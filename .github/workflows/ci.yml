@@ -34,7 +34,7 @@ jobs:
           - feature: default
             args: ''
           - feature: python
-            args: --features runtrell/python
+            args: --features runtrell/python,runtrell-testkit/python
     services:
       postgres:
         image: postgres:18
@@ -202,8 +202,12 @@ jobs:
           cargo test -p runtrell --locked --test execution -- --ignored --list --color never > "$RUNNER_TEMP/isolation-results/list.txt"
       - name: Real Seatbelt execution
         run: |
-          cargo test -p runtrell --locked --test execution -- --ignored --test-threads=1 --color never \
-            2>&1 | tee "$RUNNER_TEMP/isolation-results/real_isolation_loop_output_fork_env_and_workspace_boundaries.log"
+          failed=0
+          while IFS= read -r test_name; do
+            cargo test -p runtrell --locked --test execution -- --exact "$test_name" --include-ignored --test-threads=1 --color never \
+              2>&1 | tee "$RUNNER_TEMP/isolation-results/$test_name.log" || failed=1
+          done < <(target/debug/xtask isolation-tests macos default)
+          exit "$failed"
       - name: Require Seatbelt result to be ok
         if: always()
         run: target/debug/xtask isolation-results macos default "$RUNNER_TEMP/isolation-results"

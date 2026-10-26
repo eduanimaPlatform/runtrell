@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 
 type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 trait ErasedTool: Send + Sync {
+    fn operation_kind(&self) -> OperationKind;
     fn descriptor(&self) -> ToolDescriptor;
     fn requires_recovery_preparation(&self) -> bool;
     fn prepare_recovery<'a>(
@@ -20,6 +21,9 @@ trait ErasedTool: Send + Sync {
 }
 struct Erase<T>(T);
 impl<T: Tool> ErasedTool for Erase<T> {
+    fn operation_kind(&self) -> OperationKind {
+        self.0.operation_kind()
+    }
     fn requires_recovery_preparation(&self) -> bool {
         self.0.requires_recovery_preparation()
     }
@@ -52,6 +56,9 @@ impl RegisteredTool {
     }
 }
 impl Tool for RegisteredTool {
+    fn operation_kind(&self) -> OperationKind {
+        self.0.operation_kind()
+    }
     fn requires_recovery_preparation(&self) -> bool {
         self.0.requires_recovery_preparation()
     }

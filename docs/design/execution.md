@@ -135,7 +135,7 @@ Linuxの管理側はsudoで専用`/sys/fs/cgroup/runtrell-ci` subtreeを作り�
 
 payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須とし、uid/gid 65534、`--cap-drop ALL`、helperの`no_new_privs`、追加userns禁止、read-only runtime、network分離を適用する。管理領域・資格情報・cgroup FSは公開しない。`linux_payload_has_no_privileges`はpayloadの実行、uid/gid、全5種のcapability集合が0、NoNewPrivs=1、管理側と異なるuser namespaceを照合する。共有kernelの脆弱性に対するVM相当の防御を意味しない。
 
-`xtask isolation-tests linux default|python`が必須名の正本。integrationはdefault 8件、Python有効9件（既存の環境拒否・遅延helper拒否2件を含む）。`xtask isolation-tests linux-acquisition default|python`のtest-only取得crash unit 3件も、各featureで必須とする（合計default 11件／Python 12件）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 1件を同様に照合する。
+`xtask isolation-tests linux default|python`が必須名の正本。integrationはdefault 9件、Python有効10件（既存の環境拒否・遅延helper拒否2件を含む）。`xtask isolation-tests linux-acquisition default|python`のtest-only取得crash unit 3件も、各featureで必須とする（合計default 12件／Python 13件）。CIは各試験を`--exact --include-ignored --test-threads=1`で独立実行し、一覧と名前ごとのlibtest `ok`、1 passed / 0 failed / 0 ignoredを`xtask isolation-results`で照合する。必須名の欠落・追加未登録・skip・失敗・空の実行結果を拒否する。Crash試験の子processの不完全な出力は通常のlibtest capture内に保持され、`CANCELLED_BEFORE_JOIN`等のstderrを成功試験として数えない。異なるfeatureの件数も混ぜない。macOSは`cargo test -p runtrell --test execution -- --ignored`でSeatbelt 2件を同様に照合する。
 
 既存のbaseline実行・CPU閾値・OOM・PID quota・ENOSPC・出力上限・network/書込み拒否・子孫停止・別process停止後の再発見・冪等回収・Python成果物保存のassertionは維持する。環境変数不足は成功returnせず失敗する。CIの結果照合だけでは将来追加される早期returnを検出できないため、payload実行と制限発動のassertionも必須条件である。
 
@@ -170,3 +170,15 @@ inventoryは取得途中のintent付き実体（実体未作成も含む）と�
 ### macOSの子孫実行能力
 
 Seatbeltのfork拒否は維持する。`ExecutionRequest.requires_descendants=true`を指定した要求は、macOS ProcessBackendで取得前にUnsupportedとなる。macOSの子process一括回収は提供しない。必須CI試験`real_isolation_loop_output_fork_env_and_workspace_boundaries`は、この明示拒否と環境未取得を確認し、子孫回収の成功を主張しない。同じ試験のLinux fork経路はchild.pidの存在・数値PID・停止を必須にする。要求を宣言しないpayloadがforkしてもSeatbeltが拒否する。`requires_descendants`は隔離を緩める設定ではない。
+
+## rt-5：Agentから呼べるExecutionTool
+
+任意の公開Toolとして`execute`を提供する。入力は`{program:{Process:{executable,args}},files:[...],outputs:[...]}`。実行fileと引数の方針（`ArgumentPolicy::Any`または`Exact`の有限allowlist）・隔離/資源/時間/出力量・予約・要約サイズはhostの`ExecutionToolConfig`に固定し、モデル入力から変更できない。Python feature有効時は`{program:{Python:{script:"job.py"}},files:["job.py"],outputs:[...]}`も受理し、hostが`ExecutionTool::python(PythonRuntime)`で固定した実行物/版/hashを使う。scriptは選択したWorkspace fileで、依存取得や認証情報を自動供給しない。
+
+共通dispatchが現在の認可、Sandbox枠と階層予算の原子予約、operation intent、Run/tool期限を先に管理する。Toolが選択入力を固定しExecutionLedgerへintentを保存した後だけacquireする。取得後は現在のowner fence・Run状態・Policy・取消を再検査する。必要制限はbackend.supportsで検査し、非対応なら開始しない。constructor・ToolSet・通常Run受付で環境を作らない。
+
+停止観測、資源別receipt、削除、費用確定は既存controllerを共用する。全receiptが揃うまでAccepted/Pendingと予約を保持する。復旧lookupは元operationを照会し、代替環境の取得・payload再実行を行わない。応答喪失後にReadyのまま残った環境も取消・回収へ進める。取消・期限切れでも有効ownerによるcleanupは進めるが、古いownerの操作は拒否する。
+
+結果はexit、stdout/stderrの有界previewとtruncated表示、全出力JSONのArtifactRef、失敗code、Workspace保存状態を返す。process失敗や保存競合もモデルが判断できる結果envelopeであり、`failure=null`かつ`saved=true`だけが実行・保存成功。backendの終了、Artifact保存、Workspace保存、停止、回収、業務確定は同一視しない。Artifact作成後の保存競合では出力を保持する。保持不能・費用不明・停止未確認は成功として精算しない。
+
+`linux_execution_tool_saves_and_reclaims`と`macos_execution_tool_saves_and_reclaims`は選択入力→実backend→成果物CAS→Artifact→全資源回収を確認するignore試験。CIの必須名一覧に追加した。Linux default 9件/Python 10件と取得crash 3件、macOS 2件。新しい実backend試験の実行結果は別途受入が必要であり、コンパイル成功を実隔離成功としない。

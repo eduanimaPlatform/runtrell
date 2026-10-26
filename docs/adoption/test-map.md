@@ -14,7 +14,7 @@
 ## rt-3h：Linuxの停止未確認と並行実行
 
 - `stop_timeout_is_durable_and_later_recovery_confirms_only_cpu_pid`：通常fileでcgroupを模擬し、30msの停止期限超過、Unknown/STOP_UNCONFIRMEDの耐久保存、解放receiptなし、別clientでの再読取り、I/Oエラーの保存、後の空判定によるCPU/PIDだけの解放を検証する。修正前は固定1秒待機で失敗。macOSでも実行する。
-- `linux_stop_unconfirmed_is_durable_and_recoverable`（ignore）：payload参加後にjoin barrierの競合を注入し、supervisorの停止確認失敗がUnknownとして保存され、別clientのstopとdestroyで回収できることを要求する。Linux実環境での実行待ち。xtaskの必須一覧にも登録し、integration default 8件／Python 9件を照合する（rt-4bの取得crash unit 3件は別suiteで追加必須）。
+- `linux_stop_unconfirmed_is_durable_and_recoverable`（ignore）：payload参加後にjoin barrierの競合を注入し、supervisorの停止確認失敗がUnknownとして保存され、別clientのstopとdestroyで回収できることを要求する。Linux実環境での実行待ち。xtaskの必須一覧にも登録し、integration default 9件／Python 10件を照合する（rt-4bの取得crash unit 3件は別suiteで追加必須）。
 - `linux_concurrent_runs_reclaim_independently`：8環境の並行数・payload・10秒の停止bound・全解放assertionを維持。各環境のacquire/start/stop/destroyの所要時間を出力する。共通のstopped/destroyed helperはtimeout時に最後のstate・failure・released_resourcesを表示する。
 - 意図した状態記録の修正は、停止未確認をRunningのまま放置せずUnknownにすること。停止・回収条件、controllerの予約保持、owner fence、原子精算の要件と既存assertionは弱めない。Linuxでの間欠失敗解消と所要時間改善は実行証拠を別途必要とする。
 
@@ -525,6 +525,20 @@ Crash子processと遅延helperの起動を`status()`から`output()`へ変更し
 - `precreation_recovery_confirms_absence_and_reclaims_idempotently`：作成前crash相当から停止とMemory/Disk/Volume回収を分離し、二重destroyと所有不明cgroupの非削除を確認。
 - `mount_provenance_rejects_foreign_source_type_and_stacked_mounts`：予定pathだけでなくtmpfs source・種別・重複mountも照合。外国由来のmountは拒否。
 - `linux_acquisition_crash_after_cgroup` / `linux_acquisition_crash_after_mount` / `linux_acquisition_crash_before_identity_record`：`cfg(test)`の子process exitで各境界を固定。新backendが事前intentから識別を補完し、ledger照合・stop・unmount・cgroup削除・資源receipt・冪等回収を検査。所有不明の実cgroup/mountは保持し別Runへ採用しない。テスト自身のfixtureだけを最後に明示撤去する。
-- 実行位置は`--lib`（本番binaryにfault injectionを入れないため）。CIの`xtask isolation-tests linux-acquisition default|python`に3件を登録し、両featureで各親試験の名前付きokと非skipを必須にする。従来のintegration 8/9件は維持。
+- 実行位置は`--lib`（本番binaryにfault injectionを入れないため）。CIの`xtask isolation-tests linux-acquisition default|python`に3件を登録し、両featureで各親試験の名前付きokと非skipを必須にする。既存integrationを維持し、rt-5で新規Tool受入を加えて9/10件に拡張した。
 - 意図した変更：Linux recordにResourcePlanと取得段階を必須化しruntime版を更新。旧形式の互換・移行は追加しない。既存の予約・精算・停止・子孫回収・隔離assertionは削除も弱体化もしない。
 - macOS単体成功とfixtureコンパイルはLinux実行証拠ではない。実装済み・Linux未実行の受入を維持する。
+
+## rt-5：標準ツールの選択とモデル向けコード実行
+
+- `testkit/tests/standard_tools.rs`: 空の初期集合、preset、個別無効化/設定上書き、資源不足diagnostic、Run Policyでの定義絞込み、モデルcall→Sandbox dispatch→選択入力copy→保存版/Artifact/要約→資源回収。
+- 同suite: 予算不足・Run期限・取消による取得抑止、取得応答待ちでの取消とpayload非開始、不明費用での予約保持、費用確定後の取消/回収、未宣言出力拒否、Workspace競合で新しい内容とArtifact保持。
+- `runtrell/tests/{linux_execution,execution}.rs`: `linux_execution_tool_saves_and_reclaims` / `macos_execution_tool_saves_and_reclaims`（ignore）。xtask必須名一覧とCI照合へ追加。既存の隔離/回収assertionは維持。
+- 現行ExecutionRequestに限定copyの`workspace_base`を追加。旧形式の移行・alias・互換wrapperなし。低水準freeze_workspaceとToolの限定copyは両方とも現在の有効な利用方法。原子予約・精算・owner fence・不明予約保持の既存試験は変更しない。
+- 新規APIの初期組立てを先行し、その後にモデル呼出しと障害試験を追加したため、全追加がRed→Green順ではない。文書/CI一覧の変更は生成・コンパイル・一覧照合で検証する。
+
+rt-5の意図した試験変更: xtaskの必須名件数をLinux default 8→9/Python 9→10、macOS 1→2へ更新した。既存名・成功必須・skip拒否は保持し、新規Tool実backend受入を追加するための件数変更であり、assertionの緩和ではない。未選択programのschema拒否と、入力file不足の既知ゼロ精算も追加検査する。
+
+`python_tool_uses_selected_script_and_pinned_runtime_only_when_configured`（testkitのpython feature）はsynthetic runtimeとfake backendでscript選択、Pythonだけの提示定義、固定hash、offline引数、保存/回収を確認する。実Python評価の証拠ではない。取得応答待ちの試験は取消とRun期限切れの双方で、payload非開始・照会回収・最終DeadlineReachedまで検査する。
+
+`selected_execution_reports_capability_diagnostics_but_disabled_does_not`で選択時だけ必要制限を検査すること、`argument_policy_is_pinned_in_definition_and_enforced_per_call`で明示した引数方針（Any/Exact）を定義と呼出しの両方へ適用しdigestへ固定することを確認する。

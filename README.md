@@ -26,6 +26,42 @@ Hosts implement `ModelPort`/`Tool`/`Policy`/`Validator`/`Finalizer` and supply a
 Finalizer receipt establish Run success. External application, cancellation,
 stopping, reclamation and settlement remain distinct records.
 
+## Standard tools chosen by the host
+
+`standard_tools::ToolSet` builds ordinary `RegisteredTool` values for `Runtime.tools`.
+It starts empty. Connecting a store or backend does not enable a tool. Use
+`select`, `disable`, and `settings` per tool; `ToolPreset` only supplies a map of
+selected tools and default settings, which later calls can overwrite.
+
+| Tool | Common implementation | Host supplies |
+|---|---|---|
+| `files.list/read/write/delete/exact_replace` | `FileTool` | Workspace store, owned Access, storage limits |
+| `files.search` | `FileTool` | Workspace store, Access, search bounds |
+| `artifacts.read` | `FileTool` | Artifact store, Access, read bounds |
+| `validate` | `ValidationTool` | TargetValidator, evidence store, pinned Run |
+| Large output envelope | `StoredOutputTool`, per selected tool | Artifact store, Access, inline size, retention/time |
+| `execute` | `ExecutionTool` | Control store, Workspace/Artifact store, execution ledger/backend, Policy/Clock, executable/argument policies, enforced limits, reservation and preview size |
+
+Hosts select and connect these implementations; custom `Tool` implementations
+are only needed for application-specific operations. Business prompts, schemas,
+quality criteria and authoritative application updates remain host-owned.
+Image generation/editing and provider connections are not implemented by this tool set.
+
+```rust
+use runtrell::{data::DataStore, standard_tools::{StandardTool, ToolSet}};
+// Missing resources produce Vec<assembly::ConfigDiagnostic> during assembly.
+let diagnostics = ToolSet::<DataStore>::default()
+    .select(StandardTool::Execution).build().err().unwrap();
+assert_eq!(diagnostics[0].code, "EXECUTION_BACKEND_MISSING");
+```
+
+Cargo features determine compiled capabilities (`python` is opt-in). Selection
+chooses the catalog, `pin_catalog` filters definitions with the Run's Policy, and
+Runtime checks Policy again for each call. None of these gates grants the others.
+Python scripts require both the feature and an explicitly supplied `PythonRuntime`;
+no interpreter or dependency is installed. See [API](docs/design/api.md),
+[execution](docs/design/execution.md) and [Workspace](docs/design/workspace.md).
+
 ## Requirement acceptance
 
 <!-- requirement-summary -->
@@ -40,7 +76,7 @@ stopping, reclamation and settlement remain distinct records.
 
 公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。
 
-試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はintegration default 8件／python 9件と、test-only取得crash unit 3件（両feature）を必須とし、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
+試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はintegration default 9件／python 10件と、test-only取得crash unit 3件（両feature）を必須とし、macOS実隔離は2件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。
 <!-- /requirement-summary -->
 
 ## Local validation

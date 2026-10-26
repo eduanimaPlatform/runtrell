@@ -21,6 +21,7 @@ pub struct FakeExecutionRegistry(Arc<Mutex<BTreeMap<String, Entry>>>);
 
 #[derive(Clone, Default)]
 pub struct FakeExecutionBackend {
+    pub output: Arc<Mutex<Option<serde_json::Value>>>,
     pub registry: FakeExecutionRegistry,
     pub lose: Arc<AtomicBool>,
     pub delay: Arc<AtomicBool>,
@@ -109,7 +110,13 @@ impl ExecutionBackend for FakeExecutionBackend {
             }
             if !self.hold_running.load(Ordering::SeqCst) {
                 o.state = ExecutionState::Stopped;
-                o.result = Some(json!({"answer":42}));
+                o.result = Some(
+                    self.output
+                        .lock()
+                        .map_err(|_| Error::Storage)?
+                        .clone()
+                        .unwrap_or_else(|| json!({"answer":42})),
+                );
                 o.released_resources
                     .extend([Resource::Cpu, Resource::Memory, Resource::Pid]);
                 return Ok(());

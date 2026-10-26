@@ -8,6 +8,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod controller;
+mod tool;
+pub use tool::{
+    ArgumentPolicy, ExecutionInput, ExecutionProgram, ExecutionTool, ExecutionToolConfig,
+};
 mod linux;
 mod process;
 pub use linux::{LinuxBackend, LinuxCpuBandwidth, LinuxInventory, LinuxUsage};
@@ -123,6 +127,8 @@ pub struct ExecutionRequest {
     pub program: Program,
     /// Optional host-pinned executable SHA-256, checked again by OS backends.
     pub executable_hash: Option<String>,
+    /// Full CAS basis when only a subset of files is exposed to execution.
+    pub workspace_base: Option<WorkspaceSnapshot>,
     pub input: Option<WorkspaceSnapshot>,
     pub input_files: BTreeMap<String, Vec<u8>>,
     pub output_paths: Vec<String>,
@@ -141,6 +147,7 @@ impl ExecutionRequest {
                 executable: executable.into(),
                 args,
             },
+            workspace_base: None,
             input: None,
             input_files: BTreeMap::new(),
             output_paths: vec![],
@@ -153,6 +160,16 @@ impl ExecutionRequest {
         self.validate_input(&c.claim.run)
     }
     pub fn validate_input(&self, owner: &RunHandle) -> Result<()> {
+        if let Some(base) = &self.workspace_base {
+            let input = self.input.as_ref().ok_or(Error::Conflict)?;
+            if base.namespace.owner != *owner
+                || base.namespace != input.namespace
+                || base.revision != input.revision
+                || input.files.iter().any(|f| !base.files.contains(f))
+            {
+                return Err(Error::Conflict);
+            }
+        }
         if self
             .input
             .as_ref()

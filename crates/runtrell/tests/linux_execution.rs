@@ -553,3 +553,13 @@ async fn linux_concurrent_runs_reclaim_independently() {
         assert_eq!(item.state, ExecutionState::Destroyed);
     }
 }
+
+#[path = "support/execution_tool.rs"]
+mod execution_tool;
+#[tokio::test]
+#[ignore = "requires delegated cgroup v2 and host mount privileges"]
+async fn linux_execution_tool_saves_and_reclaims() {
+    let root = root();
+    let backend = backend(root.path());
+    execution_tool::exercise(backend, request("").limits).await;
+}

@@ -77,13 +77,16 @@ impl<
                 OperationKind::Model | OperationKind::Compaction
             ) {
                 self.model.cancel(&ctx).await?
-            } else if op.request.kind == OperationKind::Tool {
+            } else if op.request.kind == OperationKind::Tool
+                || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
+            {
                 let tool = self
                     .tools
                     .iter()
                     .find(|t| {
                         let d = t.descriptor();
-                        d.name == op.request.target
+                        t.operation_kind() == op.request.kind
+                            && d.name == op.request.target
                             && d.version == op.request.version
                             && d.account == op.request.account_binding
                             && op.request.scope.as_ref() == Some(&file_tools::catalog_digest(&d))
@@ -207,13 +210,16 @@ impl<
                 let request = serde_json::from_value(op.request.input.clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
                 self.model.lookup(&ctx, request).await?
-            } else if op.request.kind == OperationKind::Tool {
+            } else if op.request.kind == OperationKind::Tool
+                || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
+            {
                 let tool = self
                     .tools
                     .iter()
                     .find(|t| {
                         let d = t.descriptor();
-                        d.name == op.request.target
+                        t.operation_kind() == op.request.kind
+                            && d.name == op.request.target
                             && d.version == op.request.version
                             && d.account == op.request.account_binding
                             && op.request.scope.as_ref() == Some(&file_tools::catalog_digest(&d))
@@ -332,7 +338,9 @@ impl<
                         .await?
                         .ok_or(Error::Conflict)?,
                 )
-            } else if request.kind == OperationKind::Tool {
+            } else if request.kind == OperationKind::Tool
+                || (request.kind == OperationKind::Sandbox && request.scope.is_some())
+            {
                 if let Some(tool) = self
                     .tools
                     .iter()
@@ -930,7 +938,7 @@ impl<
                         }
                         let mut d = DispatchRequest::new(
                             &key,
-                            OperationKind::Tool,
+                            tool.operation_kind(),
                             &name,
                             input.clone(),
                             descriptor.reserve,

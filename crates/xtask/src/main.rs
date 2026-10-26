@@ -223,13 +223,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 } else if execution_scope {
                     (
-                        "execution/{mod,controller,process}.rs; postgres/src/execution.rs; runtrell-exec-limit",
-                        "runtrell/tests/execution.rs; testkit/tests/execution.rs; Memory/Pg共通execution_contracts。Pg台帳再open・新backend client回収/冪等性、registry喪失Unknown、拒否/予約/CAS/CPU。macOS実隔離はsandbox外の過去報告のみ。LinuxBackend実装・実体再識別の実隔離試験は変更後のHosted実行未確認。execution.md参照",
+                        "execution/{mod,controller,process,tool}.rs; standard_tools.rs; postgres/src/execution.rs; runtrell-exec-limit",
+                        "runtrell/tests/execution.rs; testkit/tests/{execution,standard_tools}.rs; Memory/Pg共通execution_contracts。Pg台帳再open・新backend client回収/冪等性、registry喪失Unknown、拒否/予約/CAS/CPU。macOS実隔離はsandbox外の過去報告のみ。LinuxBackend実装・実体再識別の実隔離試験は変更後のHosted実行未確認。execution.md参照",
                     )
                 } else if data_scope {
                     (
-                        "data.rs / data/local.rs / file_tools.rs / driver.rs / schema.rs / assembly.rs",
-                        "runtrell/tests/{data,backend_contract,schema}.rs・testkit/tests/{data_tools,repair,assembly}.rs。U05のcache/credential、A17の実Sandbox喪失、A26後半、DATA-06の運用/障害試験は残る。workspace.md参照",
+                        "data.rs / data/local.rs / file_tools.rs / standard_tools.rs / driver.rs / schema.rs / assembly.rs",
+                        "runtrell/tests/{data,backend_contract,schema}.rs・testkit/tests/{data_tools,repair,assembly,standard_tools}.rs。U05のcache/credential、A17の実Sandbox喪失、A26後半、DATA-06の運用/障害試験は残る。workspace.md参照",
                     )
                 } else if id.starts_with("FORK") || id == "F01" || id == "F02" {
                     (
@@ -295,7 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
             summary.push_str(&format!("| 全体 | {} | {} | {} | {} | 134 |\n", counts["検証済み"], counts["実装済み・Linux未実行"], counts["設計済み"], counts["未着手"]));
-            summary.push_str("\n公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。\n\n試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はintegration default 8件／python 9件と、test-only取得crash unit 3件（両feature）を必須とし、macOS実隔離は1件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。\n");
+            summary.push_str("\n公開範囲: 共通実行基盤と選択可能な公開tool/backend/adapter。業務接続・設定と業務ロジックはhost側の別責務。方針型と共通実装はRuntrell、具体値はhostが供給する。ファイル操作・検索・画像生成/編集・Python・標準モデル接続等の再利用可能な実装も任意機能として扱い、全Runへ強制しない。この分類はそれら全ての実装完了を主張しない。\n\n試験件数: CIの各feature・suiteのlibtest結果を実行時の正本とする（同じ試験のfeature別実行を独立要件数へ加算しない）。Linux実隔離はintegration default 9件／python 10件と、test-only取得crash unit 3件（両feature）を必須とし、macOS実隔離は2件を名前とok結果で照合する。Hostedの成功はworkflow runの固定commit・runner・結果を確認して初めて記録する。変更後のHosted実行は未確認。本番構成・実provider接続・電源断・failover・負荷性能は未検証。\n");
             out.push_str("\n## 分類と受入範囲の集計\n\n");
             out.push_str(&summary);
             let readme_path = root.join("README.md");

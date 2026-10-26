@@ -2,7 +2,7 @@
 use super::*;
 use crate::data::{Access, Change};
 
-async fn bounded<C: Clock, T>(
+pub(super) async fn bounded<C: Clock, T>(
     clock: &C,
     deadline: u64,
     future: impl std::future::Future<Output = Result<T>>,
@@ -34,7 +34,7 @@ async fn save_observation<L: ExecutionLedger>(
         }
     }
 }
-async fn poll_backend<L: ExecutionLedger, B: ExecutionBackend, C: Clock>(
+pub(super) async fn poll_backend<L: ExecutionLedger, B: ExecutionBackend, C: Clock>(
     ledger: &L,
     backend: &B,
     c: &ToolContext,
@@ -301,7 +301,12 @@ pub async fn merge_copy<W: WorkspaceStore>(
     record: &ExecutionRecord,
     changes: Vec<Change>,
 ) -> Result<WorkspaceSnapshot> {
-    let base = record.request.input.as_ref().ok_or(Error::NotFound)?;
+    let base = record
+        .request
+        .workspace_base
+        .as_ref()
+        .or(record.request.input.as_ref())
+        .ok_or(Error::NotFound)?;
     if access.actor().owner != record.owner || access.namespace() != &base.namespace {
         return Err(Error::PermissionDenied);
     }
@@ -366,7 +371,12 @@ pub async fn merge_process_copy<W: WorkspaceStore>(
     access: &Access,
     record: &ExecutionRecord,
 ) -> Result<WorkspaceSnapshot> {
-    let base = record.request.input.as_ref().ok_or(Error::NotFound)?;
+    let base = record
+        .request
+        .workspace_base
+        .as_ref()
+        .or(record.request.input.as_ref())
+        .ok_or(Error::NotFound)?;
     let output = record
         .observation
         .as_ref()

@@ -310,6 +310,9 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
     }
 }
 impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
+    fn operation_kind(&self) -> OperationKind {
+        self.inner.operation_kind()
+    }
     fn requires_recovery_preparation(&self) -> bool {
         self.inner.requires_recovery_preparation()
     }
