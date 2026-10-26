@@ -102,7 +102,6 @@ jobs:
         include:
           - feature: default
             args: ''
-            example_args: ''
           - feature: python
             args: --features python
     steps:
