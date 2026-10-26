@@ -6,14 +6,14 @@ use serde_json::json;
 use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-enum Wire {
+pub(crate) enum Wire {
     Responses,
     GenerateContent,
     Chat,
 }
 #[derive(Debug)]
-struct Adapter {
-    config: Config,
+pub(crate) struct Adapter {
+    pub(crate) config: Config,
     client: Client,
     wire: Wire,
 }
@@ -29,11 +29,18 @@ struct State {
     response_id: Option<String>,
     content: Value,
 }
+#[allow(clippy::large_enum_variant)] // Forward the original settlement receipt inline.
+pub(crate) enum HttpResult {
+    Json(Value),
+    Failure(ExternalResult),
+    Unknown,
+}
 fn invalid() -> Error {
     Error::Invalid("provider request or configuration".into())
 }
 impl Adapter {
-    fn new(config: Config, wire: Wire) -> Result<Self> {
+    pub(crate) fn new(config: Config, wire: Wire) -> Result<Self> {
+        config.image_limits.validate()?;
         let url = Url::parse(&config.endpoint).map_err(|_| invalid())?;
         let l = &config.capabilities.limits;
         if !(url.scheme() == "https"
@@ -96,7 +103,7 @@ impl Adapter {
         }
         Ok(state)
     }
-    fn body(&self, run: &RunHandle, request: &ModelRequest) -> Result<Value> {
+    fn body(&self, run: &RunHandle, request: &PreparedModelRequest) -> Result<Value> {
         if *run != self.config.run {
             return Err(Error::PermissionDenied);
         }
@@ -121,20 +128,18 @@ impl Adapter {
             .transpose()
             .map_err(|_| invalid())?
             .unwrap_or_default();
-        if (options.json_schema.is_some() && !c.json_schema)
-            || (!options.images.is_empty() && !c.image_input)
-            || options.images.iter().any(|i| {
-                !matches!(
-                    i.mime_type.as_str(),
-                    "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-                ) || i.data_base64.is_empty()
-                    || !i
-                        .data_base64
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
-            })
-        {
+        if options.json_schema.is_some() && !c.json_schema {
             return Err(invalid());
+        }
+        if !request.resolved_images().is_empty() && !c.images.input {
+            return Err(Error::Unsupported("image_input".into()));
+        }
+        if request.resolved_images().len() > self.config.image_limits.max_images {
+            return Err(Error::Invalid("IMAGE_COUNT_LIMIT".into()));
+        }
+        let images = request.resolved_images();
+        for image in images {
+            image.validate(&self.config.image_limits)?;
         }
         let mut messages = Vec::new();
         let mut systems = Vec::new();
@@ -205,12 +210,12 @@ impl Adapter {
             };
             messages.push(content);
         }
-        if !options.images.is_empty() {
+        if !images.is_empty() {
             // Images belong to a new user turn, never to a provider-state envelope.
             match self.wire {
-                Wire::Responses => messages.push(json!({"role":"user","content":options.images.iter().map(|i| json!({"type":"input_image","image_url":format!("data:{};base64,{}",i.mime_type,i.data_base64)})).collect::<Vec<_>>()})),
-                Wire::Chat => messages.push(json!({"role":"user","content":options.images.iter().map(|i| json!({"type":"image_url","image_url":{"url":format!("data:{};base64,{}",i.mime_type,i.data_base64)}})).collect::<Vec<_>>()})),
-                Wire::GenerateContent => messages.push(json!({"role":"user","parts":options.images.iter().map(|i| json!({"inlineData":{"mimeType":i.mime_type,"data":i.data_base64}})).collect::<Vec<_>>()})),
+                Wire::Responses => messages.push(json!({"role":"user","content":images.iter().map(|i| json!({"type":"input_image","image_url":format!("data:{};base64,{}",i.mime_type(),i.data_base64())})).collect::<Vec<_>>()})),
+                Wire::Chat => messages.push(json!({"role":"user","content":images.iter().map(|i| json!({"type":"image_url","image_url":{"url":format!("data:{};base64,{}",i.mime_type(),i.data_base64())}})).collect::<Vec<_>>()})),
+                Wire::GenerateContent => messages.push(json!({"role":"user","parts":images.iter().map(|i| json!({"inlineData":{"mimeType":i.mime_type(),"data":i.data_base64()}})).collect::<Vec<_>>()})),
             }
         }
         let functions: Vec<_> = request.tools.iter().map(|t| match self.wire {
@@ -257,8 +262,24 @@ impl Adapter {
         }
         Ok(body)
     }
-    async fn invoke(&self, context: &ToolContext, request: ModelRequest) -> Result<ExternalResult> {
+    async fn invoke(
+        &self,
+        context: &ToolContext,
+        request: PreparedModelRequest,
+    ) -> Result<ExternalResult> {
         let body = self.body(&context.claim.run, &request)?;
+        match self.send(context, body).await? {
+            HttpResult::Json(parsed) => Ok(self
+                .reply(&parsed, &request)
+                .unwrap_or(ExternalResult::Unknown)),
+            HttpResult::Failure(result) => Ok(result),
+            HttpResult::Unknown => Ok(ExternalResult::Unknown),
+        }
+    }
+    pub(crate) async fn send(&self, context: &ToolContext, body: Value) -> Result<HttpResult> {
+        if context.claim.run != self.config.run {
+            return Err(Error::PermissionDenied);
+        }
         let bytes = serde_json::to_vec(&body).map_err(|_| invalid())?;
         if bytes.len() > self.config.max_request_bytes {
             return Err(invalid());
@@ -291,7 +312,7 @@ impl Adapter {
             .send()
             .await;
         let Ok(mut response) = response else {
-            return Ok(ExternalResult::Unknown);
+            return Ok(HttpResult::Unknown);
         };
         let status = response.status().as_u16();
         let retry_header = response
@@ -311,13 +332,13 @@ impl Adapter {
                     bytes.extend_from_slice(&chunk)
                 }
                 Ok(None) => break,
-                _ => return Ok(ExternalResult::Unknown),
+                _ => return Ok(HttpResult::Unknown),
             }
         }
         let parsed: Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(_) if !(200..300).contains(&status) => Value::Null,
-            Err(_) => return Ok(ExternalResult::Unknown),
+            Err(_) => return Ok(HttpResult::Unknown),
         };
         if !(200..300).contains(&status) || !parsed["error"].is_null() {
             let effective_status = parsed["error"]["code"]
@@ -331,7 +352,7 @@ impl Adapter {
                 retry_after: retry_header.clone(),
             };
             let delay = retry_header.as_deref().and_then(retry_delay);
-            return Ok(ExternalResult::Failed {
+            return Ok(HttpResult::Failure(ExternalResult::Failed {
                 physical_evidence: None,
                 code: serde_json::to_string(&failure).map_err(|_| invalid())?,
                 usage: self.usage(&parsed).unwrap_or_else(|_| Usage {
@@ -339,14 +360,11 @@ impl Adapter {
                     ..Usage::default()
                 }),
                 retry_after: delay,
-            });
+            }));
         }
-        match self.reply(&parsed, &request) {
-            Ok(result) => Ok(result),
-            Err(_) => Ok(ExternalResult::Unknown),
-        }
+        Ok(HttpResult::Json(parsed))
     }
-    fn reply(&self, v: &Value, request: &ModelRequest) -> Result<ExternalResult> {
+    fn reply(&self, v: &Value, request: &PreparedModelRequest) -> Result<ExternalResult> {
         let usage = self.usage(v)?;
         let mut text = String::new();
         let mut calls = Vec::new();
@@ -558,7 +576,7 @@ impl Adapter {
             external_id: external_id.map(str::to_owned),
         })
     }
-    fn usage(&self, v: &Value) -> Result<Usage> {
+    pub(crate) fn usage(&self, v: &Value) -> Result<Usage> {
         let mut u = Usage {
             model: v[if self.wire == Wire::GenerateContent {
                 "modelVersion"
@@ -741,8 +759,21 @@ macro_rules! adapter {
             fn limits(&self) -> ModelLimits {
                 self.0.config.capabilities.limits.clone()
             }
-            fn input_upper_bound(&self, request: &ModelRequest) -> Result<u64> {
-                let body = self.0.body(&self.0.config.run, request)?;
+            fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
+                // Size the largest feasible cap too: its decimal wire encoding
+                // must fit before reservation, even when the prototype cap is 0.
+                let limits = self.limits();
+                let ceiling = limits.max_output.min(
+                    limits
+                        .context
+                        .saturating_sub(self.0.config.input_token_upper_bound),
+                );
+                let body = self.0.body(
+                    &self.0.config.run,
+                    &request
+                        .clone()
+                        .with_max_output(request.max_output.max(ceiling)),
+                )?;
                 if serde_json::to_vec(&body).map_err(|_| invalid())?.len()
                     > self.0.config.max_request_bytes
                 {
@@ -760,11 +791,15 @@ macro_rules! adapter {
             async fn invoke(
                 &self,
                 context: &ToolContext,
-                request: ModelRequest,
+                request: PreparedModelRequest,
             ) -> Result<ExternalResult> {
                 self.0.invoke(context, request).await
             }
-            async fn lookup(&self, context: &ToolContext, request: ModelRequest) -> Result<Lookup> {
+            async fn lookup(
+                &self,
+                context: &ToolContext,
+                request: PreparedModelRequest,
+            ) -> Result<Lookup> {
                 self.0.body(&context.claim.run, &request)?;
                 Ok(Lookup::Unknown)
             }

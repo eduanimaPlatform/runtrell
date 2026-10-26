@@ -265,18 +265,18 @@ impl ModelPort for ChangesCatalog {
     fn limits(&self) -> ModelLimits {
         self.inner.limits()
     }
-    fn input_upper_bound(&self, r: &ModelRequest) -> Result<u64> {
+    fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
         self.inner.input_upper_bound(r)
     }
     fn recovery(&self) -> Option<(String, u64)> {
         self.inner.recovery()
     }
-    async fn invoke(&self, c: &ToolContext, r: ModelRequest) -> Result<ExternalResult> {
+    async fn invoke(&self, c: &ToolContext, r: PreparedModelRequest) -> Result<ExternalResult> {
         let out = self.inner.invoke(c, r).await;
         self.changed.store(true, Ordering::SeqCst);
         out
     }
-    async fn lookup(&self, c: &ToolContext, r: ModelRequest) -> Result<Lookup> {
+    async fn lookup(&self, c: &ToolContext, r: PreparedModelRequest) -> Result<Lookup> {
         self.inner.lookup(c, r).await
     }
 }

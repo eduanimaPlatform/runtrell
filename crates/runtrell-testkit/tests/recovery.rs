@@ -23,7 +23,7 @@ impl ModelPort for RestartModel {
     fn limits(&self) -> ModelLimits {
         FakeModel::default().limits()
     }
-    fn input_upper_bound(&self, r: &ModelRequest) -> Result<u64> {
+    fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
         FakeModel::default().input_upper_bound(r)
     }
     fn recovery(&self) -> Option<(String, u64)> {
@@ -41,8 +41,8 @@ impl ModelPort for RestartModel {
             ))
         }
     }
-    async fn invoke(&self, _: &ToolContext, r: ModelRequest) -> Result<ExternalResult> {
-        self.requests.lock().unwrap().push(r);
+    async fn invoke(&self, _: &ToolContext, r: PreparedModelRequest) -> Result<ExternalResult> {
+        self.requests.lock().unwrap().push(r.request().clone());
         if !self.resumed.load(Ordering::SeqCst) {
             return std::future::pending().await;
         }
@@ -71,7 +71,7 @@ impl ModelPort for RestartModel {
             })
         }
     }
-    async fn lookup(&self, ctx: &ToolContext, _: ModelRequest) -> Result<Lookup> {
+    async fn lookup(&self, ctx: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
         let n = self.lookups.fetch_add(1, Ordering::SeqCst);
         match self.case {
             "unknown" => Ok(Lookup::Unknown),

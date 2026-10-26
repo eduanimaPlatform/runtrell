@@ -1,5 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 mod support;
+#[test]
+fn images_normal_loop_and_saved_result_recovery() {
+    support::block_on(runtrell_testkit::image_contracts::workflow(
+        std::sync::Arc::new(support::TestPg::default()),
+        runtrell::data::DataStore::memory(runtrell::data::StoragePolicy::default()),
+    ));
+}
+#[test]
+fn images_paid_validation_failure_and_unknown_usage() {
+    support::block_on(runtrell_testkit::image_contracts::billed_failures(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}
 macro_rules! suite {
     () => {
         mod runtime {

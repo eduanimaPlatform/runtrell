@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #![forbid(unsafe_code)]
 //! Optional, single-send ModelPort implementations. See docs/design/providers.md.
+pub use runtrell::images::ImageLimits;
 use runtrell::{ModelLimits, RunHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,8 +37,15 @@ pub struct Capabilities {
     pub json_schema: bool,
     pub tool_calling: bool,
     pub parallel_tool_calls: bool,
-    pub image_input: bool,
+    pub images: ImageCapabilities,
     pub counters: CounterSupport,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageCapabilities {
+    pub input: bool,
+    pub generation: bool,
+    pub reference_edit: bool,
+    pub mask_edit: bool,
 }
 /// Counter relationships are runtime Usage invariants, independent of the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,9 +73,6 @@ impl Capabilities {
     pub fn idempotency_scope(&self) -> Option<&'static str> {
         None
     }
-    pub fn image_generation(&self) -> bool {
-        false
-    }
 }
 
 /// The host pins all operational values. Endpoint is the full POST URL, including
@@ -82,19 +87,12 @@ pub struct Config {
     pub input_token_upper_bound: u64,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
+    pub image_limits: ImageLimits,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestOptions {
     pub json_schema: Option<Value>,
-    #[serde(default)]
-    pub images: Vec<ImageInput>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImageInput {
-    pub mime_type: String,
-    pub data_base64: String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +131,10 @@ pub struct Failure {
 mod adapter;
 #[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 pub use adapter::*;
+#[cfg(feature = "gemini")]
+mod images;
+#[cfg(feature = "gemini")]
+pub use images::GeminiImages;
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")

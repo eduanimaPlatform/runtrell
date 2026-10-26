@@ -25,13 +25,17 @@ impl ModelPort for WarehouseModel {
             }),
         }
     }
-    fn input_upper_bound(&self, _: &ModelRequest) -> Result<u64> {
+    fn input_upper_bound(&self, _: &PreparedModelRequest) -> Result<u64> {
         Ok(8)
     }
     fn recovery(&self) -> Option<(String, u64)> {
         None
     }
-    async fn invoke(&self, _: &ToolContext, request: ModelRequest) -> Result<ExternalResult> {
+    async fn invoke(
+        &self,
+        _: &ToolContext,
+        request: PreparedModelRequest,
+    ) -> Result<ExternalResult> {
         let calls = if request.messages.iter().any(|m| m.role == "tool") {
             vec![]
         } else {
@@ -60,7 +64,7 @@ impl ModelPort for WarehouseModel {
             external_id: None,
         })
     }
-    async fn lookup(&self, _: &ToolContext, _: ModelRequest) -> Result<Lookup> {
+    async fn lookup(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
         Ok(Lookup::Unknown)
     }
 }

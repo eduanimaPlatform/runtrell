@@ -289,16 +289,16 @@ fn price_not_configured_never_calls_model() {
                 l.price = None;
                 l
             }
-            fn input_upper_bound(&self, _: &ModelRequest) -> Result<u64> {
+            fn input_upper_bound(&self, _: &PreparedModelRequest) -> Result<u64> {
                 Ok(5)
             }
             fn recovery(&self) -> Option<(String, u64)> {
                 None
             }
-            async fn invoke(&self, _: &ToolContext, _: ModelRequest) -> Result<ExternalResult> {
+            async fn invoke(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<ExternalResult> {
                 panic!("unpriced I/O")
             }
-            async fn lookup(&self, _: &ToolContext, _: ModelRequest) -> Result<Lookup> {
+            async fn lookup(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
                 panic!("unpriced lookup")
             }
         }

@@ -17,10 +17,20 @@ pub enum StandardTool {
     ArtifactRead,
     Validation,
     Execution,
+    ImageGenerate,
+    ImageEdit,
 }
 impl StandardTool {
     pub fn requirements(self) -> &'static [&'static str] {
         match self {
+            Self::ImageGenerate | Self::ImageEdit => &[
+                "ImagePort",
+                "ArtifactStore",
+                "Access",
+                "Policy",
+                "RunStore",
+                "Clock",
+            ],
             Self::ArtifactRead => &["ArtifactStore", "Access"],
             Self::Validation => &["Validator", "EvidenceStore", "Access", "RunRecord"],
             Self::Execution => &[
@@ -72,6 +82,16 @@ struct ConfiguredTool {
     descriptor: ToolDescriptor,
 }
 impl Tool for ConfiguredTool {
+    async fn authorize_result(&self, run: &RunRecord, output: &serde_json::Value) -> Result<()> {
+        self.inner.authorize_result(run, output).await
+    }
+    async fn quote(&self, run: &RunRecord, input: &serde_json::Value) -> Result<Amount> {
+        let amount = self.inner.quote(run, input).await?;
+        Ok(Amount::new(
+            amount.tokens.max(self.descriptor.reserve.tokens),
+            amount.micro_usd.max(self.descriptor.reserve.micro_usd),
+        ))
+    }
     fn operation_kind(&self) -> OperationKind {
         self.inner.operation_kind()
     }
@@ -136,6 +156,23 @@ impl<S: StandardToolStore + Clone + 'static> ToolSet<S> {
         self.files = Some((store, access));
         self
     }
+    pub fn image<
+        I: images::ImagePort + 'static,
+        P: Policy + 'static,
+        R: RunStore + 'static,
+        C: Clock + 'static,
+    >(
+        mut self,
+        tool: images::ImageTool<I, S, P, R, C>,
+    ) -> Self {
+        let kind = if tool.config.action == images::ImageAction::Generate {
+            StandardTool::ImageGenerate
+        } else {
+            StandardTool::ImageEdit
+        };
+        self.supplied.insert(kind, RegisteredTool::new(tool));
+        self
+    }
     pub fn validation<V: TargetValidator + 'static>(mut self, tool: ValidationTool<V, S>) -> Self
     where
         S: EvidenceStore,
@@ -194,6 +231,15 @@ impl<S: StandardToolStore + Clone + 'static> ToolSet<S> {
                 continue;
             };
             if let Some(stored) = settings.stored_output {
+                if matches!(kind, StandardTool::ImageGenerate | StandardTool::ImageEdit) {
+                    errors.push(ConfigDiagnostic {
+                        code: "SETTING_UNSUPPORTED".into(),
+                        location: format!("{kind:?}.stored_output"),
+                        message: "Image tools already return bounded Artifact references".into(),
+                        fix: "Remove the stored_output wrapper for this image tool".into(),
+                    });
+                    continue;
+                }
                 if let Some((store, access)) = &self.files {
                     if stored.inline_bytes == 0 {
                         errors.push(ConfigDiagnostic {

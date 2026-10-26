@@ -103,14 +103,14 @@ impl ModelPort for FakeModel {
             }),
         }
     }
-    fn input_upper_bound(&self, r: &ModelRequest) -> Result<u64> {
+    fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
         Ok(4 + r.messages.len() as u64)
     }
     fn recovery(&self) -> Option<(String, u64)> {
         Some(("fake:host".into(), 1000))
     }
-    async fn invoke(&self, ctx: &ToolContext, r: ModelRequest) -> Result<ExternalResult> {
-        self.requests.lock().unwrap().push(r);
+    async fn invoke(&self, ctx: &ToolContext, r: PreparedModelRequest) -> Result<ExternalResult> {
+        self.requests.lock().unwrap().push(r.request().clone());
         if let Some(old) = self.results.lock().unwrap().get(&ctx.operation).cloned() {
             return Ok(old);
         }
@@ -139,7 +139,7 @@ impl ModelPort for FakeModel {
             Ok(result)
         }
     }
-    async fn lookup(&self, ctx: &ToolContext, _: ModelRequest) -> Result<Lookup> {
+    async fn lookup(&self, ctx: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
         Ok(self
             .results
             .lock()
@@ -352,4 +352,5 @@ pub use execution::{FakeExecutionBackend, FakeExecutionRegistry};
 pub mod budget_contracts;
 pub mod recovery_contracts;
 
+pub mod image_contracts;
 pub mod repair_contracts;

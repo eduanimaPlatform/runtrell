@@ -1627,6 +1627,7 @@ dependencies = [
 name = "runtrell"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "jsonschema",
  "libc",
  "runtrell-protocol",
@@ -1675,11 +1676,15 @@ dependencies = [
 name = "runtrell-providers"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "httpdate",
  "reqwest",
  "runtrell",
+ "runtrell-postgres",
+ "runtrell-testkit",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 
@@ -1687,6 +1692,7 @@ dependencies = [
 name = "runtrell-testkit"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "runtrell",
  "serde_json",
  "tokio",

@@ -8,24 +8,49 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
+#[cfg(feature = "gemini")]
+mod image_contracts {
+    include!("support/images.rs");
+}
 
 async fn server(
     status: u16,
     headers: &str,
     body: Value,
 ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    server_at_least(status, headers, body, 0).await
+}
+async fn server_at_least(
+    status: u16,
+    headers: &str,
+    body: Value,
+    minimum: usize,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let body = body.to_string();
-    raw_server(format!(
+    raw_server_at_least(format!(
         "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}", body.len()
-    )).await
+    ),minimum).await
 }
 async fn raw_server(response: String) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    raw_server_at_least(response, 0).await
+}
+async fn raw_server_at_least(
+    response: String,
+    minimum: usize,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/test", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
-        while let Ok(Ok((mut stream, _))) =
-            tokio::time::timeout(Duration::from_millis(250), listener.accept()).await
+        while let Ok(Ok((mut stream, _))) = tokio::time::timeout(
+            if requests.is_empty() || requests.len() < minimum {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(250)
+            },
+            listener.accept(),
+        )
+        .await
         {
             let mut bytes = Vec::new();
             loop {
@@ -71,7 +96,10 @@ fn config(endpoint: String) -> Config {
             json_schema: true,
             tool_calling: true,
             parallel_tool_calls: true,
-            image_input: true,
+            images: ImageCapabilities {
+                input: true,
+                ..Default::default()
+            },
             counters: CounterSupport {
                 input: true,
                 cached: true,
@@ -90,6 +118,7 @@ fn config(endpoint: String) -> Config {
         input_token_upper_bound: 100,
         max_request_bytes: 65536,
         max_response_bytes: 65536,
+        image_limits: ImageLimits::default(),
     }
 }
 fn context() -> ToolContext {
@@ -116,7 +145,11 @@ fn request() -> ModelRequest {
         tools: vec![],
         max_output: 128,
         metadata: Value::Null,
+        images: vec![],
     }
+}
+fn text(request: ModelRequest) -> PreparedModelRequest {
+    PreparedModelRequest::text(request).unwrap()
 }
 async fn wire_contract<T: ModelPort + std::fmt::Debug>(
     make: fn(Config) -> Result<T>,
@@ -126,7 +159,7 @@ async fn wire_contract<T: ModelPort + std::fmt::Debug>(
     let (url, task) = server(200, "", response).await;
     let adapter = make(config(url)).unwrap();
     assert!(!format!("{adapter:?}").contains("TEST-KEY-DO-NOT-PRINT"));
-    let result = adapter.invoke(&context(), request()).await.unwrap();
+    let result = adapter.invoke(&context(), text(request())).await.unwrap();
     let ExternalResult::Applied { output, usage, .. } = result else {
         panic!("expected applied");
     };
@@ -213,7 +246,12 @@ async fn stops<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     for stop in ["completed", "max_tokens", "content_filter", "tool_call"] {
         let (url, task) = server(200, "", response(kind, stop, true)).await;
         let model = make(config(url)).unwrap();
-        let (reply, usage) = applied(model.invoke(&context(), tool_request()).await.unwrap());
+        let (reply, usage) = applied(
+            model
+                .invoke(&context(), text(tool_request()))
+                .await
+                .unwrap(),
+        );
         let expected = if stop == "completed" && kind != "openrouter" {
             "tool_call"
         } else if stop == "completed" {
@@ -245,7 +283,12 @@ async fn stops<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     }
     let (url, task) = server(200, "", v).await;
     let model = make(config(url)).unwrap();
-    let (reply, _) = applied(model.invoke(&context(), tool_request()).await.unwrap());
+    let (reply, _) = applied(
+        model
+            .invoke(&context(), text(tool_request()))
+            .await
+            .unwrap(),
+    );
     assert_eq!(reply.metadata["stop_reason"], "max_tokens");
     assert!(reply.calls.is_empty());
     assert_eq!(task.await.unwrap().len(), 1);
@@ -288,7 +331,7 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
         body["message"] = json!("echo TEST-KEY-DO-NOT-PRINT");
         let (url, task) = server(status, "Retry-After: 7\r\n", body).await;
         let model = make(config(url)).unwrap();
-        let result = model.invoke(&context(), request()).await.unwrap();
+        let result = model.invoke(&context(), text(request())).await.unwrap();
         assert!(!format!("{result:?}").contains("TEST-KEY-DO-NOT-PRINT"));
         let ExternalResult::Failed {
             code,
@@ -313,7 +356,7 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
     let ExternalResult::Failed {
         retry_after: Some(delay),
         ..
-    } = model.invoke(&context(), request()).await.unwrap()
+    } = model.invoke(&context(), text(request())).await.unwrap()
     else {
         panic!("date delay")
     };
@@ -322,7 +365,8 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
     let (target, target_task) = server(200, "", json!({})).await;
     let (url, task) = server(307, &format!("Location: {target}\r\n"), json!({})).await;
     let model = make(config(url)).unwrap();
-    let ExternalResult::Failed { code, .. } = model.invoke(&context(), request()).await.unwrap()
+    let ExternalResult::Failed { code, .. } =
+        model.invoke(&context(), text(request())).await.unwrap()
     else {
         panic!("redirect")
     };
@@ -343,7 +387,7 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
         let (url, task) = raw_server(raw).await;
         let model = make(config(url)).unwrap();
         assert_eq!(
-            model.invoke(&context(), request()).await.unwrap(),
+            model.invoke(&context(), text(request())).await.unwrap(),
             ExternalResult::Unknown
         );
         assert_eq!(task.await.unwrap().len(), 1, "disconnect retry");
@@ -352,7 +396,12 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
 async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     let (url, task) = server(200, "", response(kind, "tool_call", true)).await;
     let model = make(config(url.clone())).unwrap();
-    let (reply, _) = applied(model.invoke(&context(), tool_request()).await.unwrap());
+    let (reply, _) = applied(
+        model
+            .invoke(&context(), text(tool_request()))
+            .await
+            .unwrap(),
+    );
     let mut next = tool_request();
     next.messages.push(Message {
         role: "provider".into(),
@@ -377,7 +426,10 @@ async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     });
     // A new adapter instance resumes the trusted saved state.
     let restored = make(config(url.clone())).unwrap();
-    restored.invoke(&context(), next.clone()).await.unwrap();
+    restored
+        .invoke(&context(), text(next.clone()))
+        .await
+        .unwrap();
     for field in [
         "run", "tenant", "session", "endpoint", "model", "wire", "version",
     ] {
@@ -390,7 +442,7 @@ async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
             _ => state[field] = json!("other"),
         }
         assert!(
-            restored.invoke(&context(), forged).await.is_err(),
+            restored.invoke(&context(), text(forged)).await.is_err(),
             "{field}"
         );
     }
@@ -398,7 +450,7 @@ async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     other_context.claim.run.id = "other".into();
     assert_eq!(
         model
-            .invoke(&other_context, next.clone())
+            .invoke(&other_context, text(next.clone()))
             .await
             .unwrap_err(),
         Error::PermissionDenied
@@ -407,7 +459,10 @@ async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     other_config.session = Some("other".into());
     let other = make(other_config).unwrap();
     assert_eq!(
-        other.invoke(&context(), next.clone()).await.unwrap_err(),
+        other
+            .invoke(&context(), text(next.clone()))
+            .await
+            .unwrap_err(),
         Error::PermissionDenied
     );
     let mut other_config = config(url);
@@ -415,13 +470,13 @@ async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     let other = make(other_config).unwrap();
     assert_eq!(
         other
-            .invoke(&other_context, next.clone())
+            .invoke(&other_context, text(next.clone()))
             .await
             .unwrap_err(),
         Error::PermissionDenied
     );
     assert_eq!(
-        model.lookup(&context(), next).await.unwrap(),
+        model.lookup(&context(), text(next)).await.unwrap(),
         Lookup::Unknown
     );
     assert_eq!(model.recovery(), None);
@@ -469,53 +524,44 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
     let mut cfg = config(url.clone());
     cfg.capabilities.limits.min_max_output_tokens = 10;
     let model = make(cfg.clone()).unwrap();
-    assert_eq!(model.input_upper_bound(&request()).unwrap(), 100);
+    assert_eq!(model.input_upper_bound(&text(request())).unwrap(), 100);
     let mut req = tool_request();
     req.messages
         .insert(0, Message::text("system", "be helpful"));
-    req.metadata = json!({"previous_response_id":"untrusted-metadata-never-forwarded","provider_options":{"json_schema":{"type":"object"},"images":[{"mime_type":"image/png","data_base64":"aGVsbG8="}]}});
-    model.invoke(&context(), req.clone()).await.unwrap();
+    req.metadata = json!({"previous_response_id":"untrusted-metadata-never-forwarded","provider_options":{"json_schema":{"type":"object"}}});
+    model.invoke(&context(), text(req.clone())).await.unwrap();
     for max in [0, 9, 1025] {
         let mut bad = request();
         bad.max_output = max;
-        assert!(model.invoke(&context(), bad).await.is_err());
+        assert!(model.invoke(&context(), text(bad)).await.is_err());
     }
     let mut bad = request();
     bad.model = "wrong".into();
-    assert!(model.invoke(&context(), bad).await.is_err());
+    assert!(model.invoke(&context(), text(bad)).await.is_err());
     let mut bad = request();
     bad.metadata = json!({"provider_options":{"previous_response_id":"raw-id"}});
-    assert!(model.invoke(&context(), bad).await.is_err());
+    assert!(model.invoke(&context(), text(bad)).await.is_err());
     let mut ctx = context();
     ctx.deadline = Some(0);
     assert_eq!(
-        model.invoke(&ctx, request()).await.unwrap_err(),
+        model.invoke(&ctx, text(request())).await.unwrap_err(),
         Error::Deadline
     );
     cfg.capabilities.json_schema = false;
     assert!(
         make(cfg.clone())
             .unwrap()
-            .invoke(&context(), req.clone())
+            .invoke(&context(), text(req.clone()))
             .await
             .is_err()
     );
     cfg.capabilities.json_schema = true;
-    cfg.capabilities.image_input = false;
-    assert!(
-        make(cfg.clone())
-            .unwrap()
-            .invoke(&context(), req.clone())
-            .await
-            .is_err()
-    );
-    cfg.capabilities.image_input = true;
     cfg.capabilities.tool_calling = false;
     cfg.capabilities.parallel_tool_calls = false;
     assert!(
         make(cfg.clone())
             .unwrap()
-            .invoke(&context(), tool_request())
+            .invoke(&context(), text(tool_request()))
             .await
             .is_err()
     );
@@ -524,7 +570,7 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
     assert!(
         make(cfg.clone())
             .unwrap()
-            .invoke(&context(), request())
+            .invoke(&context(), text(request()))
             .await
             .is_err()
     );
@@ -533,7 +579,7 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
     assert_eq!(
         make(cfg.clone())
             .unwrap()
-            .invoke(&context(), request())
+            .invoke(&context(), text(request()))
             .await
             .unwrap(),
         ExternalResult::Unknown
@@ -559,7 +605,6 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
         "openai" => {
             assert_eq!(body["text"]["format"]["type"], "json_schema");
             assert_eq!(body["tools"][0]["name"], "lookup");
-            assert_eq!(body["input"][2]["content"][0]["type"], "input_image");
         }
         "gemini" => {
             assert_eq!(
@@ -571,15 +616,10 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
                 "lookup"
             );
             assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be helpful");
-            assert_eq!(
-                body["contents"][1]["parts"][0]["inlineData"]["mimeType"],
-                "image/png"
-            );
         }
         _ => {
             assert_eq!(body["response_format"]["type"], "json_schema");
             assert_eq!(body["tools"][0]["function"]["name"], "lookup");
-            assert_eq!(body["messages"][2]["content"][0]["type"], "image_url");
         }
     }
 }
@@ -638,7 +678,7 @@ async fn usage_cases<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
         let (reply, u) = applied(
             make(config(url))
                 .unwrap()
-                .invoke(&context(), request())
+                .invoke(&context(), text(request()))
                 .await
                 .unwrap(),
         );
@@ -679,7 +719,7 @@ async fn usage_cases<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     let (_, u) = applied(
         make(config(url))
             .unwrap()
-            .invoke(&context(), request())
+            .invoke(&context(), text(request()))
             .await
             .unwrap(),
     );
@@ -752,7 +792,7 @@ async fn host_price<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
         let (_, usage) = applied(
             make(cfg)
                 .unwrap()
-                .invoke(&context(), request())
+                .invoke(&context(), text(request()))
                 .await
                 .unwrap(),
         );
@@ -797,7 +837,7 @@ async fn failure_usage<T: ModelPort>(make: fn(Config) -> Result<T>) {
     let (url, task) = server(429, "", body).await;
     let ExternalResult::Failed { usage, .. } = make(config(url))
         .unwrap()
-        .invoke(&context(), request())
+        .invoke(&context(), text(request()))
         .await
         .unwrap()
     else {

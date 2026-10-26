@@ -47,11 +47,18 @@ features. The crate has no default features. Hosts supply endpoint, credentials,
 model limits/capabilities, prices and Run/session binding; adapters perform one
 bounded HTTP send without automatic retry or redirect. Usage preserves missing
 counters and subset relationships. Saved continuation state is checked against
-the owning Run/session before sending. Lookup/idempotency and image generation
-are not provided. See [provider contracts and options](docs/design/providers.md).
+the owning Run/session before sending. `GeminiImages` supplies optional generation
+and reference editing with the `gemini` feature. Remote lookup/idempotency are not
+claimed. See [provider contracts](docs/design/providers.md) and [images](docs/design/images.md).
+
+| Adapter | Image input | Generation | Reference editing | Mask editing |
+|---|---|---|---|---|
+| OpenAI / Gemini / OpenRouter ModelPort | Host-declared, authorized PNG references | — | — | — |
+| GeminiImages | Reference images | Host-declared | Host-declared | Unsupported |
 
 ```sh
-cargo test -p runtrell-providers --locked --features openai,gemini,openrouter
+RUNTRELL_TEST_DATABASE_URL=postgres://postgres:runtrell@127.0.0.1:55433/postgres \
+  cargo test -p runtrell-providers --locked --features openai,gemini,openrouter
 ```
 
 ## Standard tools chosen by the host
@@ -67,13 +74,14 @@ selected tools and default settings, which later calls can overwrite.
 | `files.search` | `FileTool` | Workspace store, Access, search bounds |
 | `artifacts.read` | `FileTool` | Artifact store, Access, read bounds |
 | `validate` | `ValidationTool` | TargetValidator, evidence store, pinned Run |
+| `image.generate/edit` | `ImageTool` + `ToolSet::image` | ImagePort, stores, Access/grants, Policy, RunStore, Clock, reservation and limits |
 | Large output envelope | `StoredOutputTool`, per selected tool | Artifact store, Access, inline size, retention/time |
 | `execute` | `ExecutionTool` | Control store, Workspace/Artifact store, execution ledger/backend, Policy/Clock, executable/argument policies, enforced limits, reservation and preview size |
 
 Hosts select and connect these implementations; custom `Tool` implementations
 are only needed for application-specific operations. Business prompts, schemas,
 quality criteria and authoritative application updates remain host-owned.
-Image generation/editing and provider connections are not implemented by this tool set.
+Image tools use one Runtime operation without starting a sandbox or Python.
 
 ```rust
 use runtrell::{data::DataStore, standard_tools::{StandardTool, ToolSet}};

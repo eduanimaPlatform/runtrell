@@ -13,16 +13,16 @@ impl ModelPort for RetryModel {
     fn limits(&self) -> ModelLimits {
         FakeModel::default().limits()
     }
-    fn input_upper_bound(&self, r: &ModelRequest) -> Result<u64> {
+    fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
         FakeModel::default().input_upper_bound(r)
     }
     fn recovery(&self) -> Option<(String, u64)> {
         Some(("retry".into(), 100))
     }
-    async fn lookup(&self, _: &ToolContext, _: ModelRequest) -> Result<Lookup> {
+    async fn lookup(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
         Ok(Lookup::Unknown)
     }
-    async fn invoke(&self, _: &ToolContext, _: ModelRequest) -> Result<ExternalResult> {
+    async fn invoke(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<ExternalResult> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         let mut usage = Usage::measured(3, 1, 4);
         usage.model = "fake".into();

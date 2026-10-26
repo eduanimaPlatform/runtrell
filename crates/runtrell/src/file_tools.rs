@@ -310,6 +310,12 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
     }
 }
 impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
+    async fn authorize_result(&self, run: &RunRecord, output: &Value) -> Result<()> {
+        self.inner.authorize_result(run, output).await
+    }
+    async fn quote(&self, run: &RunRecord, input: &Value) -> Result<Amount> {
+        self.inner.quote(run, input).await
+    }
     fn operation_kind(&self) -> OperationKind {
         self.inner.operation_kind()
     }

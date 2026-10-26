@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{AccountPolicy, ReservationPolicy, SchedulingPolicy};
+use crate::{AccountPolicy, PreparedModelRequest, ReservationPolicy, SchedulingPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -317,6 +317,7 @@ pub struct RunSpec {
     pub basis_revision: u64,
     pub config_version: String,
     pub input: String,
+    pub images: Vec<crate::images::ImageReference>,
     pub purpose: String,
     pub deadline: Option<u64>,
     pub trigger: Trigger,
@@ -338,6 +339,7 @@ impl RunSpec {
             basis_revision: 0,
             config_version: "1".into(),
             input: input.into(),
+            images: vec![],
             purpose: "judgment".into(),
             deadline: None,
             trigger: Trigger::Api,
@@ -692,6 +694,7 @@ pub struct ModelRequest {
     pub tools: Vec<ToolDescriptor>,
     pub max_output: u64,
     pub metadata: Value,
+    pub images: Vec<crate::images::ImageReference>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -765,6 +768,14 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    /// Resolve and authorize all attachments before sizing and reservation.
+    fn prepare_request(
+        &self,
+        _run: &RunRecord,
+        request: ModelRequest,
+    ) -> impl std::future::Future<Output = Result<PreparedModelRequest>> + Send {
+        async move { PreparedModelRequest::text(request) }
+    }
     /// Only declared adapters are prepared; ordinary local tools need no proof.
     fn requires_recovery_preparation(&self) -> bool {
         false
@@ -791,22 +802,38 @@ pub trait ModelPort: Send + Sync {
         }
     }
     fn limits(&self) -> ModelLimits;
-    fn input_upper_bound(&self, request: &ModelRequest) -> Result<u64>;
+    fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
     fn recovery(&self) -> Option<(String, u64)> {
         None
     }
     fn invoke(
         &self,
         context: &ToolContext,
-        request: ModelRequest,
+        request: PreparedModelRequest,
     ) -> impl std::future::Future<Output = Result<ExternalResult>> + Send;
     fn lookup(
         &self,
         context: &ToolContext,
-        request: ModelRequest,
+        request: PreparedModelRequest,
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    fn authorize_result(
+        &self,
+        _run: &RunRecord,
+        _output: &Value,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Ok(()) }
+    }
+    /// Preflight the complete request and quote any floor above the descriptor's
+    /// configured reserve. Runtime reserves the maximum of both.
+    fn quote(
+        &self,
+        _run: &RunRecord,
+        _input: &Value,
+    ) -> impl std::future::Future<Output = Result<Amount>> + Send {
+        async move { Ok(Amount::default()) }
+    }
     /// Resource admission class; execution tools reserve Sandbox slots.
     fn operation_kind(&self) -> OperationKind {
         OperationKind::Tool

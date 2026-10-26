@@ -18,7 +18,7 @@ WorkspaceStore / ArtifactStoreは2bでAccessを受け取る契約へ改訂し、
 
 RunSpec.budgetとscheduling、AccountPolicyはhostが供給する型付き・保存済みsnapshot。BudgetAuthority.create_account_with_policyで口座方針を固定する。create_accountは明示された既定方針の便宜API。finalization_allowedは無料確定だけの受付判定であり、RunStore.finalizeはowner・版・未精算操作を再検査する。使用量・価格の内数と画像交差、固定費操作、既知ゼロ/未計測の区別は[budget](budget.md)参照。recordはUsageUnknownを返す場合でも、不完全な結果と使用量の観測を保存して予約を保持する。Invalidは不正内数、Storageは保存失敗を表す。
 
-wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD、時刻は共有epoch tick、optional usageはnull（0と区別）。store checkpoint内のprotocol JSONは内部形式でhostの業務APIではない。未知schemaは拒否し、旧Runはdrainまたは理由付き終了。公開SDKのModelRequestは独自のMessage/ModelReplyのみを用い、protocolのserde表現をwire契約にしない。streamの部分deltaを直接実行せず、完全なreplyだけをdriverへ渡す。マルチモーダル/opaqueはMessageの版付きhost metadataへ保持するが、2a driverの実行対応はtext/toolに限定し、未対応は拒否する。
+wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD、時刻は共有epoch tick、optional usageはnull（0と区別）。store checkpoint内のprotocol JSONは内部形式でhostの業務APIではない。未知schemaは拒否し、旧Runはdrainまたは理由付き終了。公開SDKのModelRequestは独自のMessage/ModelReplyのみを用い、protocolのserde表現をwire契約にしない。streamの部分deltaを直接実行せず、完全なreplyだけをdriverへ渡す。画像は既存Workspace/Artifact参照とhashを保存し、ImageModelで認可・解決してから見積るPreparedModelRequestを通常driverから送る。画像tool・復旧・上限は[images](images.md)を参照。
 
 エラーはConflict（digest/版/CAS不一致）、OwnershipLost、Closed、Deadline、BudgetAtLimit、ReservationDenied、UsageUnknown、PermissionDenied、Unsupported、Backpressure、QueueTimeout、NotFound、Invalid、Storage。Storageは成功応答を返さず、I/O前失敗は外部呼出し0、I/O後失敗は元operation照合で回復する。
 
@@ -52,7 +52,7 @@ JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postg
 
 ## 選択可能な標準ツール（rt-5）
 
-正本は[standard_tools.rs](../../crates/runtrell/src/standard_tools.rs)と[execution/tool.rs](../../crates/runtrell/src/execution/tool.rs)。`ToolSet<S>`は空から開始し、`files(store, access)`・`validation(tool)`・`execution(tool)`で資源を接続する。接続だけでは有効化しない。`select(StandardTool)`で選び、`disable`で除外する。`ToolPreset(BTreeMap<StandardTool, ToolSettings>)`は集合と設定の既定値。後続の`settings`はそのツールの設定を置換する。timeout・出力上限・予約額・StoredOutputのinline上限を個別に指定できる。Presetと設定型はserde対応で、configuration_digestへ渡す構成本文に含められる。拡張は別途`RegisteredTool::new(custom_tool)`で追加する。通常の標準機能利用に独自Toolの実装は不要。
+正本は[standard_tools.rs](../../crates/runtrell/src/standard_tools.rs)と[execution/tool.rs](../../crates/runtrell/src/execution/tool.rs)。`ToolSet<S>`は空から開始し、`files(store, access)`・`validation(tool)`・`execution(tool)`・`image(tool)`で資源を接続する。接続だけでは有効化しない。`select(StandardTool)`で選び、`disable`で除外する。`ToolPreset(BTreeMap<StandardTool, ToolSettings>)`は集合と設定の既定値。後続の`settings`はそのツールの設定を置換する。timeout・出力上限・予約額・StoredOutputのinline上限を個別に指定できる。Presetと設定型はserde対応で、configuration_digestへ渡す構成本文に含められる。拡張は別途`RegisteredTool::new(custom_tool)`で追加する。通常の標準機能利用に独自Toolの実装は不要。
 
 `StandardTool::requirements`が接続・資源を宣言する。`build`は選択済みツールについてのみ不足を検査し、`ConfigDiagnostic {code, location, message, fix}`を全件返す。実行backend未接続は`EXECUTION_BACKEND_MISSING`、他の必須資源不足は`TOOL_RESOURCE_MISSING`、必要制限非対応は`EXECUTION_CAPABILITY_MISSING`。未選択の能力を補完・起動しない。storeは`StandardToolStore`の共通接続型を使うため、読取りだけの場合も同型のArtifact契約を実装するが、未選択のArtifact操作は提示しない。
 
@@ -77,6 +77,7 @@ pub struct RunSpec {
     pub basis_revision: u64,
     pub config_version: String,
     pub input: String,
+    pub images: Vec<crate::images::ImageReference>,
     pub purpose: String,
     pub deadline: Option<u64>,
     pub trigger: Trigger,
@@ -150,6 +151,7 @@ pub struct ModelRequest {
     pub tools: Vec<ToolDescriptor>,
     pub max_output: u64,
     pub metadata: Value,
+    pub images: Vec<crate::images::ImageReference>,
 }
 
 pub struct ModelReply {
@@ -200,6 +202,14 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    /// Resolve and authorize all attachments before sizing and reservation.
+    fn prepare_request(
+        &self,
+        _run: &RunRecord,
+        request: ModelRequest,
+    ) -> impl std::future::Future<Output = Result<PreparedModelRequest>> + Send {
+        async move { PreparedModelRequest::text(request) }
+    }
     /// Only declared adapters are prepared; ordinary local tools need no proof.
     fn requires_recovery_preparation(&self) -> bool {
         false
@@ -226,22 +236,38 @@ pub trait ModelPort: Send + Sync {
         }
     }
     fn limits(&self) -> ModelLimits;
-    fn input_upper_bound(&self, request: &ModelRequest) -> Result<u64>;
+    fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
     fn recovery(&self) -> Option<(String, u64)> {
         None
     }
     fn invoke(
         &self,
         context: &ToolContext,
-        request: ModelRequest,
+        request: PreparedModelRequest,
     ) -> impl std::future::Future<Output = Result<ExternalResult>> + Send;
     fn lookup(
         &self,
         context: &ToolContext,
-        request: ModelRequest,
+        request: PreparedModelRequest,
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    fn authorize_result(
+        &self,
+        _run: &RunRecord,
+        _output: &Value,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Ok(()) }
+    }
+    /// Preflight the complete request and quote any floor above the descriptor's
+    /// configured reserve. Runtime reserves the maximum of both.
+    fn quote(
+        &self,
+        _run: &RunRecord,
+        _input: &Value,
+    ) -> impl std::future::Future<Output = Result<Amount>> + Send {
+        async move { Ok(Amount::default()) }
+    }
     /// Resource admission class; execution tools reserve Sandbox slots.
     fn operation_kind(&self) -> OperationKind {
         OperationKind::Tool

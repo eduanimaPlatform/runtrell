@@ -709,17 +709,17 @@ pub async fn model_quote_race<S: ControlStore + 'static>(s: std::sync::Arc<S>) {
         fn recovery(&self) -> Option<(String, u64)> {
             self.inner.recovery()
         }
-        fn input_upper_bound(&self, r: &ModelRequest) -> Result<u64> {
+        fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
             // Arm only on initial request construction, never on subsequent quotes.
             if r.max_output == 0 {
                 self.ticks.store(0, Ordering::SeqCst);
             }
             self.inner.input_upper_bound(r)
         }
-        async fn invoke(&self, c: &ToolContext, r: ModelRequest) -> Result<ExternalResult> {
+        async fn invoke(&self, c: &ToolContext, r: PreparedModelRequest) -> Result<ExternalResult> {
             self.inner.invoke(c, r).await
         }
-        async fn lookup(&self, c: &ToolContext, r: ModelRequest) -> Result<Lookup> {
+        async fn lookup(&self, c: &ToolContext, r: PreparedModelRequest) -> Result<Lookup> {
             self.inner.lookup(c, r).await
         }
     }

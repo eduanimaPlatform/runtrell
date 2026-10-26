@@ -190,7 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ]
                 .contains(&id.as_str());
                 let design = if id == "RUN-05" {
-                    "[providers](providers.md), [budget](budget.md), [api](api.md)"
+                    "[providers](providers.md), [images](images.md), [budget](budget.md), [api](api.md)"
                 } else if id == "REC-08" {
                     "[postgres](postgres.md#host-owned-transaction), [api](api.md), [execution-boundary](execution-boundary.md)"
                 } else if budget_scope {
@@ -217,8 +217,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 } else if id == "RUN-05" {
                     (
-                        "api.rs::ModelPort/Usage; runtrell-providers（既定featureなし、openai/gemini/openrouter）",
-                        "providers/tests/http.rs: fake HTTP wire/header・内数/未報告/部分usage・停止理由/不完全tool非実行・認証/要求/rate/支出/不明・Retry-After・1送信/redirect拒否・切断Unknown・Debug伏字・Run/session束縛。実Provider・画像生成・lookup/冪等保証は未提供/未検証。要件全体の状態は昇格しない",
+                        "api.rs::ModelPort/Usage; images.rs::ImageModel/ImageTool; runtrell-providers（既定featureなし、openai/gemini/openrouter、GeminiImages）",
+                        "providers/tests/http.rs: fake HTTP通常driver画像wire、生成/参照編集、usage/エラー/redirect/上限/認可。testkit::image_contracts: Memory/Pg通常loop生成→保存→再入力→編集、保存結果復旧・1送信/精算額・課金済み不正画像・usage不足。PNG構造検査のみ、mask・実Provider・remote lookup/冪等保証は未対応/未検証。要件全体の状態は昇格しない",
                     )
                 } else if id == "REC-08" {
                     (

@@ -20,7 +20,7 @@ impl ModelPort for PreparedModel {
     fn limits(&self) -> ModelLimits {
         crate::FakeModel::scripted(vec![]).limits()
     }
-    fn input_upper_bound(&self, _: &ModelRequest) -> Result<u64> {
+    fn input_upper_bound(&self, _: &PreparedModelRequest) -> Result<u64> {
         Ok(5)
     }
     fn recovery(&self) -> Option<(String, u64)> {
@@ -48,14 +48,14 @@ impl ModelPort for PreparedModel {
             expires_at: self.expires.load(Ordering::SeqCst),
         }))
     }
-    async fn invoke(&self, c: &ToolContext, _: ModelRequest) -> Result<ExternalResult> {
+    async fn invoke(&self, c: &ToolContext, _: PreparedModelRequest) -> Result<ExternalResult> {
         self.seen
             .lock()
             .unwrap()
             .push(c.recovery_proof.clone().unwrap());
         Ok(ExternalResult::Unknown)
     }
-    async fn lookup(&self, c: &ToolContext, _: ModelRequest) -> Result<Lookup> {
+    async fn lookup(&self, c: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
         assert_eq!(
             Some(&self.seen.lock().unwrap()[0]),
             c.recovery_proof.as_ref()
@@ -128,6 +128,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         tools: vec![],
         max_output: 5,
         metadata: Value::Null,
+        images: vec![],
     };
     let d = DispatchRequest::new(
         "prepared",
@@ -145,12 +146,20 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
                 |ctx| {
                     let request = request.clone();
                     let model = &rt.model;
-                    async move { model.invoke(&ctx, request).await }
+                    async move {
+                        model
+                            .invoke(&ctx, PreparedModelRequest::text(request)?)
+                            .await
+                    }
                 },
                 |ctx| {
                     let request = request.clone();
                     let model = &rt.model;
-                    async move { model.lookup(&ctx, request).await }
+                    async move {
+                        model
+                            .lookup(&ctx, PreparedModelRequest::text(request)?)
+                            .await
+                    }
                 },
             )
             .await
@@ -226,7 +235,11 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
             |ctx| {
                 let model = &rt.model;
                 let request = request.clone();
-                async move { model.invoke(&ctx, request).await }
+                async move {
+                    model
+                        .invoke(&ctx, PreparedModelRequest::text(request)?)
+                        .await
+                }
             },
             |_| async { Ok(Lookup::Unknown) },
         )
@@ -353,13 +366,14 @@ impl Tool for PreparedJob {
         self.0
             .lookup(
                 c,
-                ModelRequest {
+                PreparedModelRequest::text(ModelRequest {
                     model: "fake".into(),
                     messages: vec![],
                     tools: vec![],
                     max_output: 1,
                     metadata: Value::Null,
-                },
+                    images: vec![],
+                })?,
             )
             .await
     }

@@ -209,6 +209,7 @@ impl<
             ) {
                 let request = serde_json::from_value(op.request.input.clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
+                let request = self.model.prepare_request(&r, request).await?;
                 self.model.lookup(&ctx, request).await?
             } else if op.request.kind == OperationKind::Tool
                 || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
@@ -674,7 +675,13 @@ impl<
             .checkpoint
             .as_ref()
             .map(|cp| cp.messages.clone())
-            .unwrap_or_else(|| vec![Message::text("user", r.spec.input.clone())]);
+            .unwrap_or_else(|| {
+                let mut message = Message::text("user", r.spec.input.clone());
+                if !r.spec.images.is_empty() {
+                    message.data = serde_json::json!({"image_inputs":r.spec.images});
+                }
+                vec![message]
+            });
         let mut cursor = r.checkpoint.as_ref().map_or(0, |cp| cp.cursor);
         loop {
             let current = self.store.check(c, self.clock.now(), true).await?;
@@ -720,21 +727,22 @@ impl<
                     } else {
                         self.store.warnings(c, self.clock.now()).await?;
                         let current = self.store.get(&c.run).await?;
-                        if let Some(cp) = current.checkpoint {
-                            messages = cp.messages;
+                        if let Some(cp) = &current.checkpoint {
+                            messages = cp.messages.clone();
                         }
-                        let mut req = ModelRequest {
+                        let req = ModelRequest {
                             model: self.model.limits().model,
                             messages: messages.clone(),
                             tools: descriptors.clone(),
                             max_output: 0,
                             metadata: Value::Null,
+                            images: images::model_images(&current, &messages)?,
                         };
-                        let input = self.model.input_upper_bound(&req)?;
+                        let prepared = self.model.prepare_request(&current, req).await?;
+                        let input = self.model.input_upper_bound(&prepared)?;
                         let (cap, reserve) = self.model_budget(c, input).await?;
                         quoted_reserve = Some(reserve);
-                        req.max_output = cap;
-                        req
+                        prepared.with_max_output(cap).request().clone()
                     };
                     let mut dispatch = if let Some(op) = &existing {
                         self.next_attempt(c, op, self.model.retry_policy()).await?
@@ -778,7 +786,11 @@ impl<
                         .is_some_and(|op| op.request.attempt != dispatch.attempt)
                     {
                         let mut retry_request = request.clone();
-                        let input = self.model.input_upper_bound(&retry_request)?;
+                        let prepared = self
+                            .model
+                            .prepare_request(&current, retry_request.clone())
+                            .await?;
+                        let input = self.model.input_upper_bound(&prepared)?;
                         let (cap, reserve) = self.model_budget(c, input).await?;
                         retry_request.max_output = cap;
                         dispatch.reserve = reserve;
@@ -787,6 +799,8 @@ impl<
                     let invoke_request: ModelRequest =
                         serde_json::from_value(dispatch.input.clone())
                             .map_err(|e| Error::Invalid(e.to_string()))?;
+                    let invoke_request =
+                        self.model.prepare_request(&current, invoke_request).await?;
                     let lookup_request = invoke_request.clone();
                     let result = self
                         .dispatch(
@@ -941,7 +955,15 @@ impl<
                             tool.operation_kind(),
                             &name,
                             input.clone(),
-                            descriptor.reserve,
+                            if self.store.operation(&c.run, &key).await?.is_none() {
+                                let quote = tool.quote(&current, &input).await?;
+                                Amount::new(
+                                    quote.tokens.max(descriptor.reserve.tokens),
+                                    quote.micro_usd.max(descriptor.reserve.micro_usd),
+                                )
+                            } else {
+                                descriptor.reserve
+                            },
                         );
                         d.quantities = descriptor.quantities.clone();
                         d.version = descriptor.version.clone();
@@ -968,6 +990,8 @@ impl<
                             )
                             .await?;
                         let output = completed(result)?;
+                        let current = self.store.get(&c.run).await?;
+                        tool.authorize_result(&current, &output).await?;
                         validate_schema(&output, &descriptor.output_schema)?;
                         if serde_json::to_vec(&output).unwrap().len() > descriptor.max_output_bytes
                         {
@@ -1127,7 +1151,7 @@ impl<
         }
         let base = data.context(access).await?;
         let limits = self.model.limits();
-        let mut request = ModelRequest {
+        let request = ModelRequest {
             model: limits.model.clone(),
             messages: vec![
                 Message::text(
@@ -1142,15 +1166,18 @@ impl<
             tools: vec![],
             max_output: 0,
             metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water}),
+            images: vec![],
         };
-        let input = self.model.input_upper_bound(&request)?;
+        let current = self.store.get(&c.run).await?;
+        let prepared = self.model.prepare_request(&current, request).await?;
+        let input = self.model.input_upper_bound(&prepared)?;
         let (cap, reserve) = self.model_budget(c, input).await?;
-        request.max_output = cap;
+        let request = prepared.with_max_output(cap);
         let mut d = DispatchRequest::new(
             key,
             OperationKind::Compaction,
             &limits.model,
-            serde_json::to_value(&request).map_err(|_| Error::Storage)?,
+            serde_json::to_value(request.request()).map_err(|_| Error::Storage)?,
             reserve,
         );
         d.version = "context-summary-1".into();

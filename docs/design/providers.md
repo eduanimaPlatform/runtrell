@@ -22,8 +22,13 @@ statelessly. Hosts must preserve the trusted Run/session binding on reconstructi
 these envelopes are saved host state, not an untrusted import or authorization token.
 Arbitrary request metadata is never forwarded as wire options.
 
-`RequestOptions` in request.metadata.provider_options supplies JSON schema and
-inline image inputs. Image generation is not provided. StopReason distinguishes
+`RequestOptions` in request.metadata.provider_options supplies JSON schema.
+Image inputs use `ModelRequest.images` with Workspace/Artifact references and
+`ImageModel` for authorized resolution into a `PreparedModelRequest` before
+estimation. Raw inline-image options have been removed. `GeminiImages` supplies
+generation/reference editing through an independent `ImagePort`; see
+[images](images.md) for limits, authorization, storage and settlement.
+StopReason distinguishes
 completed, max_tokens (continuable truncation), content_filter, tool_call and
 unknown. ModelReply.complete is false for filtered/unknown stops so the stock
 driver cannot accept them as candidates. A fully received max_tokens reply remains
@@ -56,8 +61,9 @@ are separate from transient rate limits; ambiguous quota errors remain rate limi
 or unclassified. Retry-After delta seconds and HTTP dates are converted to the
 runtime delay; raw headers are exposed only through the typed failure result.
 
-Capabilities contain host-overridable model limits, schema/tool/parallel/image
-support and counter availability, with fixed subset semantics. The adapter's
+Capabilities contain host-overridable model limits, schema/tool/parallel support,
+separate input/generation/reference-edit/mask-edit declarations and counter
+availability, with fixed subset semantics. The adapter's
 lookup/idempotency support remains none regardless of model settings. Input bound
 is a host supplied conservative token ceiling, never a guessed tokenizer count.
 Bounds, unsupported options and mismatched model/state are rejected before send.
@@ -70,6 +76,7 @@ Rig provider code is extracted and the adoption manifest remains unchanged.
 
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)
 - [Gemini generateContent](https://ai.google.dev/api/generate-content)
+- [Gemini native image generation and editing](https://ai.google.dev/gemini-api/docs/image-generation)
 - [OpenRouter error contract source](https://github.com/OpenRouterTeam/docs/blob/main/api_reference/errors-and-debugging.mdx)
 
 The endpoints are supplied as full URLs by the host, so generateContent's model
