@@ -439,34 +439,5 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Owner;
-
-    #[test]
-    fn accepts_only_exact_ownership_marker() {
-        let database = "rt_suite_1790000000_0123456789abcdef0123456789abcdef";
-        let owner = Owner {
-            database: database.into(),
-            host: "test-host".into(),
-            endpoint_host: "127.0.0.1".into(),
-            endpoint_port: 5432,
-            child_pid: 42,
-        };
-        assert!(Owner::parse(database, &owner.comment()).is_some());
-        assert!(
-            Owner::parse(
-                database,
-                &owner.comment().replace("test-host", "other:host")
-            )
-            .is_none()
-        );
-        assert!(
-            Owner::parse(
-                "harness_1790000000_0123456789abcdef0123456789abcdef",
-                &owner.comment()
-            )
-            .is_none()
-        );
-        assert!(Owner::parse(database, "unmarked").is_none());
-    }
-}
+#[path = "test_db_runner/tests.rs"]
+mod tests;

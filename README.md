@@ -160,6 +160,8 @@ docker run -d --name runtrell-pg --shm-size=1g \
 export RUNTRELL_TEST_DATABASE_URL='postgres://postgres:runtrell@127.0.0.1:55433/postgres'
 export CARGO_INCREMENTAL=0
 cargo build -p runtrell-postgres --locked --example test_db_runner
+# Explicit example tests (Cargo's workspace tests do not run these by default).
+cargo test -p runtrell-postgres --locked --example test_db_runner
 # Point RIG_SNAPSHOT at a checkout of the pinned Rig commit listed below.
 export RIG_SNAPSHOT=/path/to/rig-snapshot
 # Formal local validation: 18 commands. Run the two test commands twice in a row
@@ -199,10 +201,22 @@ schema deletion in the library. To run just the adapter tests, use
 `cargo test -p runtrell-postgres` with the same variable. Run Cargo from the repo
 root; overriding Cargo's target runner bypasses this lifecycle.
 
+The explicit example-test command above is also required in CI. It runs the
+runner's own ownership and lifecycle regressions, using the prebuilt executable
+directly for child-process tests; no child runner launches Cargo. Its other-owner
+regression also creates and removes a dedicated NOLOGIN role and assigns a
+fixture database to it. Run this command with the disposable server's administrator
+role (the example service uses `postgres`); it does not grant itself privileges.
+On supported Unix hosts, `CARGO_TARGET_DIR` may be an absolute path or a path relative to the
+repository root; set it consistently for build and test. The durable intent
+directory remains repository-local even with a custom target directory.
+
 Cleanup is restricted to runner-created databases: the name, creation timestamp,
 ownership comment, endpoint, database owner, process liveness and database advisory
-lock must agree. A durable intent in `target/test-db-intents/` records the exact
-name, endpoint and owner before creation, covering SIGKILL before the database
+lock must agree. Names and comments identify our fixtures; they do not establish
+authorization or prove that a server is disposable. A durable intent in
+`target/test-db-intents/` records the exact name, endpoint and owner before
+creation, covering SIGKILL before the database
 comment is written. Keep these small ownership files until cleanup completes.
 The next invocation reclaims abandoned owned databases after SIGKILL, while
 preserving another running suite. Unmarked databases without a matching local

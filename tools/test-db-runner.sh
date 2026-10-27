@@ -6,7 +6,14 @@ if [ -z "${RUNTRELL_TEST_DATABASE_URL:-}" ]; then
 fi
 # Do not launch Cargo here: `cargo run` can still own the target-directory lock.
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-runner="${CARGO_TARGET_DIR:-$repo/target}/debug/examples/test_db_runner"
+target=${CARGO_TARGET_DIR:-$repo/target}
+# Cargo runs tests from their crate directory, but resolves this setting from
+# the repository root where the documented Cargo commands are invoked.
+case "$target" in
+    /*) ;;
+    *) target="$repo/$target" ;;
+esac
+runner="$target/debug/examples/test_db_runner"
 if [ ! -x "$runner" ]; then
     echo 'First run: cargo build -p runtrell-postgres --locked --example test_db_runner' >&2
     exit 1

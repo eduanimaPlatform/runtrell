@@ -174,3 +174,40 @@ DB作成前の停止相当（intentのみ）も回収した。実際の電源断
 2026-11-03とする。確認後にこのdirectoryだけを削除する。失敗DBを証拠目的では保存しない。
 SIGKILLからの回収に必要な `target/test-db-intents/` はこのログdirectoryと別であり、
 回収前に削除しない。Hosted CI、実Linux／macOS隔離試験の追加実行はこの記録の対象外。
+
+### runner 自身の回帰試験
+
+上記は当時の手動 probe の記録であり、example 内の所有判定テストが通常の
+`cargo test --workspace` で実行された証拠ではない。CI は runner の事前 build 後に
+`cargo test -p runtrell-postgres --locked --example test_db_runner` を明示実行する。
+対象は [runner の試験 module](../../crates/runtrell-postgres/examples/test_db_runner/tests.rs)。
+他の実装の試験結果はこの表の証拠に含めない。
+
+| 振る舞い | 実行する test 名と検査内容 |
+|---|---|
+| 所有印の厳密な形式 | `accepts_only_exact_ownership_marker`：完全一致・異なる形式の拒否 |
+| 相対 target directory の入口 | `entrypoint_resolves_relative_target_from_crate_directory`：Cargo と同じ crate 作業ディレクトリから root 相対の target を解決。DB を使わない入口の probe |
+| 親 SIGKILL、子の生存中、次回回収 | `live_child_survives_other_runner_then_sigkill_is_reclaimed`：実 runner を kill、子の生存中は別 runner が保持、子の終了後に DB と intent を回収 |
+| CREATE と COMMENT の間 | `creation_gap_requires_lock_and_exact_intent`：同じ作成手順の未 comment DB を用意、作成 lock 保持中と intent 不一致では保持、lock 解放後に完全一致で回収。実際の電源断ではない |
+| 通常失敗、cleanup 失敗、利用中接続 | `ordinary_failure_cleans_up_but_active_connection_reports_cleanup_failure`：子の終了コード 37 を保持して回収、専用接続が残る間は cleanup エラーと DB 保持、自分の接続を閉じた後に次回回収 |
+| 異なる印、他の owner role | `foreign_marker_and_other_owner_are_preserved`：自作の専用 DB と role を用意し、回収関数と実 runner の両方で保持を検査。その fixture だけを試験終了時に削除 |
+
+DB 試験は module 内で直列化し、子 runner では Cargo を起動しない。事前 build と
+Unix／`CARGO_TARGET_DIR` の実行条件は [README](../../README.md#local-validation) を参照。
+名前・comment は fixture の識別情報であり、権限や本番判定の代用ではない。
+接続先・owner・advisory lock・process 生存・利用中接続・intent の照合を維持し、
+強制切断・FORCE DROP・回収範囲の拡大は加えていない。
+
+相対 `CARGO_TARGET_DIR` では Cargo が test を crate ディレクトリから起動するため、
+従来の入口が build 済み runner を見失う不整合を fresh checkout で再現した。
+入口で repository root 基準へ解決する修正と上記の回帰試験を追加した。
+
+ローカル再検証（2026-10-27、基準 HEAD `4331b3a` の未 commit tree）：macOS、
+Rust 1.98.0、使い捨て PostgreSQL 18.6、`CARGO_INCREMENTAL=0`、固定 Rig snapshot で
+正式18コマンドと上記の明示実行がすべて終了コード0。明示実行は6 passed／0 failed／
+0 ignored。fresh checkout でも文書の build 順序を通し、絶対・相対 `CARGO_TARGET_DIR`
+の双方で6件成功した。未 build 時は説明付きで失敗し、別経路へ fallback しない。
+入口の回帰試験は旧 script で失敗し、修正版で成功した。
+終了時の suite DB・専用 role・intent 残留は0、maintenance DBの既存schema一覧は保持。
+生ログは `target/rt-run-validation/`（保持期限2026-11-03）。Hosted CI と Linux での
+追加試験実行は未確認であり、ローカル成功をその代わりにはしない。commit・push は未実施。

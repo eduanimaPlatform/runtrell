@@ -82,6 +82,7 @@ jobs:
         # Build the test-only parent before running any target executable.
         run: |
           cargo build -p runtrell-postgres --locked --example test_db_runner
+          cargo test -p runtrell-postgres --locked --example test_db_runner
           cargo test --workspace --locked ${{ matrix.args }}
       - name: Public examples
         run: |
