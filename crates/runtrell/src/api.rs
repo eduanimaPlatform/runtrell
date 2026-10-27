@@ -980,10 +980,14 @@ pub trait RunStore: Send + Sync {
         now: u64,
         lease: u64,
     ) -> impl std::future::Future<Output = Result<Claim>> + Send;
+    /// Strongly consistent lookup of the original request: an equal spec finds
+    /// its run, a conflicting spec returns Conflict, and None proves absence.
     fn find_request(
         &self,
         spec: &RunSpec,
     ) -> impl std::future::Future<Output = Result<Option<RunHandle>>> + Send;
+    /// Atomically admit a request or return the run for the same original spec;
+    /// concurrent equal requests must never create more than one run.
     fn start(&self, spec: RunSpec) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
     fn claim(

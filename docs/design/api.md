@@ -6,6 +6,8 @@
 
 RunStoreはstart/get/claim/checkpoint/cancel/terminate/finalize、OperationStoreはbegin/operation/mark_sent/record、BudgetAuthorityはcreate_account/accountを提供する。ControlStoreはこれらと共有slot・queue・警告配信を組み合わせる。beginは現在owner・取消・期限・accountを再検査し、全祖先accountの予約とintentを同じbarrierで保存する。recordは操作結果と精算を同じbarrierで保存する。分離adapterはこの原子性を実装せずにControlStoreを名乗れない。
 
+ChildRunの送信記録後に受付が見つからない場合、同じstoreの正確な要求照合と冪等なstartにより同じ子を受付し直す。再開前にowner・取消・期限とpolicyを再検査し、既存操作と予約を維持する。作成済みの子は終端までPendingとして扱い、終端後に精算する。外部操作のUnknownと証明付き再送の契約は変わらない。
+
 PostgreSQL の外部 transaction 参加 API は `PgStore::{start_in, create_account_in, create_account_with_policy_in, terminate_in, finalize_in}`。host の SQL と同じ `sqlx::Transaction` に書き込み、commit は host が行う。親子関係と共有口座は RunSpec で指定する。保存・失敗時の契約は [PostgreSQL](postgres.md#host-owned-transaction) を参照。
 
 async traitはRustライブラリの静的dispatch契約。安定dynamic ABIではない。ModelPort/Toolはinvokeとlookupを分離、lookupはFound/Pending/Unknown/NotFound（同scope・保存期限内で未実行を保証する証拠）を返す。timeoutやstream断はUnknown。provider内部retryを禁止し、課金retryは新attemptとして共通dispatchへ戻す。元request・予約を再使用するNotFound回復は同attemptの再送であり、新しい予算を作らない。
@@ -387,10 +389,14 @@ pub trait RunStore: Send + Sync {
         now: u64,
         lease: u64,
     ) -> impl std::future::Future<Output = Result<Claim>> + Send;
+    /// Strongly consistent lookup of the original request: an equal spec finds
+    /// its run, a conflicting spec returns Conflict, and None proves absence.
     fn find_request(
         &self,
         spec: &RunSpec,
     ) -> impl std::future::Future<Output = Result<Option<RunHandle>>> + Send;
+    /// Atomically admit a request or return the run for the same original spec;
+    /// concurrent equal requests must never create more than one run.
     fn start(&self, spec: RunSpec) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
     fn claim(

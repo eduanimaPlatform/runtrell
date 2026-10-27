@@ -171,7 +171,9 @@ impl<
                             Ok(Lookup::Pending)
                         }
                     } else {
-                        Ok(Lookup::Unknown)
+                        Ok(Lookup::NotFound {
+                            scope: "child-store".into(),
+                        })
                     }
                 },
             )
@@ -410,6 +412,18 @@ impl<
                 Lookup::NotFound { scope } => {
                     let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
                     self.policy.authorize(&r, &op.request.target, permission)?;
+                    if op.request.kind == OperationKind::ChildRun && scope == "child-store" {
+                        let spec = serde_json::from_value(op.request.input.clone())
+                            .map_err(|e| Error::Invalid(e.to_string()))?;
+                        let h = self.store.start(spec).await?;
+                        return self
+                            .persist_result(
+                                c,
+                                &op.id,
+                                ExternalResult::Accepted { external_id: h.id },
+                            )
+                            .await;
+                    }
                     if let Err(error) = self
                         .store
                         .proven_unsent(c, &op.id, &scope, self.clock.now())
@@ -431,6 +445,18 @@ impl<
                     let pending = match op.result {
                         Some(ExternalResult::Accepted { external_id }) => {
                             ExternalResult::Accepted { external_id }
+                        }
+                        _ if op.request.kind == OperationKind::ChildRun => {
+                            let spec = serde_json::from_value(op.request.input.clone())
+                                .map_err(|e| Error::Invalid(e.to_string()))?;
+                            let child = self
+                                .store
+                                .find_request(&spec)
+                                .await?
+                                .ok_or(Error::Conflict)?;
+                            ExternalResult::Accepted {
+                                external_id: child.id,
+                            }
                         }
                         _ => ExternalResult::Accepted {
                             external_id: op.id.clone(),

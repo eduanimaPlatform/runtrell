@@ -946,3 +946,43 @@ fn bounded_tool_timeout_keeps_unknown_cost_and_records_separate_stop() {
         ));
     });
 }
+
+#[test]
+fn child_recovers_sent_before_and_after_start() {
+    block_on(async {
+        for already_started in [false, true] {
+            let s = Arc::new(MemoryStore::default());
+            let (parent, claim, account) = started(&s, if already_started { "after" } else { "before" }, 1000).await;
+            let mut spec = RunSpec::new("tenant", "child", account, "child");
+            spec.parent = Some(parent.clone());
+            let op = s.begin(&claim, DispatchRequest::new("child-op", OperationKind::ChildRun, "child", serde_json::to_value(&spec).unwrap(), Amount::default()), 0).await.unwrap();
+            s.mark_sent(&claim, &op.id, 0).await.unwrap();
+            let original = if already_started { Some(s.start(spec.clone()).await.unwrap()) } else { None };
+            let next = s.claim(&parent, "restart", 101, 100).await.unwrap();
+            let rt = runtime(s.clone(), FakeModel::default(), vec![]);
+            rt.clock.set(101);
+            let barrier = std::sync::Barrier::new(2);
+            let run = || {
+                barrier.wait();
+                block_on(rt.spawn_child(&next, "child-op", spec.clone()))
+            };
+            let (a, b) = std::thread::scope(|scope| {
+                let first = scope.spawn(run);
+                let second = scope.spawn(run);
+                (first.join().unwrap(), second.join().unwrap())
+            });
+            let a = a.unwrap();
+            assert_eq!(b.unwrap(), a);
+            if let Some(original) = original { assert_eq!(a, original); }
+            assert_eq!(s.find_request(&spec).await.unwrap(), Some(a.clone()));
+            assert_eq!(s.start(spec.clone()).await.unwrap(), a);
+            assert!(!s.operation(&parent, "child-op").await.unwrap().unwrap().settled);
+            s.cancel(&a, "done").await.unwrap();
+            rt.reconcile(&next).await.unwrap();
+            rt.reconcile(&next).await.unwrap();
+            assert!(s.operation(&parent, "child-op").await.unwrap().unwrap().settled);
+            assert_eq!(rt.spawn_child(&next, "child-op", spec).await.unwrap(), a);
+
+        }
+    });
+}
