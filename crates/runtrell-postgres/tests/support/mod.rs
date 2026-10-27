@@ -18,7 +18,7 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
     let _enter = rt.enter();
     runtrell_testkit::block_on(f)
 }
-pub struct TestPg(PgStore);
+pub struct TestPg(pub PgStore, pub Option<(String, sqlx::PgPool)>);
 impl Default for TestPg {
     fn default() -> Self {
         Self::new(Capacity::default())
@@ -42,6 +42,7 @@ impl TestPg {
                 )
                 .await
                 .unwrap(),
+                None,
             )
         })
     }
@@ -68,6 +69,34 @@ impl RunStore for TestPg {
     }
     async fn start(&self, spec: RunSpec) -> Result<RunHandle> {
         self.0.start(spec).await
+    }
+    async fn admit_child(
+        &self,
+        c: &Claim,
+        key: &str,
+        spec: RunSpec,
+        now: u64,
+    ) -> Result<RunHandle> {
+        if self.1.as_ref().map(|(phase, _)| phase.as_str()) == Some("before") {
+            child_stop(None);
+        }
+        if self.1.as_ref().map(|(phase, _)| phase.as_str()) == Some("uncommitted") {
+            let mut tx = self
+                .1
+                .as_ref()
+                .unwrap()
+                .1
+                .begin()
+                .await
+                .map_err(|_| Error::Storage)?;
+            let child = self.0.admit_child_in(&mut tx, c, key, spec, now).await?;
+            child_stop(Some(&child));
+        }
+        let child = self.0.admit_child(c, key, spec, now).await?;
+        if self.1.as_ref().map(|(phase, _)| phase.as_str()) == Some("created") {
+            child_stop(Some(&child));
+        }
+        Ok(child)
     }
     async fn get(&self, run: &RunHandle) -> Result<RunRecord> {
         self.0.get(run).await
@@ -177,6 +206,16 @@ impl OperationStore for TestPg {
         result: ExternalResult,
         now: u64,
     ) -> Result<()> {
+        if self.1.as_ref().map(|(phase, _)| phase.as_str()) == Some("terminal")
+            && let Some(op) = self
+                .0
+                .list_operations(&claim.run)
+                .await?
+                .into_iter()
+                .find(|op| op.id == id && op.request.kind == OperationKind::ChildRun)
+        {
+            child_stop(Some(&op.child_handle()?));
+        }
         self.0.record(claim, id, result, now).await
     }
 }
@@ -192,5 +231,19 @@ impl Scheduler for TestPg {
     }
     async fn dequeue(&self, now: u64) -> Result<Option<QueueEntry>> {
         self.0.dequeue(now).await
+    }
+}
+
+// Test-only boundaries inside spawn_child and before parent settlement. The
+// supervisor kills the OS process after this receipt; production has no hooks.
+fn child_stop(child: Option<&RunHandle>) -> ! {
+    use std::io::Write;
+    println!(
+        "RUNTRELL_CHILD_READY {}",
+        child.map_or("-", |h| h.id.as_str())
+    );
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
     }
 }

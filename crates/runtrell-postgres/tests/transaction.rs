@@ -417,3 +417,62 @@ async fn typed_account_lock_waits_for_outer_transaction_and_keeps_ancestor_order
         expected
     );
 }
+
+#[tokio::test]
+async fn atomic_child_admission_participates_in_host_transaction() {
+    let (pool, _, store) = open().await;
+    let account = store
+        .create_account("t", Amount::new(100, 100), None)
+        .await
+        .unwrap();
+    let parent = store
+        .start(RunSpec::new("t", "parent", account.clone(), "parent"))
+        .await
+        .unwrap();
+    let claim = store.claim(&parent, "worker", 0, 100).await.unwrap();
+    let spec = RunSpec::new("t", "child", account, "child");
+    let mut tx = pool.begin().await.unwrap();
+    store.fail_next_write();
+    assert_eq!(
+        store
+            .admit_child_in(&mut tx, &claim, "child-op", spec.clone(), 0)
+            .await,
+        Err(Error::Storage)
+    );
+    let child = store
+        .admit_child_in(&mut tx, &claim, "child-op", spec.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .admit_child_in(&mut tx, &claim, "child-op", spec.clone(), 0)
+            .await
+            .unwrap(),
+        child
+    );
+    assert_eq!(store.get(&child).await, Err(Error::NotFound));
+    tx.rollback().await.unwrap();
+    assert!(
+        store
+            .operation(&parent, "child-op")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.queue_len().await.unwrap(), 0);
+    assert_eq!(store.slot_count(OperationKind::ChildRun).await.unwrap(), 0);
+    let mut tx = pool.begin().await.unwrap();
+    let child = store
+        .admit_child_in(&mut tx, &claim, "child-op", spec.clone(), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        store
+            .admit_child(&claim, "child-op", spec, 0)
+            .await
+            .unwrap(),
+        child
+    );
+    assert_eq!(store.get(&child).await.unwrap().spec.parent, Some(parent));
+}

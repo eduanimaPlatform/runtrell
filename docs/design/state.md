@@ -18,7 +18,7 @@
 | Settlement | pending → settled / unknown | 未確定operation集合。停止/cleanupと独立 |
 | Delivery | none → accepted → confirmed / superseded / unknown | 業務効果key、要求digest、owner receipt、対象版。受付だけでRunの反映目的を成功にしない |
 
-取消は成功確定と同じstore直列化点で競合解決する。確定が先なら後続取消はClosed、取消が先なら確定不可。遅延結果は既存operationへ照合し、取消済みRunを成功に戻さない。親取消・期限は子へ伝播する。子作成は親claim・共有budget・deadlineを検査し、親の上限を拡大しない。
+取消は成功確定と同じstore直列化点で競合解決する。確定が先なら後続取消はClosed、取消が先なら確定不可。遅延結果は既存operationへ照合し、取消済みRunを成功に戻さない。親取消・期限は子へ伝播する。子受付はadmit_childの同じ原子操作内で親claim・共有budget・deadlineを検査し、親の上限を拡大しない。親のfenceと子作成の間に所有者交代・取消が割り込む窓はない。ChildRun操作には受付時点で子Run IDが確定し、send_countは0のままAcceptedとなる。非終端の子は親操作を未精算のまま待機させ、子の終端と費用精算・停止/cleanup確認後に親の受付操作をAppliedへ一回精算し、ChildRun slotを解放する。子の終端理由が失敗・取消し・結果不明でも成功へ読み替えない。親操作には呼出し時の固定specを保存し、精算後も同じ子のRunHandleを返す。既存の受付結果とjoin/reconcileは親の取消し・絶対期限後も現在claimとPolicyで照会可能であり、新規受付だけを拒否する。Waitingへの遷移では親の実行用Run slotを原子的に返すが、子の寿命slotと有料操作の未精算予約は返さない。
 
 ## 2aで具体化した更新条件
 

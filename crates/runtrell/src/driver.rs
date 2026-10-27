@@ -13,6 +13,21 @@ use serde_json::Value;
 use std::{future::Future, sync::Arc};
 mod context;
 
+fn child_ready(run: &RunRecord) -> bool {
+    matches!(run.state, RunState::Terminal(_))
+        && matches!(run.settlement, Progress::NotRequired | Progress::Confirmed)
+        && matches!(run.stop, Progress::NotRequired | Progress::Confirmed)
+        && matches!(run.cleanup, Progress::NotRequired | Progress::Confirmed)
+}
+fn child_result(handle: &RunHandle) -> ExternalResult {
+    ExternalResult::Applied {
+        physical_evidence: None,
+        output: serde_json::to_value(handle).unwrap(),
+        usage: Usage::measured(0, 0, 0),
+        external_id: None,
+    }
+}
+
 /// Durable-ordering driver; durability is a property of the supplied ControlStore.
 /// Native adapters must not hide retries or bypass dispatch for billable calls.
 pub struct Runtime<S, M, T, P, C, V, F> {
@@ -94,6 +109,13 @@ impl<
                     })
                     .ok_or(Error::Conflict)?;
                 tool.cancel(&ctx, op.request.input.clone()).await?
+            } else if op.request.kind == OperationKind::ChildRun {
+                let child = self.store.get(&op.child_handle()?).await?;
+                if child_ready(&child) {
+                    Progress::NotRequired
+                } else {
+                    Progress::Pending
+                }
             } else {
                 Progress::Unknown
             };
@@ -127,67 +149,39 @@ impl<
         })
         .await
     }
-    /// Starts an optional child through the same fenced intent barrier.
-    /// Child execution keeps its slot until the original child is reconciled terminal.
-    pub async fn spawn_child(&self, c: &Claim, key: &str, mut spec: RunSpec) -> Result<RunHandle> {
-        let parent = self.store.check(c, self.clock.now(), true).await?;
-        if spec.tenant != c.run.tenant {
-            return Err(Error::PermissionDenied);
+    /// Atomically admits a child and retains its slot until terminal reconciliation.
+    pub async fn spawn_child(&self, c: &Claim, key: &str, spec: RunSpec) -> Result<RunHandle> {
+        let parent = self.store.check(c, self.clock.now(), false).await?;
+        self.policy.authorize(&parent, "child", "child")?;
+        self.store.admit_child(c, key, spec, self.clock.now()).await
+    }
+    /// Return the child's saved terminal outcome, or yield the parent execution
+    /// permit while its child/cleanup/settlement is still pending. No new work.
+    pub async fn join_child(&self, c: &Claim, key: &str) -> Result<RunRecord> {
+        let parent = self.store.check(c, self.clock.now(), false).await?;
+        self.policy.authorize(&parent, "child", "reconcile")?;
+        let op = self
+            .store
+            .operation(&c.run, key)
+            .await?
+            .ok_or(Error::NotFound)?;
+        let child = self.store.get(&op.child_handle()?).await?;
+        if child.spec.parent.as_ref() != Some(&c.run) {
+            return Err(Error::Conflict);
         }
-        spec.parent = Some(c.run.clone());
-        spec.account = parent.spec.account.clone();
-        spec.deadline = match (spec.deadline, parent.spec.deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        let lookup_spec = spec.clone();
-        let d = DispatchRequest::new(
-            key,
-            OperationKind::ChildRun,
-            "child",
-            serde_json::to_value(&spec).unwrap(),
-            Amount::default(),
-        );
-        let result = self
-            .dispatch(
-                c,
-                d,
-                "child",
-                |_| async move {
-                    let h = self.store.start(spec).await?;
-                    Ok(ExternalResult::Accepted { external_id: h.id })
-                },
-                |_| async move {
-                    if let Some(h) = self.store.find_request(&lookup_spec).await? {
-                        let child = self.store.get(&h).await?;
-                        if matches!(child.state, RunState::Terminal(_)) {
-                            Ok(Lookup::Found(ExternalResult::Applied {
-                                physical_evidence: None,
-                                output: serde_json::to_value(h).unwrap(),
-                                usage: Usage::measured(0, 0, 0),
-                                external_id: None,
-                            }))
-                        } else {
-                            Ok(Lookup::Pending)
-                        }
-                    } else {
-                        Ok(Lookup::NotFound {
-                            scope: "child-store".into(),
-                        })
-                    }
-                },
-            )
-            .await?;
-        match result {
-            ExternalResult::Accepted { external_id } => Ok(RunHandle {
-                tenant: c.run.tenant.clone(),
-                id: external_id,
-            }),
-            ExternalResult::Applied { output, .. } => {
-                serde_json::from_value(output).map_err(|e| Error::Invalid(e.to_string()))
+        if !op.settled {
+            if !child_ready(&child) {
+                if !matches!(parent.state, RunState::Terminal(_)) {
+                    self.store
+                        .wait(c, &format!("child:{key}"), self.clock.now())
+                        .await?;
+                }
+                return Err(Error::Pending(format!("child:{key}")));
             }
-            _ => Err(Error::UsageUnknown),
+            self.persist_result(c, &op.id, child_result(&child.handle))
+                .await?;
         }
+        Ok(child)
     }
     /// Continues lookup and settlement after run termination. Never invokes new work.
     pub async fn reconcile(&self, c: &Claim) -> Result<()> {
@@ -247,22 +241,14 @@ impl<
             } else if let Some(result) = saved {
                 Lookup::Found(result)
             } else if op.request.kind == OperationKind::ChildRun {
-                let spec: RunSpec = serde_json::from_value(op.request.input.clone())
-                    .map_err(|e| Error::Invalid(e.to_string()))?;
-                if let Some(h) = self.store.find_request(&spec).await? {
-                    let child = self.store.get(&h).await?;
-                    if matches!(child.state, RunState::Terminal(_)) {
-                        Lookup::Found(ExternalResult::Applied {
-                            physical_evidence: None,
-                            output: serde_json::to_value(h).unwrap(),
-                            usage: Usage::measured(0, 0, 0),
-                            external_id: None,
-                        })
-                    } else {
-                        Lookup::Pending
-                    }
+                let child = self.store.get(&op.child_handle()?).await?;
+                if child.spec.parent.as_ref() != Some(&c.run) {
+                    return Err(Error::Conflict);
+                }
+                if child_ready(&child) {
+                    Lookup::Found(child_result(&child.handle))
                 } else {
-                    Lookup::Unknown
+                    Lookup::Pending
                 }
             } else {
                 continue;
@@ -285,7 +271,7 @@ impl<
             account_binding: op.request.account_binding.clone(),
         }
     }
-    /// The sole invocation route for model, tool, compaction, child orchestration and retries.
+    /// The sole external invocation route for model, tool, compaction and retries.
     pub async fn dispatch<I, L, IF, LF>(
         &self,
         c: &Claim,
@@ -412,18 +398,6 @@ impl<
                 Lookup::NotFound { scope } => {
                     let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
                     self.policy.authorize(&r, &op.request.target, permission)?;
-                    if op.request.kind == OperationKind::ChildRun && scope == "child-store" {
-                        let spec = serde_json::from_value(op.request.input.clone())
-                            .map_err(|e| Error::Invalid(e.to_string()))?;
-                        let h = self.store.start(spec).await?;
-                        return self
-                            .persist_result(
-                                c,
-                                &op.id,
-                                ExternalResult::Accepted { external_id: h.id },
-                            )
-                            .await;
-                    }
                     if let Err(error) = self
                         .store
                         .proven_unsent(c, &op.id, &scope, self.clock.now())
@@ -445,18 +419,6 @@ impl<
                     let pending = match op.result {
                         Some(ExternalResult::Accepted { external_id }) => {
                             ExternalResult::Accepted { external_id }
-                        }
-                        _ if op.request.kind == OperationKind::ChildRun => {
-                            let spec = serde_json::from_value(op.request.input.clone())
-                                .map_err(|e| Error::Invalid(e.to_string()))?;
-                            let child = self
-                                .store
-                                .find_request(&spec)
-                                .await?
-                                .ok_or(Error::Conflict)?;
-                            ExternalResult::Accepted {
-                                external_id: child.id,
-                            }
                         }
                         _ => ExternalResult::Accepted {
                             external_id: op.id.clone(),
@@ -681,6 +643,20 @@ impl<
         if matches!(r.state, RunState::Terminal(_)) {
             Box::pin(self.reconcile(c)).await?;
             return Box::pin(self.store.get(&c.run)).await;
+        }
+        if Box::pin(self.store.list_operations(&c.run))
+            .await?
+            .iter()
+            .any(|op| op.request.kind == OperationKind::ChildRun && !op.settled)
+        {
+            Box::pin(self.reconcile(c)).await?;
+            if Box::pin(self.store.list_operations(&c.run))
+                .await?
+                .iter()
+                .any(|op| op.request.kind == OperationKind::ChildRun && !op.settled)
+            {
+                return Err(Error::Pending("children".into()));
+            }
         }
         let catalog = self.tools.iter().map(Tool::descriptor).collect::<Vec<_>>();
         file_tools::pin_catalog(&r, &self.policy, &self.tools)?;

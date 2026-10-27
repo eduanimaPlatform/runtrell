@@ -4,11 +4,19 @@
 
 公開Rust型・traitの正本は `crates/runtrell/src/api.rs`。RunSpecはtenant、principal、重複request key、入力/目的、共有account、親、任意sessionと期待context版、根拠版、設定版、任意deadlineを固定する。RunHandleはtenant付きID。ToolContextは信頼済みdriverがclaimと固定descriptorから作る。model/toolが操作IDや権限を選び直さない。
 
-RunStoreはstart/get/claim/checkpoint/cancel/terminate/finalize、OperationStoreはbegin/operation/mark_sent/record、BudgetAuthorityはcreate_account/accountを提供する。ControlStoreはこれらと共有slot・queue・警告配信を組み合わせる。beginは現在owner・取消・期限・accountを再検査し、全祖先accountの予約とintentを同じbarrierで保存する。recordは操作結果と精算を同じbarrierで保存する。分離adapterはこの原子性を実装せずにControlStoreを名乗れない。
+RunStoreはstart/admit_child/get/claim/checkpoint/cancel/terminate/finalize、OperationStoreはbegin/operation/mark_sent/record、BudgetAuthorityはcreate_account/accountを提供する。ControlStoreはこれらと共有slot・queue・警告配信を組み合わせる。beginは現在owner・取消・期限・accountを再検査し、全祖先accountの予約とintentを同じbarrierで保存する。recordは操作結果と精算を同じbarrierで保存する。分離adapterはこの原子性を実装せずにControlStoreを名乗れない。
 
-ChildRunの送信記録後に受付が見つからない場合、同じstoreの正確な要求照合と冪等なstartにより同じ子を受付し直す。再開前にowner・取消・期限とpolicyを再検査し、既存操作と予約を維持する。作成済みの子は終端までPendingとして扱い、終端後に精算する。外部操作のUnknownと証明付き再送の契約は変わらない。
+`RunStore::admit_child(claim, operation_key, spec, now)` は親のowner/generation/leaseをfenceし、固定spec照合、子Runとqueue、ChildRun slot、親操作への子Run IDの保存を一つの原子操作で確定する。Memoryは一つのlock、PostgreSQLは一つのtransactionを使う。同じ親・操作key・tenantと固定specは同じ子を返し、口座・configを含む入力specの相違はConflict。再呼出しも現在の親claimを必要とする。新規作成だけは非終端・未取消し・絶対期限・tenant・口座・sessionを追加検査する。既存の同一要求は親の取消し・期限後も返し、異内容はConflictとする。
 
-PostgreSQL の外部 transaction 参加 API は `PgStore::{start_in, create_account_in, create_account_with_policy_in, terminate_in, finalize_in}`。host の SQL と同じ `sqlx::Transaction` に書き込み、commit は host が行う。親子関係と共有口座は RunSpec で指定する。保存・失敗時の契約は [PostgreSQL](postgres.md#host-owned-transaction) を参照。
+`spawn_child` は現在のpolicyを検査してadmit_childを呼ぶ。受付時に親の口座と短い方の期限を継承し、親と操作keyで子の受付identityを分離する。呼出し時のspecを親操作に固定保存するため、継承で同じ実効値になる変更もConflictとなる。ChildRunは外部Provider操作ではなく、dispatch/mark_sent/lookupによる送信・Unknown・再送を使わない。OperationStore::beginはChildRunをInvalidで拒否し、汎用dispatchへ渡しても外部adapter/lookupを呼ばない。確定した子Run IDを使って待機し、子の終端・停止/cleanup確認・費用精算がそろってから、受付操作のゼロ費用精算でChildRun slotを一回解放する。子の有料attemptは通常どおり予約・精算する。外部ProviderのUnknown契約は変わらない。
+
+`Runtime::join_child(claim, operation_key)` は子の保存済みRunRecord（終端理由・出力・receipt・completionを含む）を返す。受付のAcceptedや親側のAppliedは子の成功を意味しない。Failed/Cancelled/DeadlineReached/OutcomeUnknownを成功へ変換せず、hostが返された状態と出力を採用する。子が非終端、未精算、停止/cleanup未確認ならPendingとし、親を標準Waitingへ保存する。waitは親の実行用Run slotだけを同じtransactionで解放し、ChildRunと有料operationの寿命slotは保持する。driveも未精算ChildRunがある間はモデルを呼ばず同じ待機へ戻る。Workerはqueueから子をclaim/driveし、終端後に親のjoin/driveを再開する。Run/Model/Tool/ChildRun各1・queue1・逐次Workerで進行できる。Waitingをpollするhostは現在claimをrenewするか、失効後に再claimする。
+
+親子関係と共有口座はSession順序と独立である。子はSessionを継承せず、明示する場合も祖先Runと同じSessionはInvalidとして受付前に拒否する。子の成功が親の会話Sessionのcontext_revisionを進めることはない。
+
+認可位置：Agent/hostの標準起動口はRuntime::spawn_childであり、親の現在claimを読んだ後、Policy::authorize(parent, "child", "child")を**transaction開始前**に実行する。既存要求の再利用にもこの認可を省略しない。join/reconcileは親のPolicyによる"reconcile"、取消しは"cancel"を再検査する。store transactionはowner/generation/lease・保存済み親/spec/tenant/口座・状態/絶対期限・Sessionの整合性を検査し、Policy/RPC/LLM/toolを呼ばない。Policyは短い同期callbackであり、外部認可が必要なhostはDB lockを取る前に接続・認可を済ませる。RunStore/admit_child_inは信頼済みhostの低水準保存契約であってAgentの認可APIではなく、直接公開してRuntimeの認可を迂回させてはならない。host-owned transactionで利用する場合も、親に対する現在の認可を外側transactionより前に行う。認可後のowner交代・取消し・期限はstore内fenceで拒否し、認可callback中にDB lockは保持しない。
+
+PostgreSQL の外部 transaction 参加 API は `PgStore::{start_in, admit_child_in, create_account_in, create_account_with_policy_in, terminate_in, finalize_in}`。host の SQL と同じ `sqlx::Transaction` に書き込み、commit は host が行う。親子関係と共有口座は RunSpec で指定する。保存・失敗時の契約は [PostgreSQL](postgres.md#host-owned-transaction) を参照。
 
 async traitはRustライブラリの静的dispatch契約。安定dynamic ABIではない。ModelPort/Toolはinvokeとlookupを分離、lookupはFound/Pending/Unknown/NotFound（同scope・保存期限内で未実行を保証する証拠）を返す。timeoutやstream断はUnknown。provider内部retryを禁止し、課金retryは新attemptとして共通dispatchへ戻す。元request・予約を再使用するNotFound回復は同attemptの再送であり、新しい予算を作らない。
 
@@ -398,6 +406,20 @@ pub trait RunStore: Send + Sync {
     /// Atomically admit a request or return the run for the same original spec;
     /// concurrent equal requests must never create more than one run.
     fn start(&self, spec: RunSpec) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
+    /// Fence the parent and atomically persist a child, queue entry, lifetime slot,
+    /// and its handle in the parent operation. Equal input is idempotent; any
+    /// changed spec (including account/config) conflicts. Existing receipts remain
+    /// readable after cancellation/deadline; only new creation requires an open
+    /// parent. Ancestor Session reuse is rejected. No external send occurs.
+    /// Trusted persistence boundary: callers must authorize through Runtime or
+    /// host policy before entering the transaction; the store invokes no policy.
+    fn admit_child(
+        &self,
+        claim: &Claim,
+        operation_key: &str,
+        spec: RunSpec,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
     fn claim(
         &self,
@@ -506,7 +528,8 @@ pub trait OperationStore: Send + Sync {
         scope: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
-    /// Atomic reservation across all ancestors plus intent; no I/O before success.
+    /// Atomic reservation across all ancestors plus external intent; no I/O before
+    /// success. ChildRun is rejected: internal children must use admit_child.
     fn begin(
         &self,
         claim: &Claim,

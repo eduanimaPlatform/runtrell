@@ -243,6 +243,198 @@ fn refresh_settlement(s: &mut Ledger, h: &RunHandle) {
         };
     }
 }
+fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHandle> {
+    if spec.scheduling.weight == 0
+        || matches!(
+            spec.budget,
+            ReservationPolicy::Wait { until: 0 }
+                | ReservationPolicy::Shrink {
+                    min_output_budget_tokens: 0
+                }
+        )
+    {
+        return Err(Error::Invalid("run policy".into()));
+    }
+    if spec.tenant.is_empty() || spec.request_key.is_empty() {
+        return Err(Error::Invalid("tenant/request key".into()));
+    }
+    if let Some(old) = s.runs.values().find(|r| {
+        r.spec.tenant == spec.tenant
+            && r.spec.principal == spec.principal
+            && r.spec.request_key == spec.request_key
+    }) {
+        return if old.spec == spec {
+            Ok(old.handle.clone())
+        } else {
+            Err(Error::Conflict)
+        };
+    }
+    let a = s.accounts.get(&spec.account).ok_or(Error::NotFound)?;
+    if a.tenant != spec.tenant {
+        return Err(Error::PermissionDenied);
+    }
+    if let Some(parent) = &spec.parent {
+        let p = get(s, parent)?;
+        if p.handle.tenant != spec.tenant
+            || p.cancel.is_some()
+            || matches!(p.state, RunState::Terminal(_))
+        {
+            return Err(Error::Closed);
+        }
+        if spec.account != p.spec.account && !ancestors(s, &spec.account)?.contains(&p.spec.account)
+        {
+            return Err(Error::PermissionDenied);
+        }
+        spec.deadline = match (spec.deadline, p.spec.deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+    let sequence = if let Some(id) = &spec.session {
+        let session = s.sessions.entry(session_key(&spec.tenant, id)).or_default();
+        if session.1 != spec.context_revision {
+            return Err(Error::Conflict);
+        }
+        session.0 += 1;
+        session.0
+    } else {
+        0
+    };
+    if s.queue.len() >= capacity.queue
+        || s.queue.iter().filter(|q| q.tenant == spec.tenant).count() >= capacity.tenant_queue
+    {
+        return Err(Error::Backpressure);
+    }
+    let h = RunHandle {
+        tenant: spec.tenant.clone(),
+        id: uuid::Uuid::new_v4().to_string(),
+    };
+    s.queue.push_back(QueueEntry {
+        key: key(&h),
+        tenant: spec.tenant.clone(),
+        scheduling: spec.scheduling,
+        deadline: spec.deadline.unwrap_or(u64::MAX),
+    });
+    s.runs.insert(
+        key(&h),
+        RunRecord {
+            handle: h.clone(),
+            spec,
+            schema: 1,
+            revision: 0,
+            sequence,
+            owner: None,
+            generation: 0,
+            state: RunState::Queued,
+            checkpoint: None,
+            cancel: None,
+            stop: Progress::NotRequired,
+            cleanup: Progress::NotRequired,
+            settlement: Progress::NotRequired,
+            delivery: Delivery::None,
+            output: None,
+            receipt: None,
+            completion: None,
+        },
+    );
+    Ok(h)
+}
+fn child_spec(run: &RunHandle, operation_key: &str, spec: &RunSpec, parent: &RunSpec) -> RunSpec {
+    let mut effective = spec.clone();
+    effective.parent = Some(run.clone());
+    effective.account = parent.account.clone();
+    effective.request_key =
+        serde_json::json!(["child", run.id, operation_key, spec.request_key]).to_string();
+    effective.deadline = match (spec.deadline, parent.deadline) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    effective
+}
+fn admit_child(
+    s: &mut Ledger,
+    capacity: &Capacity,
+    c: &Claim,
+    operation_key: &str,
+    spec: RunSpec,
+    parent: &RunRecord,
+    now: u64,
+) -> Result<RunHandle> {
+    if spec.tenant != c.run.tenant {
+        return Err(Error::PermissionDenied);
+    }
+    if operation_key.is_empty() || spec.request_key.is_empty() {
+        return Err(Error::Invalid("empty child operation/request key".into()));
+    }
+    let request = DispatchRequest::new(
+        operation_key,
+        OperationKind::ChildRun,
+        "child",
+        serde_json::to_value(&spec).map_err(|_| Error::Storage)?,
+        Amount::default(),
+    );
+    let id = format!("{}:{}:1", key(&c.run), operation_key);
+    if let Some(op) = s.operations.get(&id) {
+        if op.request != request {
+            return Err(Error::Conflict);
+        }
+        return op.child_handle();
+    }
+    fence(s, c, now, true)?;
+    if let Some(session) = &spec.session {
+        let mut ancestor = Some(parent);
+        while let Some(run) = ancestor {
+            if run.spec.session.as_ref() == Some(session) {
+                return Err(Error::Invalid(
+                    "child session belongs to an ancestor".into(),
+                ));
+            }
+            ancestor = run.spec.parent.as_ref().map(|h| get(s, h)).transpose()?;
+        }
+    }
+    budget_open(s, &parent.spec.account)?;
+    for account in ancestors(s, &parent.spec.account)? {
+        s.accounts[&account].can_reserve(&request)?;
+    }
+    acquire(
+        s,
+        capacity,
+        SlotRequest {
+            key: id.clone(),
+            tenant: c.run.tenant.clone(),
+            run: c.run.id.clone(),
+            kind: OperationKind::ChildRun,
+        },
+    )?;
+    let child = start(
+        s,
+        capacity,
+        child_spec(&c.run, operation_key, &spec, &parent.spec),
+    )?;
+    s.operations.insert(
+        id.clone(),
+        Operation {
+            id,
+            run: c.run.clone(),
+            request,
+            state: OperationState::Accepted,
+            result: Some(ExternalResult::Accepted {
+                external_id: child.id.clone(),
+            }),
+            settled: false,
+            unknown_usage: false,
+            send_generation: None,
+            send_count: 0,
+            replay_proof_generation: None,
+            created_at: now,
+            finished_at: None,
+            usage_observations: vec![],
+            unsettled_result: None,
+        },
+    );
+    get_mut(s, &c.run)?.settlement = Progress::Pending;
+    Ok(child)
+}
 impl RunStore for MemoryStore {
     async fn renew(&self, c: &Claim, now: u64, lease: u64) -> Result<Claim> {
         self.tx(|s| {
@@ -274,104 +466,19 @@ impl RunStore for MemoryStore {
             }
         })
     }
-    async fn start(&self, mut spec: RunSpec) -> Result<RunHandle> {
+    async fn start(&self, spec: RunSpec) -> Result<RunHandle> {
+        self.tx(|s| start(s, &self.capacity, spec))
+    }
+    async fn admit_child(
+        &self,
+        c: &Claim,
+        operation_key: &str,
+        spec: RunSpec,
+        now: u64,
+    ) -> Result<RunHandle> {
         self.tx(|s| {
-            if spec.scheduling.weight == 0
-                || matches!(
-                    spec.budget,
-                    ReservationPolicy::Wait { until: 0 }
-                        | ReservationPolicy::Shrink {
-                            min_output_budget_tokens: 0
-                        }
-                )
-            {
-                return Err(Error::Invalid("run policy".into()));
-            }
-            if spec.tenant.is_empty() || spec.request_key.is_empty() {
-                return Err(Error::Invalid("tenant/request key".into()));
-            }
-            if let Some(old) = s.runs.values().find(|r| {
-                r.spec.tenant == spec.tenant
-                    && r.spec.principal == spec.principal
-                    && r.spec.request_key == spec.request_key
-            }) {
-                return if old.spec == spec {
-                    Ok(old.handle.clone())
-                } else {
-                    Err(Error::Conflict)
-                };
-            }
-            let a = s.accounts.get(&spec.account).ok_or(Error::NotFound)?;
-            if a.tenant != spec.tenant {
-                return Err(Error::PermissionDenied);
-            }
-            if let Some(parent) = &spec.parent {
-                let p = get(s, parent)?;
-                if p.handle.tenant != spec.tenant
-                    || p.cancel.is_some()
-                    || matches!(p.state, RunState::Terminal(_))
-                {
-                    return Err(Error::Closed);
-                }
-                if spec.account != p.spec.account
-                    && !ancestors(s, &spec.account)?.contains(&p.spec.account)
-                {
-                    return Err(Error::PermissionDenied);
-                }
-                spec.deadline = match (spec.deadline, p.spec.deadline) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-            }
-            let sequence = if let Some(id) = &spec.session {
-                let session = s.sessions.entry(session_key(&spec.tenant, id)).or_default();
-                if session.1 != spec.context_revision {
-                    return Err(Error::Conflict);
-                }
-                session.0 += 1;
-                session.0
-            } else {
-                0
-            };
-            if s.queue.len() >= self.capacity.queue
-                || s.queue.iter().filter(|q| q.tenant == spec.tenant).count()
-                    >= self.capacity.tenant_queue
-            {
-                return Err(Error::Backpressure);
-            }
-            let h = RunHandle {
-                tenant: spec.tenant.clone(),
-                id: uuid::Uuid::new_v4().to_string(),
-            };
-            s.queue.push_back(QueueEntry {
-                key: key(&h),
-                tenant: spec.tenant.clone(),
-                scheduling: spec.scheduling,
-                deadline: spec.deadline.unwrap_or(u64::MAX),
-            });
-            s.runs.insert(
-                key(&h),
-                RunRecord {
-                    handle: h.clone(),
-                    spec,
-                    schema: 1,
-                    revision: 0,
-                    sequence,
-                    owner: None,
-                    generation: 0,
-                    state: RunState::Queued,
-                    checkpoint: None,
-                    cancel: None,
-                    stop: Progress::NotRequired,
-                    cleanup: Progress::NotRequired,
-                    settlement: Progress::NotRequired,
-                    delivery: Delivery::None,
-                    output: None,
-                    receipt: None,
-                    completion: None,
-                },
-            );
-            Ok(h)
+            let parent = fence(s, c, now, false)?;
+            admit_child(s, &self.capacity, c, operation_key, spec, &parent, now)
         })
     }
     async fn get(&self, h: &RunHandle) -> Result<RunRecord> {
@@ -570,6 +677,8 @@ impl RunStore for MemoryStore {
             let r = get_mut(s, &c.run)?;
             r.state = RunState::Waiting(reason.into());
             r.revision += 1;
+            s.slots
+                .remove(&format!("active:{}:{}", c.run.tenant, c.run.id));
             Ok(())
         })
     }
@@ -746,6 +855,11 @@ impl OperationStore for MemoryStore {
         MemoryStore::proven_unsent(self, c, id, scope, now).await
     }
     async fn begin(&self, c: &Claim, request: DispatchRequest, now: u64) -> Result<Operation> {
+        if request.kind == OperationKind::ChildRun {
+            return Err(Error::Invalid(
+                "child admission requires admit_child".into(),
+            ));
+        }
         if let Some(proof) = &request.recovery_proof {
             proof.validate(now)?;
             if request

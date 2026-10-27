@@ -640,7 +640,6 @@ fn all_paid_paths_use_dispatch_and_cannot_reset_parent_budget_or_deadline() {
             OperationKind::Model,
             OperationKind::Tool,
             OperationKind::Compaction,
-            OperationKind::ChildRun,
             OperationKind::Retry,
         ]
         .into_iter()
@@ -663,11 +662,19 @@ fn all_paid_paths_use_dispatch_and_cannot_reset_parent_budget_or_deadline() {
             .await
             .unwrap();
         }
+        assert_eq!(s.account(&a).await.unwrap().used, Amount::new(12, 8));
+        assert_eq!(s.operations(&h).await.unwrap().len(), 4);
+        let ch = rt.spawn_child(&c, "child", RunSpec::new("tenant", "child", a.clone(), "child")).await.unwrap();
+        assert_eq!(s.get(&ch).await.unwrap().spec.account, a);
+        let cc = s.claim(&ch, "child-worker", 0, 100).await.unwrap();
+        rt.dispatch(&cc,
+            DispatchRequest::new("paid-child-tool", OperationKind::Tool, "host", json!({}), Amount::new(5, 5)),
+            "allowed", |_| async { Ok(applied(3, 2)) }, |_| async { Ok(Lookup::Unknown) },
+        ).await.unwrap();
         assert_eq!(s.account(&a).await.unwrap().used, Amount::new(15, 10));
+        assert_eq!(s.account(&a).await.unwrap().reserved, Amount::default());
         assert_eq!(s.operations(&h).await.unwrap().len(), 5);
-        let mut child = RunSpec::new("tenant", "child", a.clone(), "child");
-        child.parent = Some(h.clone());
-        let ch = s.start(child).await.unwrap();
+        assert_eq!(s.operations(&ch).await.unwrap().len(), 1);
         s.cancel(&h, "parent stopped").await.unwrap();
         assert!(matches!(
             s.get(&ch).await.unwrap().state,
@@ -948,41 +955,579 @@ fn bounded_tool_timeout_keeps_unknown_cost_and_records_separate_stop() {
 }
 
 #[test]
-fn child_recovers_sent_before_and_after_start() {
+fn child_admission_is_atomic_and_fenced() {
     block_on(async {
-        for already_started in [false, true] {
-            let s = Arc::new(MemoryStore::default());
-            let (parent, claim, account) = started(&s, if already_started { "after" } else { "before" }, 1000).await;
-            let mut spec = RunSpec::new("tenant", "child", account, "child");
-            spec.parent = Some(parent.clone());
-            let op = s.begin(&claim, DispatchRequest::new("child-op", OperationKind::ChildRun, "child", serde_json::to_value(&spec).unwrap(), Amount::default()), 0).await.unwrap();
-            s.mark_sent(&claim, &op.id, 0).await.unwrap();
-            let original = if already_started { Some(s.start(spec.clone()).await.unwrap()) } else { None };
-            let next = s.claim(&parent, "restart", 101, 100).await.unwrap();
-            let rt = runtime(s.clone(), FakeModel::default(), vec![]);
-            rt.clock.set(101);
-            let barrier = std::sync::Barrier::new(2);
-            let run = || {
-                barrier.wait();
-                block_on(rt.spawn_child(&next, "child-op", spec.clone()))
-            };
-            let (a, b) = std::thread::scope(|scope| {
-                let first = scope.spawn(run);
-                let second = scope.spawn(run);
-                (first.join().unwrap(), second.join().unwrap())
-            });
-            let a = a.unwrap();
-            assert_eq!(b.unwrap(), a);
-            if let Some(original) = original { assert_eq!(a, original); }
-            assert_eq!(s.find_request(&spec).await.unwrap(), Some(a.clone()));
-            assert_eq!(s.start(spec.clone()).await.unwrap(), a);
-            assert!(!s.operation(&parent, "child-op").await.unwrap().unwrap().settled);
-            s.cancel(&a, "done").await.unwrap();
-            rt.reconcile(&next).await.unwrap();
-            rt.reconcile(&next).await.unwrap();
-            assert!(s.operation(&parent, "child-op").await.unwrap().unwrap().settled);
-            assert_eq!(rt.spawn_child(&next, "child-op", spec).await.unwrap(), a);
-
+        let s = Arc::new(MemoryStore::default());
+        let (parent, claim, account) = started(&s, "atomic-child", 1000).await;
+        let spec = RunSpec::new("tenant", "child", account.clone(), "child");
+        let barrier = std::sync::Barrier::new(2);
+        let run = || {
+            barrier.wait();
+            block_on(s.admit_child(&claim, "child-op", spec.clone(), 0))
+        };
+        let (a, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(run);
+            let b = scope.spawn(run);
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        let child = a.unwrap();
+        assert_eq!(b.unwrap(), child);
+        assert_eq!(
+            s.admit_child(&claim, "child-op", spec.clone(), 0)
+                .await
+                .unwrap(),
+            child
+        );
+        let op = s.operation(&parent, "child-op").await.unwrap().unwrap();
+        assert_ne!(child.id, op.id, "the handle must contain the child Run ID");
+        assert_eq!(
+            op.result,
+            Some(ExternalResult::Accepted {
+                external_id: child.id.clone()
+            })
+        );
+        assert_eq!(op.send_count, 0);
+        assert!(!op.settled);
+        assert_eq!(s.queue_len().await, 1);
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 1);
+        for field in ["input", "config", "account", "deadline"] {
+            let mut changed = spec.clone();
+            match field {
+                "input" => changed.input = "different".into(),
+                "config" => changed.config_version = "different".into(),
+                "account" => changed.account = "different".into(),
+                _ => changed.deadline = Some(50),
+            }
+            assert_eq!(
+                s.admit_child(&claim, "child-op", changed, 0).await,
+                Err(Error::Conflict)
+            );
         }
+        let next = s.claim(&parent, "restart", 101, 100).await.unwrap();
+        for key in ["child-op", "stale-new"] {
+            assert_eq!(
+                s.admit_child(&claim, key, spec.clone(), 101).await,
+                Err(Error::OwnershipLost)
+            );
+        }
+        assert_eq!(s.queue_len().await, 1);
+        assert_eq!(
+            s.admit_child(&next, "child-op", spec.clone(), 101)
+                .await
+                .unwrap(),
+            child
+        );
+        let rt = runtime(s.clone(), FakeModel::default(), vec![]);
+        rt.clock.set(101);
+        rt.reconcile(&next).await.unwrap();
+        assert!(
+            !s.operation(&parent, "child-op")
+                .await
+                .unwrap()
+                .unwrap()
+                .settled
+        );
+        s.cancel(&child, "done").await.unwrap();
+        rt.reconcile(&next).await.unwrap();
+        rt.reconcile(&next).await.unwrap();
+        assert!(
+            s.operation(&parent, "child-op")
+                .await
+                .unwrap()
+                .unwrap()
+                .settled
+        );
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+        assert_eq!(s.account(&account).await.unwrap().used, Amount::default());
+        assert_eq!(
+            s.admit_child(&next, "child-op", spec, 101).await.unwrap(),
+            child
+        );
+    });
+}
+
+#[test]
+fn child_admission_rejects_closed_expired_and_unauthorized_parents() {
+    block_on(async {
+        for reason in ["cancel", "terminal", "deadline", "lease", "tenant"] {
+            let s = Arc::new(MemoryStore::default());
+            let account = s
+                .create_account("tenant", Amount::new(100, 100), None)
+                .await
+                .unwrap();
+            let mut parent = RunSpec::new("tenant", reason, account.clone(), "parent");
+            parent.deadline = Some(10);
+            let parent = s.start(parent).await.unwrap();
+            let claim = s.claim(&parent, "worker", 0, 20).await.unwrap();
+            let mut spec = RunSpec::new("tenant", "child", account, "child");
+            let (now, expected) = match reason {
+                "cancel" => {
+                    s.cancel(&parent, "stop").await.unwrap();
+                    (0, Error::Closed)
+                }
+                "terminal" => {
+                    s.terminate(&claim, Terminal::Failed("stop".into()), 0)
+                        .await
+                        .unwrap();
+                    (0, Error::Closed)
+                }
+                "deadline" => (10, Error::Deadline),
+                "lease" => (20, Error::OwnershipLost),
+                _ => {
+                    spec.tenant = "other".into();
+                    (0, Error::PermissionDenied)
+                }
+            };
+            assert_eq!(
+                s.admit_child(&claim, "child-op", spec, now).await,
+                Err(expected)
+            );
+            assert_eq!(s.queue_len().await, 0);
+            assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+            assert!(s.list_operations(&parent).await.unwrap().is_empty());
+        }
+    });
+}
+
+#[test]
+fn child_admission_rolls_back_and_scopes_identity_to_parent_and_operation() {
+    block_on(async {
+        let s = Arc::new(MemoryStore::default());
+        let (parent, claim, account) = started(&s, "parent-a", 1000).await;
+        let spec = RunSpec::new("tenant", "same-request", account.clone(), "child");
+        s.fail_next_write();
+        assert_eq!(
+            s.admit_child(&claim, "child-op", spec.clone(), 0).await,
+            Err(Error::Storage)
+        );
+        assert_eq!(s.queue_len().await, 0);
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+        assert!(s.list_operations(&parent).await.unwrap().is_empty());
+        let first = s
+            .admit_child(&claim, "child-op", spec.clone(), 0)
+            .await
+            .unwrap();
+        let other_key = s
+            .admit_child(&claim, "other-op", spec.clone(), 0)
+            .await
+            .unwrap();
+        assert_ne!(first, other_key);
+        let other_parent = s
+            .start(RunSpec::new("tenant", "parent-b", account, "parent"))
+            .await
+            .unwrap();
+        let other_claim = s.claim(&other_parent, "worker-b", 0, 100).await.unwrap();
+        let other_child = s
+            .admit_child(&other_claim, "child-op", spec, 0)
+            .await
+            .unwrap();
+        assert_ne!(first, other_child);
+        assert_eq!(s.queue_len().await, 3);
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 3);
+    });
+}
+
+#[test]
+fn spawn_child_refences_after_policy_and_requires_current_authorization() {
+    struct Handoff {
+        store: Arc<MemoryStore>,
+        clock: TestClock,
+    }
+    impl Policy for Handoff {
+        fn authorize(&self, run: &RunRecord, _: &str, _: &str) -> Result<()> {
+            self.clock.set(101);
+            block_on(self.store.claim(&run.handle, "successor", 101, 100))?;
+            Ok(())
+        }
+    }
+    block_on(async {
+        let s = Arc::new(MemoryStore::default());
+        let (parent, claim, account) = started(&s, "handoff", 1000).await;
+        let spec = RunSpec::new("tenant", "child", account, "child");
+        let denied = runtime(s.clone(), FakeModel::default(), vec![]);
+        denied.policy.revoked.store(true, Ordering::SeqCst);
+        assert_eq!(
+            denied.spawn_child(&claim, "child-op", spec.clone()).await,
+            Err(Error::PermissionDenied)
+        );
+        let clock = TestClock::default();
+        let rt = Runtime {
+            store: s.clone(),
+            model: FakeModel::default(),
+            tools: Vec::<BusinessTool>::new(),
+            policy: Handoff {
+                store: s.clone(),
+                clock: clock.clone(),
+            },
+            clock,
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        assert_eq!(
+            rt.spawn_child(&claim, "child-op", spec).await,
+            Err(Error::OwnershipLost)
+        );
+        assert_eq!(s.queue_len().await, 0);
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+        assert!(s.list_operations(&parent).await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn child_join_yields_single_run_permit_and_resumes_parent_with_shared_paid_budget() {
+    struct PaidChildTool(Arc<std::sync::atomic::AtomicU64>);
+    impl Tool for PaidChildTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            let mut descriptor = BusinessTool::new("read").descriptor();
+            descriptor.reserve = Amount::new(2, 3);
+            descriptor
+        }
+        async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(applied(2, 3))
+        }
+        async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+            Ok(Lookup::Unknown)
+        }
+    }
+    block_on(async {
+        let mut cap = Capacity::default();
+        for limits in [&mut cap.global, &mut cap.tenant, &mut cap.run] {
+            for kind in [
+                OperationKind::Run,
+                OperationKind::ChildRun,
+                OperationKind::Model,
+                OperationKind::Tool,
+            ] {
+                limits.insert(kind, 1);
+            }
+        }
+        cap.queue = 1;
+        cap.tenant_queue = 1;
+        let s = Arc::new(MemoryStore::new(cap));
+        let (parent, claim, account) = started(&s, "single-permit", 1000).await;
+        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rt = Runtime {
+            store: s.clone(),
+            model: FakeModel::scripted(vec![
+                FakeModel::calls(vec![ToolCall {
+                    id: "tool".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                }]),
+                FakeModel::decision(json!({"decision":"no_action"})),
+                FakeModel::decision(json!({"decision":"no_action"})),
+            ]),
+            tools: vec![PaidChildTool(calls.clone())],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let child = rt
+            .spawn_child(
+                &claim,
+                "child-op",
+                RunSpec::new("tenant", "child", account.clone(), "child"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            rt.join_child(&claim, "child-op").await,
+            Err(Error::Pending(_))
+        ));
+        assert!(matches!(
+            s.get(&parent).await.unwrap().state,
+            RunState::Waiting(_)
+        ));
+        assert_eq!(s.slot_count(OperationKind::Run).await, 0);
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 1);
+        assert!(matches!(
+            rt.drive(&claim).await.unwrap().state,
+            RunState::Waiting(_)
+        ));
+        assert_eq!(rt.model.requests.lock().unwrap().len(), 0);
+        assert_eq!(s.slot_count(OperationKind::Run).await, 0);
+        let queued = s.dequeue(0).await.unwrap().unwrap();
+        assert_eq!(queued.key, format!("{}:{}", child.tenant, child.id));
+        let child_claim = s.claim(&child, "same-worker", 0, 100).await.unwrap();
+        assert_eq!(
+            rt.drive(&child_claim).await.unwrap().state,
+            RunState::Terminal(Terminal::Succeeded)
+        );
+        let adopted = rt.join_child(&claim, "child-op").await.unwrap();
+        assert_eq!(adopted.handle, child);
+        assert!(adopted.output.is_some());
+        assert_eq!(s.account(&account).await.unwrap().used, Amount::new(10, 11));
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+        let finished = rt.drive(&claim).await.unwrap();
+        assert_eq!(finished.state, RunState::Terminal(Terminal::Succeeded));
+        assert_eq!(
+            rt.drive(&claim).await.unwrap().completion,
+            finished.completion
+        );
+        assert_eq!(s.account(&account).await.unwrap().used, Amount::new(14, 15));
+        assert_eq!(
+            s.account(&account).await.unwrap().reserved,
+            Amount::default()
+        );
+        assert_eq!(s.slot_count(OperationKind::Run).await, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn child_sessions_are_independent_and_ancestor_session_cycles_are_rejected() {
+    block_on(async {
+        let s = Arc::new(MemoryStore::default());
+        let account = s
+            .create_account("tenant", Amount::new(1000, 1000), None)
+            .await
+            .unwrap();
+        let mut spec = RunSpec::new("tenant", "parent-session", account.clone(), "parent");
+        spec.session = Some("conversation".into());
+        let parent = s.start(spec).await.unwrap();
+        let claim = s.claim(&parent, "worker", 0, 100).await.unwrap();
+        let rt = runtime(
+            s.clone(),
+            FakeModel::scripted(vec![
+                FakeModel::decision(json!({"decision":"no_action"})),
+                FakeModel::decision(json!({"decision":"no_action"})),
+            ]),
+            vec![],
+        );
+        let mut same = RunSpec::new("tenant", "same", account.clone(), "child");
+        same.session = Some("conversation".into());
+        assert_eq!(
+            rt.spawn_child(&claim, "same", same.clone()).await,
+            Err(Error::Invalid(
+                "child session belongs to an ancestor".into()
+            ))
+        );
+        assert!(s.operation(&parent, "same").await.unwrap().is_none());
+        let child = rt
+            .spawn_child(
+                &claim,
+                "child",
+                RunSpec::new("tenant", "child", account.clone(), "child"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(s.get(&child).await.unwrap().spec.session, None);
+        let child_claim = s.claim(&child, "child-worker", 0, 100).await.unwrap();
+        assert_eq!(
+            rt.spawn_child(&child_claim, "cycle", same).await,
+            Err(Error::Invalid(
+                "child session belongs to an ancestor".into()
+            ))
+        );
+        assert!(s.operation(&child, "cycle").await.unwrap().is_none());
+        assert_eq!(
+            rt.drive(&child_claim).await.unwrap().state,
+            RunState::Terminal(Terminal::Succeeded)
+        );
+        assert_eq!(rt.join_child(&claim, "child").await.unwrap().handle, child);
+        assert_eq!(
+            rt.drive(&claim).await.unwrap().state,
+            RunState::Terminal(Terminal::Succeeded)
+        );
+        assert_eq!(s.get(&parent).await.unwrap().spec.context_revision, 0);
+        let mut next = RunSpec::new("tenant", "next", account, "next input");
+        next.session = Some("conversation".into());
+        next.context_revision = 1;
+        assert!(s.start(next).await.is_ok());
+    });
+}
+
+#[test]
+fn child_existing_results_remain_accessible_after_cancel_or_deadline() {
+    block_on(async {
+        for cancelled in [false, true] {
+            let s = Arc::new(MemoryStore::default());
+            let account = s
+                .create_account("tenant", Amount::new(100, 100), None)
+                .await
+                .unwrap();
+            let mut parent_spec = RunSpec::new("tenant", "parent", account.clone(), "parent");
+            parent_spec.deadline = Some(10);
+            let parent = s.start(parent_spec).await.unwrap();
+            let claim = s.claim(&parent, "worker", 0, 100).await.unwrap();
+            let rt = runtime(s.clone(), FakeModel::default(), vec![]);
+            let spec = RunSpec::new("tenant", "child", account, "child");
+            let child = rt.spawn_child(&claim, "child", spec.clone()).await.unwrap();
+            if cancelled {
+                s.cancel(&parent, "stop").await.unwrap();
+            } else {
+                rt.clock.set(10);
+                let child_claim = s.claim(&child, "child-worker", 10, 100).await.unwrap();
+                assert_eq!(
+                    rt.drive(&child_claim).await.unwrap().state,
+                    RunState::Terminal(Terminal::DeadlineReached)
+                );
+            }
+            assert_eq!(
+                rt.spawn_child(&claim, "child", spec.clone()).await.unwrap(),
+                child
+            );
+            assert_eq!(
+                rt.spawn_child(&claim, "new", spec).await,
+                Err(if cancelled {
+                    Error::Closed
+                } else {
+                    Error::Deadline
+                })
+            );
+            let result = rt.join_child(&claim, "child").await.unwrap();
+            assert_eq!(result.handle, child);
+            assert!(!matches!(
+                result.state,
+                RunState::Terminal(Terminal::Succeeded)
+            ));
+            assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+            rt.policy.revoked.store(true, Ordering::SeqCst);
+            assert_eq!(
+                rt.join_child(&claim, "child").await,
+                Err(Error::PermissionDenied)
+            );
+        }
+    });
+}
+
+#[test]
+fn child_cancel_keeps_unknown_paid_work_and_lifetime_slot_until_recovered() {
+    block_on(async {
+        let s = Arc::new(MemoryStore::default());
+        let (_, claim, account) = started(&s, "cancel-paid-child", 1000).await;
+        let model = FakeModel::scripted(vec![FakeModel::decision(json!({"decision":"no_action"}))]);
+        model.lose_response.store(true, Ordering::SeqCst);
+        let rt = runtime(s.clone(), model, vec![]);
+        let child = rt
+            .spawn_child(
+                &claim,
+                "child",
+                RunSpec::new("tenant", "child", account.clone(), "child"),
+            )
+            .await
+            .unwrap();
+        let cc = s.claim(&child, "child-worker", 0, 100).await.unwrap();
+        assert!(matches!(
+            rt.drive(&cc).await.unwrap().state,
+            RunState::Waiting(_)
+        ));
+        assert_eq!(s.account(&account).await.unwrap().unknown, 1);
+        let reserved = s.account(&account).await.unwrap().reserved;
+        assert_ne!(reserved, Amount::default());
+        rt.cancel(&claim, "cancel parent").await.unwrap();
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 1);
+        assert!(matches!(
+            rt.join_child(&claim, "child").await,
+            Err(Error::Pending(_))
+        ));
+        assert_eq!(s.account(&account).await.unwrap().reserved, reserved);
+        rt.reconcile(&cc).await.unwrap();
+        rt.reconcile(&cc).await.unwrap();
+        assert_eq!(s.account(&account).await.unwrap().used, Amount::new(4, 4));
+        assert_eq!(s.account(&account).await.unwrap().unknown, 0);
+        assert_eq!(rt.model.requests.lock().unwrap().len(), 1);
+        assert!(matches!(
+            rt.join_child(&claim, "child").await,
+            Err(Error::Pending(_))
+        ));
+        // Host confirmation of stop/cleanup is separate from a cost receipt.
+        s.cleanup(&cc, Progress::Confirmed, Progress::Confirmed, 0)
+            .await
+            .unwrap();
+        let result = rt.join_child(&claim, "child").await.unwrap();
+        assert!(matches!(
+            result.state,
+            RunState::Terminal(Terminal::Cancelled(_))
+        ));
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+        assert_eq!(s.slot_count(OperationKind::Model).await, 0);
+        assert_eq!(
+            s.account(&account).await.unwrap().reserved,
+            Amount::default()
+        );
+        assert_eq!(rt.join_child(&claim, "child").await.unwrap(), result);
+    });
+}
+
+#[test]
+fn child_join_preserves_failed_outcome_instead_of_promoting_admission_to_success() {
+    block_on(async {
+        let s = Arc::new(MemoryStore::default());
+        let (_, claim, account) = started(&s, "failed-child", 1000).await;
+        let rt = runtime(
+            s.clone(),
+            FakeModel::scripted(vec![FakeModel::decision(
+                json!({"decision":"insufficient"}),
+            )]),
+            vec![],
+        );
+        let child = rt
+            .spawn_child(
+                &claim,
+                "child",
+                RunSpec::new("tenant", "child", account.clone(), "child"),
+            )
+            .await
+            .unwrap();
+        let cc = s.claim(&child, "worker-child", 0, 100).await.unwrap();
+        let failed = rt.drive(&cc).await.unwrap();
+        assert!(matches!(
+            failed.state,
+            RunState::Terminal(Terminal::Failed(_))
+        ));
+        let adopted = rt.join_child(&claim, "child").await.unwrap();
+        assert_eq!(adopted, failed);
+        assert!(adopted.completion.is_none());
+        assert_eq!(s.account(&account).await.unwrap().used, Amount::new(4, 4));
+        assert_eq!(s.slot_count(OperationKind::ChildRun).await, 0);
+    });
+}
+
+#[test]
+fn child_admission_cannot_use_external_intent_dispatch_or_send() {
+    block_on(async {
+        let s = Arc::new(MemoryStore::default());
+        let (parent, claim, account) = started(&s, "child-no-external-path", 1000).await;
+        let rt = runtime(s.clone(), FakeModel::default(), vec![]);
+        let spec = RunSpec::new("tenant", "child", account, "child");
+        let request = DispatchRequest::new(
+            "child-op",
+            OperationKind::ChildRun,
+            "child",
+            serde_json::to_value(&spec).unwrap(),
+            Amount::default(),
+        );
+        let expected = Error::Invalid("child admission requires admit_child".into());
+        assert_eq!(
+            s.begin(&claim, request.clone(), 0).await,
+            Err(expected.clone())
+        );
+        assert_eq!(
+            rt.dispatch(
+                &claim,
+                request,
+                "child",
+                |_| async { panic!("ChildRun must never invoke an external adapter") },
+                |_| async { panic!("ChildRun must never use provider lookup") }
+            )
+            .await,
+            Err(expected)
+        );
+        assert!(s.list_operations(&parent).await.unwrap().is_empty());
+        let child = rt.spawn_child(&claim, "child-op", spec).await.unwrap();
+        let op = s.operation(&parent, "child-op").await.unwrap().unwrap();
+        assert_eq!(op.child_handle().unwrap(), child);
+        assert_eq!(s.mark_sent(&claim, &op.id, 0).await, Err(Error::Conflict));
+        assert_eq!(
+            s.operation(&parent, "child-op")
+                .await
+                .unwrap()
+                .unwrap()
+                .send_count,
+            0
+        );
     });
 }

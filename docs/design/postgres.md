@@ -28,8 +28,8 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 
 ## lock順序
 
-1. 受付identityだけのadvisory lock（startのみ）。
-2. 該当session行（sessionの新規業務/確定）。
+1. 受付identityだけのadvisory lock（start/admit_child）。
+2. 該当session行（sessionの新規業務/確定）。子受付は親/子のsessionをID昇順で先にlockする。
 3. 対象Run行を`FOR UPDATE`。取消・期限/予算終端の伝播は親から子へlockし、各親のlock取得後に子を検索する。子受付も親行をlockするので、検索中に子孫が抜け落ちない。
 4. 対象口座と全祖先のIDを不変の親参照から取得し、**口座ID昇順**の一つのSELECTで`FOR UPDATE`。階層の深さによらず全呼出しが同じ順序を使う。
 5. 更新対象slot/queue、容量permit。slotの直接操作はslot keyだけのadvisory lockも使う。
@@ -45,13 +45,17 @@ queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。�
 | 境界 | 同じtransactionで確定するもの |
 |---|---|
 | 受付 | request同値照合、Run、session sequence、有限queueとpermit |
+| 子受付 | 親claimのfence、固定入力spec同値照合、新規作成時の取消/終端/絶対期限/session/tenant/口座の検査、子Run/queue/permit、ChildRun slot、親操作のAccepted結果（child Run ID）。同じtransaction内でstartの遷移を再使用し、外部送信はしない |
 | claim/renew | owner/generation/lease、Run revision、claim時のactive slotとqueue除去 |
 | begin | 現owner/取消/期限/session、全祖先予約、attempt intent、帰属参照、kind別slot |
 | mark_sent | 現ownerと新規業務のfence、送信世代/回数、再送保証の世代/scope/期限 |
 | 結果 | 同値二重精算no-op/異値拒否、result/usage、全祖先の精算・unknown、slot解放、配送状態 |
+| wait | Waitingの保存と親の実行用Run slot/permit解放。ChildRun/有料operationのslot・未精算予約は保持 |
 | checkpoint | schema検査、Run revision CAS、履歴/cursor |
 | finalize | 未確定操作・予算・receipt/hash/根拠/設定/検証器版、session context、completion/出力/Run終端 |
 | 取消/回収 | 子孫伝播、queue除去、取消/停止/cleanupの独立状態。未精算予約は保持 |
+
+親Policyの認可もtransaction外で行う。admit_childの新規受付と既存要求の再照会を分け、取消し・期限後の既存受付/精算はowner fenceで継続する。祖先Sessionと同じSessionを子が使用する受付は拒否する。祖先のSession/親関係は不変なので参照だけを取得し、逆順の祖先Run lockは追加しない。
 
 外部model/toolのI/O中はDB transactionを保持しない。`synchronous_commit=on`でWAL flush後だけ成功を返し、保存要求の受領・memory更新と耐久保存完了を区別する。SQL/接続/COMMIT応答不明はStorageとし、安定identityから再照会する。自動再送はしない。更新のlock_timeout=5秒、statement_timeout=30秒。disk喪失・非同期failover・任意外部APIとのexactly-onceは保証しない。
 
@@ -99,11 +103,12 @@ AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_account
 
 ## Host-owned transaction
 
-`lock_account_in`、`start_in`、`create_account_in`、`create_account_with_policy_in`、`terminate_in`、
+`lock_account_in`、`start_in`、`admit_child_in`、`create_account_in`、`create_account_with_policy_in`、`terminate_in`、
 `finalize_in` は `&mut sqlx::Transaction<'_, Postgres>` に参加する公開 API。
 `start_in` は RunSpec.account で既存口座を指定でき、RunSpec.parent で親子関係を
 指定する。独立した後続 Run も同じ口座を共有できる。受付の同 key・同内容は
 同じ Run を返し、異内容は Conflict。親の期限適用前の受付内容（request_spec）を保存・比較し、元の child spec を再実行できる。
+`admit_child_in(tx, claim, operation_key, spec, now)` は通常の子受付と同じ親fence・固定入力spec照合・slot・親操作保存を一つのsavepoint内で行う。固定入力は親のChildRun操作、実効受付specは子のrequest_specへ保存する。受付identityは親Run ID・操作key・元request_keyのJSON tupleで分離する。
 通常の trait API と同じ遷移・lock・保存処理を使い、hook/callback は持たない。
 
 host は同じ transaction で独自の SQL を実行し、最後に commit/rollback する。
@@ -121,3 +126,5 @@ host は commit 前にこれらを弱めず、外部 I/O 中は transaction を�
 `lock_account_in(tx, tenant, id)` は同じ transaction で対象口座と全祖先を口座ID昇順に FOR UPDATE し、対象の Account（tenant・保存された明示的 policy・limit・現在残高）を返す。対象 tenant の不一致は PermissionDenied、不在は NotFound。policy や上限を既定値へ置換しない。lock は外側の commit/rollback まで保持する。
 
 既存 Run を変更する transaction は上記の session → Run → 口座順を守る。既存 Run の finalize_in 等より先に口座を lock しない。口座を先に lock して後続 start_in を行う場合は、既存 Run の親・session を取得しない独立 Run の受付に限定する。同じ transaction 内の未 commit 新規口座・Run は使用できる。複数の独立した口座階層を逆順で追加 lock しない。
+
+子受付の停止境界は`child_restart_across_processes`で検証する。試験adapterが通常のspawn_child/admit_child_inを呼び、子・親操作・queue/slotの未commit書込み後に外側transactionを保持して別OS processからSIGKILLする。DBの親行lock取得をrollback完了の同期証拠とし、部分的な残存がないことを検査する。commit後・応答前、子正常完了後・親join/採用/精算前でもkillし、独立process/poolで同じchild ID・保存completion・一回の親確定と親子の有料精算に収束する。sleepやtimeout延長を同期点には使わない。

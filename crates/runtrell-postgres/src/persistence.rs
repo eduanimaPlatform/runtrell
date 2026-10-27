@@ -18,6 +18,7 @@ pub(crate) enum Mode {
 pub(crate) enum Scope<'a> {
     Run(&'a RunHandle, Mode),
     Start(&'a RunSpec),
+    Child(&'a RunHandle, &'a str, &'a RunSpec),
     Request(&'a RunSpec),
     Account(Option<&'a str>),
     LockedAccount(&'a str),
@@ -179,7 +180,89 @@ impl PgStore {
         }
         Ok(())
     }
+    async fn load_parent_spec(&self, conn: &mut PgConnection, h: &RunHandle) -> Result<RunSpec> {
+        let value: Value = sqlx::query_scalar(&format!(
+            "SELECT spec FROM {}.runs WHERE tenant=$1 AND id=$2",
+            self.schema
+        ))
+        .bind(&h.tenant)
+        .bind(&h.id)
+        .fetch_optional(conn)
+        .await
+        .map_err(storage)?
+        .ok_or(Error::NotFound)?;
+        decode(value)
+    }
+    async fn load_child(
+        &self,
+        conn: &mut PgConnection,
+        h: &RunHandle,
+        operation_key: &str,
+        spec: &RunSpec,
+        write: bool,
+    ) -> Result<Ledger> {
+        // Lock identity, both sessions in stable order, parent, accounts, then permits.
+        // Reusing scoped loaders below only reacquires locks already held by this tx.
+        let parent = self.load_parent_spec(conn, h).await?;
+        let effective = engine::child_spec(h, operation_key, spec, &parent);
+        let spec = &effective;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!(
+                "{}:request:{}",
+                self.schema,
+                json!([spec.tenant, spec.principal, spec.request_key])
+            ))
+            .execute(&mut *conn)
+            .await
+            .map_err(storage)?;
+        let sessions: std::collections::BTreeSet<_> =
+            [parent.session.as_deref(), spec.session.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+        let mut locked_sessions = Ledger::default();
+        for id in sessions {
+            self.session(conn, &mut locked_sessions, &h.tenant, Some(id), write)
+                .await?;
+        }
+        let request = DispatchRequest::new(
+            operation_key,
+            OperationKind::ChildRun,
+            "child",
+            Value::Null,
+            Amount::default(),
+        );
+        let mut parent_state = Box::pin(self.load(conn, Scope::Begin(h, &request), write)).await?;
+        // Session/parent membership is immutable. Read the lineage to reject
+        // session predecessor cycles without locking ancestors in reverse order.
+        let mut ancestor = parent.parent.clone();
+        while let Some(h) = ancestor {
+            let values = self
+                .rows(
+                    conn,
+                    "runs",
+                    "tenant=$1 AND id=$2",
+                    &[&h.tenant, &h.id],
+                    false,
+                )
+                .await?;
+            let value = values.into_iter().next().ok_or(Error::NotFound)?;
+            let run = load_run(&mut parent_state, value)?;
+            ancestor = run.spec.parent.clone();
+            parent_state.runs.insert(key(&h), run);
+        }
+        let child_state = Box::pin(self.load(conn, Scope::Start(spec), write)).await?;
+        parent_state.runs.extend(child_state.runs);
+        parent_state.requests.extend(child_state.requests);
+        parent_state.accounts.extend(child_state.accounts);
+        parent_state.sessions.extend(child_state.sessions);
+        Ok(parent_state)
+    }
     async fn load(&self, conn: &mut PgConnection, scope: Scope<'_>, write: bool) -> Result<Ledger> {
+        if let Scope::Child(h, operation_key, spec) = &scope {
+            // Keep child-admission state off every ordinary driver/store future's stack.
+            return Box::pin(self.load_child(conn, h, operation_key, spec, write)).await;
+        }
         let mut s = Ledger::default();
         let (scope, selection, selected_slot) = match scope {
             Scope::Attempt(h, id, budget) => (
@@ -200,7 +283,7 @@ impl PgStore {
             scope => (scope, Selection::All, None),
         };
         match scope {
-            Scope::Attempt(..) | Scope::Begin(..) | Scope::Logical(..) => {
+            Scope::Attempt(..) | Scope::Begin(..) | Scope::Logical(..) | Scope::Child(..) => {
                 unreachable!("normalized scope")
             }
 

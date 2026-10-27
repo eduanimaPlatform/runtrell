@@ -224,8 +224,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 } else if id == "REC-08" {
                     (
-                        "postgres/src/engine.rs::{start_in,create_account_in,create_account_with_policy_in,terminate_in,finalize_in}; persistence.rs::tx_in",
-                        "postgres/tests/transaction.rs: host SQLとRun/口座のcommit・rollback・SQL失敗・同値受付/異値拒否・共有口座・親子Run・終端/後続Run境界・別process再open。耐久成功はhostのouter commit後。電源断/failoverは未検証",
+                        "postgres/src/engine.rs::{start_in,admit_child_in,create_account_in,create_account_with_policy_in,terminate_in,finalize_in}; persistence.rs::tx_in",
+                        "postgres/tests/{transaction,child_restart}.rs: host SQLとRun/口座のcommit・rollback・SQL失敗・同値受付/異値拒否・共有口座・親子Run・終端/後続Run境界・別process再open。子受付のfence/queue/slot/操作結果の原子性・savepoint rollback・spawn_child経由の未commit書込み後/commit応答前/子完了後のprocess kill、同じ子・保存completion・親join/確定・一回精算。耐久成功はhostのouter commit後。電源断/failoverは未検証",
                     )
                 } else if ["RUN-06", "RUN-07", "A11", "A19", "VAL-06"].contains(&id.as_str()) {
                     (

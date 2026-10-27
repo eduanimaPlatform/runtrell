@@ -669,6 +669,26 @@ pub struct Operation {
     pub unsettled_result: Option<ExternalResult>,
 }
 impl Operation {
+    /// The child receipt is a Run identity, never this operation's identity.
+    pub fn child_handle(&self) -> Result<RunHandle> {
+        if self.request.kind != OperationKind::ChildRun {
+            return Err(Error::Conflict);
+        }
+        let handle = match &self.result {
+            Some(ExternalResult::Accepted { external_id }) => RunHandle {
+                tenant: self.run.tenant.clone(),
+                id: external_id.clone(),
+            },
+            Some(ExternalResult::Applied { output, .. }) if self.settled => {
+                serde_json::from_value(output.clone()).map_err(|_| Error::Conflict)?
+            }
+            _ => return Err(Error::Conflict),
+        };
+        if handle.tenant != self.run.tenant || handle.id == self.id {
+            return Err(Error::Conflict);
+        }
+        Ok(handle)
+    }
     /// A result persisted by a fenced observer, sufficient for this attempt's
     /// pinned price and quantity contract. Late unfenced observations are excluded.
     pub fn saved_settlement_result(&self) -> Result<Option<&ExternalResult>> {
@@ -989,6 +1009,20 @@ pub trait RunStore: Send + Sync {
     /// Atomically admit a request or return the run for the same original spec;
     /// concurrent equal requests must never create more than one run.
     fn start(&self, spec: RunSpec) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
+    /// Fence the parent and atomically persist a child, queue entry, lifetime slot,
+    /// and its handle in the parent operation. Equal input is idempotent; any
+    /// changed spec (including account/config) conflicts. Existing receipts remain
+    /// readable after cancellation/deadline; only new creation requires an open
+    /// parent. Ancestor Session reuse is rejected. No external send occurs.
+    /// Trusted persistence boundary: callers must authorize through Runtime or
+    /// host policy before entering the transaction; the store invokes no policy.
+    fn admit_child(
+        &self,
+        claim: &Claim,
+        operation_key: &str,
+        spec: RunSpec,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
     fn claim(
         &self,
@@ -1097,7 +1131,8 @@ pub trait OperationStore: Send + Sync {
         scope: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
-    /// Atomic reservation across all ancestors plus intent; no I/O before success.
+    /// Atomic reservation across all ancestors plus external intent; no I/O before
+    /// success. ChildRun is rejected: internal children must use admit_child.
     fn begin(
         &self,
         claim: &Claim,
