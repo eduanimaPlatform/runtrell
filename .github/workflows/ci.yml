@@ -78,7 +78,11 @@ jobs:
             cargo check -p runtrell-providers --locked --no-default-features --features "$feature"
           done
       - name: Unit, integration and doctests
-        run: cargo test --workspace --locked ${{ matrix.args }}
+        # A nested Cargo build in the target runner would contend for Cargo's lock.
+        # Build the test-only parent before running any target executable.
+        run: |
+          cargo build -p runtrell-postgres --locked --example test_db_runner
+          cargo test --workspace --locked ${{ matrix.args }}
       - name: Public examples
         run: |
           cargo run -p runtrell-testkit --locked ${{ matrix.example_args }} --example support_decision

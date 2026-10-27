@@ -16,6 +16,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+libc = "0.2"
 runtrell-testkit = { path = "../runtrell-testkit", version = "0.1.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["fmt"] }

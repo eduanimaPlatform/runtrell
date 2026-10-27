@@ -136,3 +136,41 @@ host は commit 前にこれらを弱めず、外部 I/O 中は transaction を�
 既存 Run を変更する transaction は上記の session → Run → 口座順を守る。既存 Run の finalize_in 等より先に口座を lock しない。口座を先に lock して後続 start_in を行う場合は、既存 Run の親・session を取得しない独立 Run の受付に限定する。同じ transaction 内の未 commit 新規口座・Run は使用できる。複数の独立した口座階層を逆順で追加 lock しない。
 
 子受付の停止境界は`child_restart_across_processes`で検証する。試験adapterが通常のspawn_child/admit_child_inを呼び、子・親操作・queue/slotの未commit書込み後に外側transactionを保持して別OS processからSIGKILLする。DBの親行lock取得をrollback完了の同期証拠とし、部分的な残存がないことを検査する。commit後・応答前、子正常完了後・親join/採用/精算前でもkillし、独立process/poolで同じchild ID・保存completion・一回の親確定と親子の有料精算に収束する。sleepやtimeout延長を同期点には使わない。
+
+## 試験DB回収のローカル検証（2026-10-27）
+
+所有境界・起動・回収・環境別設定と正式18コマンドは[README](../../README.md#local-validation)を参照。
+基準は `cb9b22c`、Rust 1.98.0、PostgreSQL 18、ローカル `/dev/shm=1 GiB`。
+試験環境の runner を追加し、ライブラリの schema／pool close と再開処理は変更していない。
+正式18コマンドはすべて成功し、test 2コマンドの追加反復を含む20実行が終了コード0。
+runnerの最終修正後にfmtとworkspace clippyの既定・featuresを再実行し、いずれも成功した。
+
+workspace test を既定→features→既定→featuresの順に実行した実測値：
+
+| 終了時点 | maintenance DBのschema数 | 全client接続数（観測用接続含む） | 所有suite DB残留 | libtest成功／失敗／ignored |
+|---|---:|---:|---:|---|
+| 開始前 | 323 | 1 | 0 | — |
+| 既定1回目 | 325 | 18 | 0 | 816 / 0 / 12 |
+| features 1回目 | 324 | 9 | 0 | 881 / 0 / 13 |
+| 既定2回目 | 323 | 1 | 0 | 816 / 0 / 12 |
+| features 2回目 | 323 | 9 | 0 | 881 / 0 / 13 |
+
+共有サーバーの別jobが同時に動作しており、全schema／接続数にはその変動を含む。
+suite終了後の所有DBは各回0で、そのDBへの残留接続も0。開始時のschema名一覧は保持され、
+全体の増減をrunnerの資源増加・削除へ帰属していない。containerは11→11、volumeは34→34で
+一覧も同一。このrunnerが作成・削除したcontainer／volumeは0。
+成功数はlibtest出力の集計で、子processの報告やfeature別の重複を含む。
+1組1,697、2組3,394を独立した試験数・保証数としない。uniqueな試験identityの総数は未集計。
+ignoredは通常suiteで実行していない隔離試験等であり、成功件数へ含めない。
+
+別途、正常終了・通常失敗・SIGABRTを各2回実行し、各回の所有DBを回収した。
+Rust panicは終了コード101を返し、当該DB残留0を確認した。
+管理runnerのみSIGKILLした後は生存中の子のDBを保護し、子もSIGKILLした後の次回実行で
+回収した。並行suite、同prefixでも所有記録のないDB、異なるendpointのintentは保持した。
+DB作成後comment前の停止相当（完全なintent＋未comment DB）は回収し、
+DB作成前の停止相当（intentのみ）も回収した。実際の電源断・Postgres自体の再起動ではない。
+
+生ログ・probe source・snapshotはローカル `target/rt-db-validation/` に保存し、保持期限は
+2026-11-03とする。確認後にこのdirectoryだけを削除する。失敗DBを証拠目的では保存しない。
+SIGKILLからの回収に必要な `target/test-db-intents/` はこのログdirectoryと別であり、
+回収前に削除しない。Hosted CI、実Linux／macOS隔離試験の追加実行はこの記録の対象外。

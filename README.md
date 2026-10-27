@@ -152,24 +152,103 @@ The pinned toolchain is Rust 1.98.0.
 
 ```sh
 cargo build --workspace --locked
-# Use a dedicated disposable local PostgreSQL container/database.
+# One local test server (also safe to share with other test jobs).
 # The password below is only an example for that local test container.
+docker run -d --name runtrell-pg --shm-size=1g \
+  --label org.runtrell.test-server=local \
+  -e POSTGRES_PASSWORD=runtrell -p 127.0.0.1:55433:5432 postgres:18
 export RUNTRELL_TEST_DATABASE_URL='postgres://postgres:runtrell@127.0.0.1:55433/postgres'
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+export CARGO_INCREMENTAL=0
+cargo build -p runtrell-postgres --locked --example test_db_runner
+# Point RIG_SNAPSHOT at a checkout of the pinned Rig commit listed below.
+export RIG_SNAPSHOT=/path/to/rig-snapshot
+# Formal local validation: 18 commands. Run the two test commands twice in a row
+# when checking resource stability (20 executions, not 20 distinct commands).
 cargo fmt --check
-cargo run -p runtrell-testkit --example support_decision
-cargo run -p runtrell-testkit --example alternate_host
-cargo run -p runtrell-postgres --example chat_host # disposable PostgreSQL required
-cargo run -p xtask -- trace
-cargo run -p xtask -- hashes
-cargo package --workspace --list --allow-dirty # パッケージ内容の一覧確認
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo clippy --workspace --locked --all-targets --features runtrell/python,runtrell-testkit/python,runtrell-providers/openai,runtrell-providers/gemini,runtrell-providers/openrouter -- -D warnings
+cargo test --workspace --locked
+cargo test --workspace --locked --features runtrell/python,runtrell-testkit/python,runtrell-providers/openai,runtrell-providers/gemini,runtrell-providers/openrouter
+cargo run -p runtrell-testkit --locked --example support_decision
+cargo run -p runtrell-testkit --locked --example alternate_host
+cargo run -p runtrell-postgres --locked --example chat_host
+cargo run -p runtrell-testkit --locked --features runtrell/python,runtrell-testkit/python --example support_decision
+cargo run -p runtrell-testkit --locked --features runtrell/python,runtrell-testkit/python --example alternate_host
+cargo run -p runtrell-postgres --locked --features runtrell/python,runtrell-testkit/python --example chat_host
+cargo check -p runtrell-providers --locked --no-default-features --features openai
+cargo check -p runtrell-providers --locked --no-default-features --features gemini
+cargo check -p runtrell-providers --locked --no-default-features --features openrouter
+cargo run -p xtask --locked -- api-doc
+cargo run -p xtask --locked -- trace
+cargo run -p xtask --locked -- hashes
+git diff --check
+# Optional package inventory:
+cargo package --workspace --list --allow-dirty
 ```
 
 PostgreSQL tests require `RUNTRELL_TEST_DATABASE_URL`; they fail rather than skip
-when it is absent. Tests create unique schemas and write test records. Point this
-variable only at a disposable test database. To run just the adapter tests, use
-`cargo test -p runtrell-postgres` with the same variable.
+when it is absent. Point it only at a test server, using a role with CREATEDB.
+Build the test-only `test_db_runner` example before running tests (and rebuild it
+after editing its source). The repository's Unix Cargo target runner gives
+**each binary/example invocation** a disposable
+database. Its children inherit that database, so process-kill/restart tests and
+the multi-stage `chat_host` keep their data until the parent suite has finished.
+The runner then removes its database on success, test panic or ordinary failure;
+`PgStore::close` retains its ordinary pool-only behavior. There is no automatic
+schema deletion in the library. To run just the adapter tests, use
+`cargo test -p runtrell-postgres` with the same variable. Run Cargo from the repo
+root; overriding Cargo's target runner bypasses this lifecycle.
+
+Cleanup is restricted to runner-created databases: the name, creation timestamp,
+ownership comment, endpoint, database owner, process liveness and database advisory
+lock must agree. A durable intent in `target/test-db-intents/` records the exact
+name, endpoint and owner before creation, covering SIGKILL before the database
+comment is written. Keep these small ownership files until cleanup completes.
+The next invocation reclaims abandoned owned databases after SIGKILL, while
+preserving another running suite. Unmarked databases without a matching local
+intent and all schemas in the configured source database are untouched, including
+older test leftovers. Ambiguous process liveness (including a reused PID) is
+preserved for safety; retry after that process exits. Tests must join their
+children; detached background jobs are outside this runner's lifecycle.
+The runner does not create or delete containers/volumes and does not retain failed
+test data as evidence. Keep failure logs in an explicitly chosen location with a
+retention deadline if needed. A connection/configuration error fails closed.
+
+Local configuration: PostgreSQL `postgres:18`, 1 GiB `/dev/shm`, server-default
+PostgreSQL parallel settings and Cargo/libtest's default test parallelism. Run
+workspace test commands sequentially when measuring residual resources.
+The measured local settings are `max_connections=100`, `max_worker_processes=8`,
+`max_parallel_workers=8` and `max_parallel_workers_per_gather=2`.
+Hosted contracts keep the job-exclusive `postgres:18` service in
+[ci.yml](.github/workflows/ci.yml), Docker's default shared memory (64 MiB), and
+the same default parallel settings; no local 1 GiB requirement is imposed on CI.
+The service is removed by the hosted job lifecycle; the target runner also
+reclaims each suite database. On a shared local server, do not remove the server
+container or its volume while another job uses it. For a server created by the
+command above, first stop all consuming jobs and verify the image and ownership
+label with `docker inspect runtrell-pg`; only then use
+`docker stop runtrell-pg` and `docker rm -v runtrell-pg` to remove that owned server
+and its anonymous volume. Do not apply this to an existing unlabelled/shared server.
+Database cleanup is automatic
+on the next `cargo test`/`cargo run`; no broad schema/container sweep is required.
+
+The earlier incident reported 3,661 schemas and a shared-memory allocation
+failure. Shared-memory exhaustion is supported by that error; schema count alone
+does not establish equal resident shared-memory allocations. Container recreation
+and increasing `/dev/shm` happened together, so their individual contributions
+have not been isolated. Owned database cleanup prevents accumulation; increasing
+shared memory alone does not.
+
+For before/after measurements on the shared local server:
+
+```sh
+docker exec runtrell-pg psql -U postgres -c "SELECT count(*) FROM pg_namespace"
+docker exec runtrell-pg psql -U postgres -c "SELECT datname FROM pg_database WHERE datname LIKE 'rt_suite_%'"
+docker exec runtrell-pg psql -U postgres -c "SELECT datname, count(*) FROM pg_stat_activity WHERE backend_type='client backend' GROUP BY datname"
+```
+
+Compare owned databases/connections separately from other jobs' activity; the
+maintenance database's schema count alone does not measure suite databases.
 
 Verified scope includes fake/in-memory contracts, local filesystem behavior,
 PostgreSQL transactions, SQL rollback, multi-client CAS, reopening ledgers and
