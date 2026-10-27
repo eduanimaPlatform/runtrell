@@ -14,7 +14,10 @@ use std::{
 };
 mod engine;
 mod execution;
+mod observation;
 mod persistence;
+pub use observation::storage_error;
+use observation::storage_error as storage;
 
 #[derive(Clone)]
 pub struct PgStore {
@@ -76,20 +79,24 @@ impl PgStore {
             capacity,
             fail_next: Arc::default(),
         };
-        let mut tx = store.pool.begin().await.map_err(storage)?;
-        sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit = on; SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s'").await.map_err(storage)?;
+        let mut tx = store
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::open", e))?;
+        sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit = on; SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s'").await.map_err(|e| storage("PgStore::open", e))?;
         // Serialize concurrent initializers, including CREATE SCHEMA/INDEX catalog writes.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("runtrell-schema:{}", store.schema))
             .execute(&mut *tx)
             .await
-            .map_err(storage)?;
+            .map_err(|e| storage("PgStore::open", e))?;
         sqlx::Executor::execute(
             &mut *tx,
             format!("CREATE SCHEMA IF NOT EXISTS {}", store.schema).as_str(),
         )
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::open", e))?;
         sqlx::Executor::execute(
             &mut *tx,
             include_str!("../migrations/0001.sql")
@@ -97,17 +104,17 @@ impl PgStore {
                 .as_str(),
         )
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::open", e))?;
         let config = capacity_value(&store.capacity);
         sqlx::query(&format!("INSERT INTO {}.schema_config(singleton,version,capacity) VALUES(true,4,$1) ON CONFLICT DO NOTHING", store.schema))
-            .bind(&config).execute(&mut *tx).await.map_err(storage)?;
+            .bind(&config).execute(&mut *tx).await.map_err(|e| storage("PgStore::open", e))?;
         let (version, saved): (i32, Value) = sqlx::query_as(&format!(
             "SELECT version,capacity FROM {}.schema_config WHERE singleton",
             store.schema
         ))
         .fetch_one(&mut *tx)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::open", e))?;
         if version != 4 {
             return Err(Error::Unsupported("postgres schema".into()));
         }
@@ -115,7 +122,7 @@ impl PgStore {
             return Err(Error::Conflict);
         }
         store.initialize_capacity(&mut tx).await?;
-        tx.commit().await.map_err(storage)?;
+        tx.commit().await.map_err(|e| storage("PgStore::open", e))?;
         Ok(store)
     }
 
@@ -133,11 +140,15 @@ impl PgStore {
         now: u64,
     ) -> Result<()> {
         // A separate durable observation cannot mutate the operational ledger.
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::retain_late_result", e))?;
         sqlx::query("SET LOCAL synchronous_commit = on")
             .execute(&mut *tx)
             .await
-            .map_err(storage)?;
+            .map_err(|e| storage("PgStore::retain_late_result", e))?;
         let op: Option<(Value,)> = sqlx::query_as(&format!(
             "SELECT to_jsonb(a) FROM {}.attempts a WHERE id=$1",
             self.schema
@@ -145,48 +156,55 @@ impl PgStore {
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::retain_late_result", e))?;
         let op: Operation = decode(op.ok_or(Error::NotFound)?.0)?;
         if op.run != c.run {
             return Err(Error::PermissionDenied);
         }
-        let value = serde_json::to_value(result).map_err(storage)?;
+        let value =
+            serde_json::to_value(result).map_err(|e| storage("PgStore::retain_late_result", e))?;
         sqlx::query(&format!("INSERT INTO {}.late_results(operation,generation,worker,digest,observed_at,result) VALUES($1,$2,$3,$4,$5::text::numeric,$6) ON CONFLICT DO NOTHING", self.schema))
             .bind(id).bind(c.generation.to_string()).bind(&c.worker).bind(digest(&value)).bind(now.to_string()).bind(value)
-            .execute(&mut *tx).await.map_err(storage)?;
-        tx.commit().await.map_err(storage)
+            .execute(&mut *tx).await.map_err(|e| storage("PgStore::retain_late_result", e))?;
+        tx.commit()
+            .await
+            .map_err(|e| storage("PgStore::retain_late_result", e))
     }
     /// Current owner can inspect observations without treating them as authoritative results.
     pub async fn late_results(&self, c: &Claim, now: u64) -> Result<Vec<LateResult>> {
         self.check(c, now, false).await?;
         let rows = sqlx::query(&format!("SELECT l.operation,l.generation,l.worker,l.observed_at::text AS at,l.result FROM {}.late_results l JOIN {}.attempts r ON r.id=l.operation WHERE r.run=$1 ORDER BY l.observed_at,l.digest", self.schema,self.schema))
-            .bind(serde_json::to_value(&c.run).map_err(storage)?).fetch_all(&self.pool).await.map_err(storage)?;
+            .bind(serde_json::to_value(&c.run).map_err(|e| storage("PgStore::late_results", e))?).fetch_all(&self.pool).await.map_err(|e| storage("PgStore::late_results", e))?;
         rows.into_iter()
             .map(|r| {
                 Ok(LateResult {
-                    operation: r.try_get("operation").map_err(storage)?,
+                    operation: r
+                        .try_get("operation")
+                        .map_err(|e| storage("PgStore::late_results", e))?,
                     generation: r
                         .try_get::<String, _>("generation")
-                        .map_err(storage)?
+                        .map_err(|e| storage("PgStore::late_results", e))?
                         .parse()
-                        .map_err(storage)?,
-                    worker: r.try_get("worker").map_err(storage)?,
+                        .map_err(|e| storage("PgStore::late_results", e))?,
+                    worker: r
+                        .try_get("worker")
+                        .map_err(|e| storage("PgStore::late_results", e))?,
                     observed_at: r
                         .try_get::<String, _>("at")
-                        .map_err(storage)?
+                        .map_err(|e| storage("PgStore::late_results", e))?
                         .parse()
-                        .map_err(storage)?,
-                    result: decode(r.try_get("result").map_err(storage)?)?,
+                        .map_err(|e| storage("PgStore::late_results", e))?,
+                    result: decode(
+                        r.try_get("result")
+                            .map_err(|e| storage("PgStore::late_results", e))?,
+                    )?,
                 })
             })
             .collect()
     }
 }
-fn storage(_: impl std::fmt::Display) -> Error {
-    Error::Storage
-}
 fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
-    serde_json::from_value(v).map_err(storage)
+    serde_json::from_value(v).map_err(|e| storage("PgStore::decode", e))
 }
 fn capacity_value(c: &Capacity) -> Value {
     json!({"global":c.global,"tenant":c.tenant,"run":c.run,"queue":c.queue,"tenant_queue":c.tenant_queue})

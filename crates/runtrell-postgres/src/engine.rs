@@ -259,7 +259,7 @@ fn admit_child(
         operation_key,
         OperationKind::ChildRun,
         "child",
-        serde_json::to_value(&spec).map_err(|_| Error::Storage)?,
+        serde_json::to_value(&spec).map_err(|e| storage("PgStore::admit_child", e))?,
         Amount::default(),
     );
     let id = format!("{}:{}:1", key(&c.run), operation_key);
@@ -355,7 +355,11 @@ impl RunStore for PgStore {
         .await
     }
     async fn start(&self, spec: RunSpec) -> Result<RunHandle> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::start", e))?;
         let value = self.start_in(&mut tx, spec).await?;
         self.commit(tx).await?;
         Ok(value)
@@ -367,7 +371,11 @@ impl RunStore for PgStore {
         spec: RunSpec,
         now: u64,
     ) -> Result<RunHandle> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::admit_child", e))?;
         let child = self
             .admit_child_in(&mut tx, c, operation_key, spec, now)
             .await?;
@@ -476,13 +484,21 @@ impl RunStore for PgStore {
         .await
     }
     async fn terminate(&self, c: &Claim, t: Terminal, now: u64) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::terminate", e))?;
         self.terminate_in(&mut tx, c, t, now).await?;
         self.commit(tx).await?;
         Ok(())
     }
     async fn finalize(&self, c: &Claim, completion: Completion, now: u64) -> Result<()> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::finalize", e))?;
         self.finalize_in(&mut tx, c, completion, now).await?;
         self.commit(tx).await?;
         Ok(())
@@ -542,7 +558,11 @@ impl BudgetAuthority for PgStore {
         parent: Option<String>,
         policy: AccountPolicy,
     ) -> Result<String> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::create_account_with_policy", e))?;
         let value = self
             .create_account_with_policy_in(&mut tx, tenant, limit, parent, policy)
             .await?;

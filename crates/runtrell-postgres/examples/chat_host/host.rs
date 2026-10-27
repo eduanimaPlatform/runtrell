@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Example-only host storage. No changes to the runtime schema or API.
 use runtrell::*;
-use runtrell_postgres::PgStore;
+use runtrell_postgres::{PgStore, storage_error as storage};
 use runtrell_testkit::{
     BusinessTool, DecisionFinalizer, DecisionValidator, FakeModel, FakePolicy, TestClock,
 };
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    ConnectOptions, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
+use std::str::FromStr;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -43,17 +47,17 @@ struct Host {
     store: Arc<PgStore>,
     schema: String,
 }
-fn storage(_: sqlx::Error) -> Error {
-    Error::Storage
-}
-
 impl Host {
     async fn open(schema: &str) -> Self {
         let url = std::env::var("RUNTRELL_TEST_DATABASE_URL")
             .expect("disposable PostgreSQL required; chat contracts never skip");
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect(&url)
+            .connect_with(
+                PgConnectOptions::from_str(&url)
+                    .unwrap()
+                    .disable_statement_logging(),
+            )
             .await
             .unwrap();
         // PgStore validates the identifier before the example interpolates it.
@@ -83,12 +87,16 @@ impl Host {
         if !authorized {
             return Err(Error::PermissionDenied);
         }
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("chat_host::accept", e))?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("chat-host:{}", self.schema))
             .execute(&mut *tx)
             .await
-            .map_err(storage)?;
+            .map_err(|e| storage("chat_host::accept", e))?;
         let old: Option<(String, Value)> = sqlx::query_as(&format!(
             "SELECT body,run FROM {}.chat_messages WHERE id=$1",
             self.schema
@@ -96,16 +104,16 @@ impl Host {
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("chat_host::accept", e))?;
         if let Some((saved, run)) = old {
             if saved != body {
                 return Err(Error::Conflict);
             }
-            return serde_json::from_value(run).map_err(|_| Error::Storage);
+            return serde_json::from_value(run).map_err(|e| storage("chat_host::accept", e));
         }
         let saved: Vec<(String, Value)> = sqlx::query_as(&format!(
             "SELECT body,response FROM {}.chat_messages WHERE response IS NOT NULL ORDER BY ordinal", self.schema))
-            .fetch_all(&mut *tx).await.map_err(storage)?;
+            .fetch_all(&mut *tx).await.map_err(|e| storage("chat_host::accept", e))?;
         let revision = saved.len() as u64;
         // Only safe, host-owned text crosses Run boundaries. Never copy the
         // previous Run's checkpoint, protocol or opaque provider envelopes.
@@ -136,8 +144,10 @@ impl Host {
         .bind(serde_json::to_value(&run).unwrap())
         .execute(&mut *tx)
         .await
-        .map_err(storage)?;
-        tx.commit().await.map_err(storage)?;
+        .map_err(|e| storage("chat_host::accept", e))?;
+        tx.commit()
+            .await
+            .map_err(|e| storage("chat_host::accept", e))?;
         Ok(run)
     }
 
@@ -156,7 +166,7 @@ impl Host {
         .bind(serde_json::to_value(run).unwrap())
         .execute(&self.pool)
         .await
-        .map_err(storage)?
+        .map_err(|e| storage("chat_host::publish", e))?
         .rows_affected();
         if changed != 1 {
             return Err(Error::Conflict);

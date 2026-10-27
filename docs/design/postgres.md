@@ -1,5 +1,13 @@
 # PostgreSQL adapter（schema 4）
 
+Storage failure events are emitted at the PostgreSQL adapter boundary. Each event records a static operation identifier, a five-character SQLSTATE when available, an allowlisted failure class, and a generated correlation ID for that diagnostic event. The public `Error::Storage` result carries no diagnostic payload; hosts must attach a safe request/run correlation field on the active tracing span when they need to group events across a request. The adapter does not log SQL text, bound values, database message or DETAIL, error Display/Debug output, connection strings, or input data.
+
+The ERROR event target is `runtrell_postgres::storage`, with the fixed message `storage failure` and fields `operation`, `sqlstate` (empty when unavailable), `class`, and `correlation_id` (UUID). Classes are limited to `constraint`, `data_exception`, `transaction`, `connection`, `database`, `pool`, `configuration`, `decode`, `serialization`, and `conversion`.
+
+The host owns the `PgPool` and tracing subscriber. It must disable sqlx statement logging on its connection options and filter out sqlx's own log targets from ordinary logs; those upstream events can contain SQL or PostgreSQL NOTICE text outside this adapter's control. Keep `runtrell_postgres::storage` enabled. No dynamic identifiers or request values may be passed as adapter operation names.
+
+For example, a `tracing_subscriber::filter::Targets` filter can set `sqlx` to `LevelFilter::OFF` while enabling `runtrell_postgres::storage` at `LevelFilter::ERROR`. The `sqlx` target prefix covers query and `sqlx::postgres::notice` events. `storage_canary_host_filter_suppresses_sqlx_query_and_notice` exercises this at a TRACE default level with both canary SQL and a PostgreSQL warning.
+
 RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、空DBから最新schemaを作るmigrationに置き換える。リリース前のため旧schemaの検出・移行は持たない（空DBから作る）。DB schema version=4と、既存のRun/checkpoint wire schema=1は別の版である。
 
 `PgStore::open`はhostのPgPool・schema名・Capacityを受け、初期化のCOMMIT後に返る。schema名はASCII英数字/underscore、先頭は英字/underscore、最大63 bytes、`pg_` prefix不可。識別子を検証・引用し、値はbindする。再open時のCapacity不一致はConflict。adapterはDocker操作や接続情報の自動読込みをしない。

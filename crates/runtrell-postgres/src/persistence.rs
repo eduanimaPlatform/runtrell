@@ -42,14 +42,18 @@ impl PgStore {
         scope: Scope<'_>,
         f: impl FnOnce(&Ledger) -> Result<R>,
     ) -> Result<R> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::read", e))?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *tx)
             .await
-            .map_err(storage)?;
+            .map_err(|e| storage("PgStore::read", e))?;
         let state = self.load(&mut tx, scope, false).await?;
         let value = f(&state)?;
-        tx.commit().await.map_err(storage)?;
+        tx.commit().await.map_err(|e| storage("PgStore::read", e))?;
         Ok(value)
     }
     pub(crate) async fn tx<R>(
@@ -57,7 +61,11 @@ impl PgStore {
         scope: Scope<'_>,
         f: impl FnOnce(&mut Ledger) -> Result<R>,
     ) -> Result<R> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::tx", e))?;
         let value = self.tx_in(&mut tx, scope, f).await?;
         self.commit(tx).await?;
         Ok(value)
@@ -69,27 +77,33 @@ impl PgStore {
         f: impl FnOnce(&mut Ledger) -> Result<R>,
     ) -> Result<R> {
         // A failed call must not leave partial permits or writes in a host transaction.
-        let mut tx = sqlx::Acquire::begin(&mut *outer).await.map_err(storage)?;
+        let mut tx = sqlx::Acquire::begin(&mut *outer)
+            .await
+            .map_err(|e| storage("PgStore::tx_in", e))?;
         let result = async {
             sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
-                .await.map_err(storage)?;
+                .await.map_err(|e| storage("PgStore::tx_in", e))?;
             let mut state = self.load(&mut tx, scope, true).await?;
             let before = state.clone();
             let value = f(&mut state)?;
             self.save(&mut tx, &before, &state).await?;
             if self.fail_next.swap(false, Ordering::SeqCst) {
-                sqlx::query("SELECT 1/0").execute(&mut *tx).await.map_err(storage)?;
+                sqlx::query("SELECT 1/0").execute(&mut *tx).await.map_err(|e| storage("PgStore::tx_in", e))?;
             }
             Ok(value)
         }.await;
         match result {
             Ok(value) => {
                 // RELEASE SAVEPOINT only; the caller owns the outer COMMIT.
-                tx.commit().await.map_err(storage)?;
+                tx.commit()
+                    .await
+                    .map_err(|e| storage("PgStore::tx_in", e))?;
                 Ok(value)
             }
             Err(error) => {
-                tx.rollback().await.map_err(storage)?;
+                tx.rollback()
+                    .await
+                    .map_err(|e| storage("PgStore::tx_in", e))?;
                 Err(error)
             }
         }
@@ -97,11 +111,13 @@ impl PgStore {
     pub(crate) async fn commit(&self, mut tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             let fault = sqlx::query("SELECT 1/0").execute(&mut *tx).await;
-            tx.rollback().await.map_err(storage)?;
-            fault.map_err(storage)?;
+            tx.rollback()
+                .await
+                .map_err(|e| storage("PgStore::commit", e))?;
+            fault.map_err(|e| storage("PgStore::commit", e))?;
             return Err(Error::Storage);
         }
-        tx.commit().await.map_err(storage)
+        tx.commit().await.map_err(|e| storage("PgStore::commit", e))
     }
     async fn rows(
         &self,
@@ -120,7 +136,9 @@ impl PgStore {
         for arg in args {
             q = q.bind(*arg);
         }
-        q.fetch_all(conn).await.map_err(storage)
+        q.fetch_all(conn)
+            .await
+            .map_err(|e| storage("PgStore::rows", e))
     }
     async fn session(
         &self,
@@ -140,7 +158,7 @@ impl PgStore {
                 .bind(&k)
                 .execute(&mut *conn)
                 .await
-                .map_err(storage)?;
+                .map_err(|e| storage("PgStore::session", e))?;
             }
             for v in self.rows(conn, "sessions", "key=$1", &[&k], write).await? {
                 s.sessions.insert(
@@ -163,7 +181,7 @@ impl PgStore {
     ) -> Result<()> {
         // Topology is immutable. Discover IDs first, then lock *all* accounts in ID order.
         let ids: Vec<String> = sqlx::query_scalar(&format!("WITH RECURSIVE chain AS (SELECT id,parent FROM {}.budget_accounts WHERE id=$1 UNION SELECT a.id,a.parent FROM {}.budget_accounts a JOIN chain c ON a.id=c.parent) SELECT id FROM chain",self.schema,self.schema))
-            .bind(id).fetch_all(&mut *conn).await.map_err(storage)?;
+            .bind(id).fetch_all(&mut *conn).await.map_err(|e| storage("PgStore::accounts", e))?;
         let sql = format!(
             "SELECT to_jsonb(a) FROM {}.budget_accounts a WHERE id=ANY($1) ORDER BY id{}",
             self.schema,
@@ -173,7 +191,7 @@ impl PgStore {
             .bind(ids)
             .fetch_all(&mut *conn)
             .await
-            .map_err(storage)?
+            .map_err(|e| storage("PgStore::accounts", e))?
         {
             let a: Account = decode(v)?;
             s.accounts.insert(a.id.clone(), a);
@@ -189,7 +207,7 @@ impl PgStore {
         .bind(&h.id)
         .fetch_optional(conn)
         .await
-        .map_err(storage)?
+        .map_err(|e| storage("PgStore::load_parent_spec", e))?
         .ok_or(Error::NotFound)?;
         decode(value)
     }
@@ -214,7 +232,7 @@ impl PgStore {
             ))
             .execute(&mut *conn)
             .await
-            .map_err(storage)?;
+            .map_err(|e| storage("PgStore::load_child", e))?;
         let sessions: std::collections::BTreeSet<_> =
             [parent.session.as_deref(), spec.session.as_deref()]
                 .into_iter()
@@ -327,7 +345,7 @@ impl PgStore {
                     ))
                     .execute(&mut *conn)
                     .await
-                    .map_err(storage)?;
+                    .map_err(|e| storage("PgStore::load", e))?;
                 for v in self
                     .rows(
                         conn,
@@ -374,7 +392,7 @@ impl PgStore {
                     .bind(&h.id)
                     .fetch_optional(&mut *conn)
                     .await
-                    .map_err(storage)?;
+                    .map_err(|e| storage("PgStore::load", e))?;
                     if let Some(Some(id)) = session {
                         self.session(conn, &mut s, &h.tenant, Some(&id), write)
                             .await?;
@@ -502,7 +520,7 @@ impl PgStore {
                     .bind(format!("{}:slot:{k}", self.schema))
                     .execute(&mut *conn)
                     .await
-                    .map_err(storage)?;
+                    .map_err(|e| storage("PgStore::load", e))?;
                 for v in self.rows(conn, "slots", "key=$1", &[k], write).await? {
                     add_slot(&mut s, v)?;
                 }
@@ -536,7 +554,7 @@ impl PgStore {
             .collect::<Vec<_>>()
             .join(",");
         sqlx::query(&format!("INSERT INTO {}.{table} ({columns}) SELECT {select} FROM jsonb_populate_record(NULL::{}.{table},$1) x ON CONFLICT ({conflict}) DO UPDATE SET {update}",self.schema,self.schema))
-            .bind(value).execute(conn).await.map_err(storage)?;
+            .bind(value).execute(conn).await.map_err(|e| storage("PgStore::put", e))?;
         Ok(())
     }
     async fn save(&self, conn: &mut PgConnection, before: &Ledger, s: &Ledger) -> Result<()> {
@@ -585,7 +603,7 @@ impl PgStore {
                         .bind(account)
                         .execute(&mut *conn)
                         .await
-                        .map_err(storage)?;
+                        .map_err(|e| storage("PgStore::save", e))?;
                     }
                 }
             }
@@ -600,7 +618,7 @@ impl PgStore {
                 .bind(k)
                 .execute(&mut *conn)
                 .await
-                .map_err(storage)?;
+                .map_err(|e| storage("PgStore::save", e))?;
             self.free(conn, &format!("slot:{k}")).await?;
         }
         for e in &s.queue {
@@ -629,7 +647,7 @@ impl PgStore {
     }
     async fn seed_permits(&self, conn: &mut PgConnection, scope: &str, limit: usize) -> Result<()> {
         sqlx::query(&format!("INSERT INTO {}.capacity_slots(scope,ordinal) SELECT $1,n FROM generate_series(1,$2::bigint) n WHERE NOT EXISTS (SELECT 1 FROM {}.capacity_slots p WHERE p.scope=$1 AND p.ordinal=n) ON CONFLICT DO NOTHING",self.schema,self.schema))
-            .bind(scope).bind(i64::try_from(limit).map_err(storage)?).execute(conn).await.map_err(storage)?;
+            .bind(scope).bind(i64::try_from(limit).map_err(|e| storage("PgStore::seed_permits", e))?).execute(conn).await.map_err(|e| storage("PgStore::seed_permits", e))?;
         Ok(())
     }
     async fn permits(
@@ -641,13 +659,13 @@ impl PgStore {
         for (scope, limit) in scopes {
             self.seed_permits(conn, &scope, limit).await?;
             let mut ordinal: Option<i64> = sqlx::query_scalar(&format!("SELECT ordinal FROM {}.capacity_slots WHERE scope=$1 AND holder IS NULL ORDER BY ordinal FOR UPDATE SKIP LOCKED LIMIT 1",self.schema))
-                .bind(&scope).fetch_optional(&mut *conn).await.map_err(storage)?;
+                .bind(&scope).fetch_optional(&mut *conn).await.map_err(|e| storage("PgStore::permits", e))?;
             if ordinal.is_none() {
                 // A skipped free row is contention, not proof of exhaustion.
                 // PostgreSQL rechecks holder after waiting for a concurrent
                 // updater; lock_timeout bounds the wait and maps to Storage.
                 ordinal = sqlx::query_scalar(&format!("SELECT ordinal FROM {}.capacity_slots WHERE scope=$1 AND holder IS NULL ORDER BY ordinal FOR UPDATE LIMIT 1",self.schema))
-                    .bind(&scope).fetch_optional(&mut *conn).await.map_err(storage)?;
+                    .bind(&scope).fetch_optional(&mut *conn).await.map_err(|e| storage("PgStore::permits", e))?;
             }
             let ordinal = ordinal.ok_or(Error::Backpressure)?;
             sqlx::query(&format!(
@@ -659,14 +677,14 @@ impl PgStore {
             .bind(ordinal)
             .execute(&mut *conn)
             .await
-            .map_err(storage)?;
+            .map_err(|e| storage("PgStore::permits", e))?;
         }
         Ok(())
     }
     async fn free(&self, conn: &mut PgConnection, holder: &str) -> Result<()> {
         // Stable ordering also covers release of multiple permit scopes.
         sqlx::query(&format!("SELECT ordinal FROM {}.capacity_slots WHERE holder=$1 ORDER BY scope,ordinal FOR UPDATE",self.schema))
-            .bind(holder).fetch_all(&mut *conn).await.map_err(storage)?;
+            .bind(holder).fetch_all(&mut *conn).await.map_err(|e| storage("PgStore::free", e))?;
         sqlx::query(&format!(
             "UPDATE {}.capacity_slots SET holder=NULL WHERE holder=$1",
             self.schema
@@ -674,7 +692,7 @@ impl PgStore {
         .bind(holder)
         .execute(conn)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::free", e))?;
         Ok(())
     }
     async fn insert_slot(&self, conn: &mut PgConnection, v: &SlotRequest) -> Result<()> {
@@ -689,7 +707,7 @@ impl PgStore {
         .bind(kind)
         .execute(&mut *conn)
         .await
-        .map_err(storage)?
+        .map_err(|e| storage("PgStore::insert_slot", e))?
         .rows_affected();
         if inserted == 0 {
             let old = self.rows(conn, "slots", "key=$1", &[&v.key], false).await?;
@@ -731,9 +749,9 @@ impl PgStore {
         .bind(&e.tenant)
         .execute(&mut *conn)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::insert_queue", e))?;
         let n=sqlx::query(&format!("INSERT INTO {}.queue_entries(key,tenant,deadline,scheduling) VALUES($1,$2,$3::text::numeric,$4) ON CONFLICT DO NOTHING",self.schema))
-            .bind(&e.key).bind(&e.tenant).bind(e.deadline.to_string()).bind(json!(e.scheduling)).execute(&mut *conn).await.map_err(storage)?.rows_affected();
+            .bind(&e.key).bind(&e.tenant).bind(e.deadline.to_string()).bind(json!(e.scheduling)).execute(&mut *conn).await.map_err(|e| storage("PgStore::insert_queue", e))?.rows_affected();
         if n == 0 {
             let mut state = Ledger::default();
             for v in self
@@ -770,14 +788,18 @@ impl PgStore {
         .bind(k)
         .execute(&mut *conn)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::remove_queue", e))?;
         self.free(conn, &format!("queue:{k}")).await
     }
     pub(crate) async fn take_queue(&self, now: u64) -> Result<Option<QueueEntry>> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        sqlx::Executor::execute(&mut *tx,"SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'").await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::take_queue", e))?;
+        sqlx::Executor::execute(&mut *tx,"SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'").await.map_err(|e| storage("PgStore::take_queue", e))?;
         let expired: Option<String>=sqlx::query_scalar(&format!("SELECT key FROM {}.queue_entries WHERE deadline <= $1::text::numeric ORDER BY position FOR UPDATE SKIP LOCKED LIMIT 1",self.schema))
-            .bind(now.to_string()).fetch_optional(&mut *tx).await.map_err(storage)?;
+            .bind(now.to_string()).fetch_optional(&mut *tx).await.map_err(|e| storage("PgStore::take_queue", e))?;
         if let Some(k) = expired {
             self.remove_queue(&mut tx, &k).await?;
             self.commit(tx).await?;
@@ -791,18 +813,18 @@ impl PgStore {
         ))
         .fetch_optional(&mut *tx)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::take_queue", e))?;
         let Some((last_tenant, streak)) = policy else {
             return Ok(None);
         };
         let tenant: Option<String> = sqlx::query_scalar(&format!(
             "SELECT tenant FROM {}.queue_tenants t WHERE EXISTS (SELECT 1 FROM {}.queue_entries e WHERE e.tenant=t.tenant) ORDER BY CASE WHEN $1::text IS NULL OR tenant>$1 THEN 0 ELSE 1 END, CASE WHEN $1::text IS NULL THEN (SELECT min(position) FROM {}.queue_entries e WHERE e.tenant=t.tenant) END, tenant FOR UPDATE OF t SKIP LOCKED LIMIT 1",self.schema,self.schema,self.schema))
-            .bind(last_tenant).fetch_optional(&mut *tx).await.map_err(storage)?;
+            .bind(last_tenant).fetch_optional(&mut *tx).await.map_err(|e| storage("PgStore::take_queue", e))?;
         let Some(tenant) = tenant else {
             return Ok(None);
         };
         let values: Vec<Value> = sqlx::query_scalar(&format!("SELECT to_jsonb(e) FROM {}.queue_entries e WHERE tenant=$1 ORDER BY position FOR UPDATE SKIP LOCKED", self.schema))
-            .bind(&tenant).fetch_all(&mut *tx).await.map_err(storage)?;
+            .bind(&tenant).fetch_all(&mut *tx).await.map_err(|e| storage("PgStore::take_queue", e))?;
         let entries: Vec<QueueEntry> = values
             .into_iter()
             .map(|v| {
@@ -833,7 +855,7 @@ impl PgStore {
         })
         .execute(&mut *tx)
         .await
-        .map_err(storage)?;
+        .map_err(|e| storage("PgStore::take_queue", e))?;
         self.commit(tx).await?;
         Ok(Some(QueueEntry {
             key: e.key,
@@ -850,8 +872,8 @@ impl PgStore {
         .bind(json!(kind))
         .fetch_one(&self.pool)
         .await
-        .map_err(storage)?;
-        usize::try_from(n).map_err(storage)
+        .map_err(|e| storage("PgStore::slot_count", e))?;
+        usize::try_from(n).map_err(|e| storage("PgStore::slot_count", e))
     }
     pub async fn queue_len(&self) -> Result<usize> {
         let n: i64 = sqlx::query_scalar(&format!(
@@ -860,11 +882,11 @@ impl PgStore {
         ))
         .fetch_one(&self.pool)
         .await
-        .map_err(storage)?;
-        usize::try_from(n).map_err(storage)
+        .map_err(|e| storage("PgStore::queue_len", e))?;
+        usize::try_from(n).map_err(|e| storage("PgStore::queue_len", e))
     }
     pub async fn recovery_candidates(&self) -> Result<Vec<RunHandle>> {
-        let values:Vec<Value>=sqlx::query_scalar(&format!("SELECT handle FROM {}.runs r WHERE NOT (state ? 'Terminal') OR stop IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR cleanup IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR settlement IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR EXISTS(SELECT 1 FROM {}.slots s WHERE s.tenant=r.tenant AND s.run=r.id) ORDER BY tenant,id",self.schema,self.schema)).fetch_all(&self.pool).await.map_err(storage)?;
+        let values:Vec<Value>=sqlx::query_scalar(&format!("SELECT handle FROM {}.runs r WHERE NOT (state ? 'Terminal') OR stop IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR cleanup IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR settlement IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR EXISTS(SELECT 1 FROM {}.slots s WHERE s.tenant=r.tenant AND s.run=r.id) ORDER BY tenant,id",self.schema,self.schema)).fetch_all(&self.pool).await.map_err(|e| storage("PgStore::recovery_candidates", e))?;
         values.into_iter().map(decode).collect()
     }
     pub async fn held_slots(&self, run: &RunHandle) -> Result<Vec<SlotRequest>> {
