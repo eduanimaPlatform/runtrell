@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Credential-free host adapters; no private repositories or network access.
 pub mod driver_contracts;
+pub mod tool_failure_contracts;
 use runtrell::*;
 use serde_json::{Value, json};
 use std::{

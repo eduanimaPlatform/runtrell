@@ -2057,6 +2057,9 @@ impl EvidenceStore for DataStore {
 }
 /// Additional standard tool operations; adapters may implement these directly
 /// or use DataStore with a NamespaceBackend to reuse the reference algorithms.
+/// FileTool treats workspace Conflict as an atomic CAS/input mismatch and
+/// NotFound as a missing requested path. Adapters must report backend failures
+/// or uncertain writes as Storage (never disguise them as these input errors).
 pub trait StandardToolStore: WorkspaceStore + ArtifactStore {
     fn policy(&self) -> &StoragePolicy;
     fn exact_replace(

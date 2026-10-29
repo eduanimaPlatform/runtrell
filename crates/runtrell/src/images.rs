@@ -924,6 +924,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         }
         let result = if let Some(code) = failure {
             ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: None,
                 code,
                 usage,
@@ -964,6 +965,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 _ => return Ok(ExternalResult::Unknown),
             };
             return Ok(ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: None,
                 code: "IMAGE_RECEIPT_SAVE_FAILED".into(),
                 usage,

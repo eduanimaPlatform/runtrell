@@ -59,6 +59,7 @@ impl ModelPort for RestartModel {
         usage.cached = Some(0);
         if self.case == "failed" {
             Ok(ExternalResult::Failed {
+ repair_hint: None,
  physical_evidence: None,
                 code: "PROVIDER_REJECTED".into(),
                 usage,

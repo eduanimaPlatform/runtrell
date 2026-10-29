@@ -3,6 +3,40 @@ use runtrell_postgres::PgStore;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
+async fn file_execution_failures_are_model_repairable() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::tool_failure_contracts::file_repairs(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn file_repair_preserves_limits_and_budget() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::tool_failure_contracts::repair_stops(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn tool_failures_preserve_stop_and_reconciliation_boundaries() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::tool_failure_contracts::failure_boundaries(std::sync::Arc::new(store)).await;
+}
+#[tokio::test]
+async fn saved_file_failure_recovers_without_reexecution() {
+    let (_, schema, store, _, _) = setup().await;
+    let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .unwrap();
+    let reopened = PgStore::open(pool, &schema, Capacity::default())
+        .await
+        .unwrap();
+    runtrell_testkit::tool_failure_contracts::saved_failure_recovery(
+        std::sync::Arc::new(store),
+        std::sync::Arc::new(reopened),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn driver_token_continuation() {
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::driver_contracts::token_continuation(std::sync::Arc::new(store)).await;

@@ -1107,6 +1107,7 @@ impl PgStore {
                     && (!o.settled
                         || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
                         || (o.state == OperationState::Failed
+                            && !o.model_repair_acknowledged(&r)
                             && !s.operations.values().any(|later| {
                                 later.run == o.run
                                     && later.request.key == o.request.key

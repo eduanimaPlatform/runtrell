@@ -75,6 +75,7 @@ pub(super) async fn poll_backend<L: ExecutionLedger, B: ExecutionBackend, C: Clo
     let usage = Usage::measured(0, 0, o.cost_micro_usd.ok_or(Error::UsageUnknown)?);
     Ok(Lookup::Found(if let Some(code) = o.failure {
         ExternalResult::Failed {
+            repair_hint: None,
             physical_evidence: None,
             code,
             usage,

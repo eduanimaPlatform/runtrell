@@ -116,6 +116,7 @@ async fn attempt_identity_retry_fencing_and_constraints() {
         .unwrap();
     assert_eq!(s.begin(&c, retry.clone(), 0).await, Err(Error::Conflict));
     let failed = ExternalResult::Failed {
+        repair_hint: None,
         physical_evidence: None,
         code: "retry".into(),
         usage: Usage::measured(1, 1, 2),

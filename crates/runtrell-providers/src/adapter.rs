@@ -327,6 +327,7 @@ impl Adapter {
             Ok(resolved) => resolved,
             Err(_) => {
                 return Ok(ExternalResult::Failed {
+                    repair_hint: None,
                     physical_evidence: None,
                     code: "ATTACHMENT_NOT_SENT".into(),
                     usage: Usage {
@@ -439,6 +440,7 @@ impl Adapter {
             };
             let delay = retry_header.as_deref().and_then(retry_delay);
             return Ok(HttpResult::Failure(ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: None,
                 code: serde_json::to_string(&failure).map_err(|_| invalid())?,
                 usage: self.usage(&parsed).unwrap_or_else(|_| Usage {

@@ -400,6 +400,7 @@ impl<
             Ok(request) => request,
             Err(error) => {
                 return Ok(ExternalResult::Failed {
+                    repair_hint: None,
                     physical_evidence: None,
                     code: error.to_string(),
                     usage: Usage::measured(0, 0, 0),

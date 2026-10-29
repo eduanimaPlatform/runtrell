@@ -29,6 +29,7 @@ impl ModelPort for RetryModel {
         usage.cached = Some(0);
         if n == 0 || !self.success {
             Ok(ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: None,
                 code: "TRANSIENT".into(),
                 usage,

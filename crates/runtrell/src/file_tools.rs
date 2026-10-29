@@ -19,6 +19,46 @@ pub struct FileTool<S = DataStore> {
     pub action: FileAction,
 }
 impl<S: StandardToolStore> FileTool<S> {
+    /// Explicit allowlist: unknown errors and resource stop conditions are fatal.
+    fn repair_failure<'a>(&self, error: &'a Error) -> Option<(&'a str, &'static str)> {
+        match error {
+            Error::Invalid(code) => {
+                let hint = match code.as_str() {
+                    "NO_MATCH" => "Read the current file and use exact existing text as old_text.",
+                    "MULTIPLE_MATCHES" => {
+                        "Include more surrounding context so old_text matches exactly once."
+                    }
+                    "EMPTY_MATCH" => "Use nonempty old_text copied from the current file.",
+                    "PATH_NOT_CANONICAL" => {
+                        "Use a relative ASCII path without empty, dot or parent components."
+                    }
+                    "PATH_ALIAS" | "FILE_PARENT" | "DUPLICATE_PATH" => {
+                        "List files and choose distinct paths without case aliases or file-parent collisions."
+                    }
+                    "CURSOR" => "Restart listing or search without a cursor.",
+                    "RANGE" => "Read within the current file size using a valid offset.",
+                    "BINARY" | "NON_UTF8" => {
+                        "Exact replacement requires UTF-8 text without binary control characters; choose a text file and text edits."
+                    }
+                    "expected_revision" | "expected_revision required" => {
+                        "Use the current integer revision, or explicit null only when creating a file."
+                    }
+                    _ => return None,
+                };
+                Some((code, hint))
+            }
+            // Artifact conflicts can mean integrity/authority failures, not CAS.
+            Error::Conflict if !matches!(self.action, FileAction::ArtifactRead) => Some((
+                "CONFLICT",
+                "List/read the current workspace and refresh expected_revision, expected_digest or cursor before a new call.",
+            )),
+            Error::NotFound if !matches!(self.action, FileAction::ArtifactRead) => Some((
+                "NOT_FOUND",
+                "List the workspace and use an existing path; use files.write with explicit null to create a new file.",
+            )),
+            _ => None,
+        }
+    }
     fn name(&self) -> &'static str {
         match self.action {
             FileAction::List => "files.list",
@@ -32,7 +72,7 @@ impl<S: StandardToolStore> FileTool<S> {
     }
     fn schema(&self) -> Value {
         let text = json!({"type":"string"});
-        let integer = json!({"type":"integer"});
+        let integer = json!({"type":"integer","minimum":0});
         let (properties, required) = match self.action {
             FileAction::List => (json!({"limit":integer,"cursor":text}), vec!["limit"]),
             FileAction::Read => (
@@ -40,7 +80,7 @@ impl<S: StandardToolStore> FileTool<S> {
                 vec!["path", "revision", "offset", "length"],
             ),
             FileAction::Write => (
-                json!({"path":text,"expected_revision":{"description":"Current integer revision; explicit null to create a new file"},"text":text}),
+                json!({"path":text,"expected_revision":{"type":["integer","null"],"minimum":0,"description":"Current integer revision; explicit null to create a new file"},"text":text}),
                 vec!["path", "expected_revision", "text"],
             ),
             FileAction::Delete => (
@@ -173,7 +213,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
         );
         ToolDescriptor {
             name: self.name().into(),
-            version: "runtrell-files-1".into(),
+            version: "runtrell-files-2".into(),
             account: "local-files".into(),
             permission: if write {
                 "workspace.write"
@@ -215,6 +255,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
             > self.store.policy().max_edit_bytes
         {
             return Ok(ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: None,
                 code: "INPUT_LIMIT".into(),
                 usage: Usage::measured(0, 0, 0),
@@ -229,8 +270,11 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
                 external_id: None,
             },
             Err(e) => ExternalResult::Failed {
+                repair_hint: self.repair_failure(&e).map(|(_, hint)| hint.into()),
                 physical_evidence: None,
-                code: e.to_string(),
+                code: self
+                    .repair_failure(&e)
+                    .map_or_else(|| e.to_string(), |(code, _)| code.into()),
                 usage: Usage::measured(0, 0, 0),
                 retry_after: None,
             },

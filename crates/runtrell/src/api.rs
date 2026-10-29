@@ -633,6 +633,11 @@ pub enum ExternalResult {
         code: String,
         usage: Usage,
         retry_after: Option<u64>,
+        /// Opt in to a new model turn after a known, safely correctable failure.
+        /// Both code and hint must be safe to disclose; never include payloads,
+        /// secrets, storage/permission errors or uncertain side effects.
+        /// None is fatal. Automatic retry_after takes precedence when present.
+        repair_hint: Option<String>,
     },
     Unknown,
 }
@@ -669,6 +674,26 @@ pub struct Operation {
     pub unsettled_result: Option<ExternalResult>,
 }
 impl Operation {
+    /// Only a settled, explicitly correctable tool failure whose protocol answer
+    /// was checkpointed may cease blocking successful completion.
+    pub fn model_repair_acknowledged(&self, run: &RunRecord) -> bool {
+        self.settled
+            && self.run == run.handle
+            && self.state == OperationState::Failed
+            && self.request.kind == OperationKind::Tool
+            && matches!(
+                &self.result,
+                Some(ExternalResult::Failed {
+                    retry_after: None,
+                    repair_hint: Some(_),
+                    ..
+                })
+            )
+            && run
+                .checkpoint
+                .as_ref()
+                .is_some_and(|cp| cp.payload["tool_repair"]["operations"][&self.id] == true)
+    }
     /// The child receipt is a Run identity, never this operation's identity.
     pub fn child_handle(&self) -> Result<RunHandle> {
         if self.request.kind != OperationKind::ChildRun {

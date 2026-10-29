@@ -302,6 +302,7 @@ pub async fn settlement_and_finalization<S: ControlStore>(s: &S) {
     );
     let first = s.begin(&c, request.clone(), 0).await.unwrap();
     let failed = ExternalResult::Failed {
+        repair_hint: None,
         physical_evidence: None,
         code: "busy".into(),
         usage: Usage::measured(0, 0, 3),

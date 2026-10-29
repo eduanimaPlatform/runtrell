@@ -6,6 +6,32 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+#[test]
+fn file_execution_failures_are_model_repairable() {
+    block_on(tool_failure_contracts::file_repairs(Arc::new(
+        MemoryStore::default(),
+    )));
+}
+#[test]
+fn saved_file_failure_recovers_without_reexecution() {
+    let store = Arc::new(MemoryStore::default());
+    block_on(tool_failure_contracts::saved_failure_recovery(
+        store.clone(),
+        store,
+    ));
+}
+#[test]
+fn file_repair_preserves_limits_and_budget() {
+    block_on(tool_failure_contracts::repair_stops(Arc::new(
+        MemoryStore::default(),
+    )));
+}
+#[test]
+fn tool_failures_preserve_stop_and_reconciliation_boundaries() {
+    block_on(tool_failure_contracts::failure_boundaries(Arc::new(
+        MemoryStore::default(),
+    )));
+}
 async fn start(s: &MemoryStore) -> (RunHandle, Claim) {
     let account = s
         .create_account("tenant", Amount::new(10000, 10000), None)

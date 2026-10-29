@@ -63,6 +63,7 @@ pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>)
         }
         let result = if case == "failed" {
             ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: None,
                 code: "charged".into(),
                 usage: Usage::measured(2, 3, 7),
@@ -310,6 +311,7 @@ impl ModelPort for PreparedModel {
         }
         if self.found.load(Ordering::SeqCst) {
             Ok(Lookup::Found(ExternalResult::Failed {
+                repair_hint: None,
                 physical_evidence: Some(evidence()),
                 code: "provider-failed".into(),
                 usage: Usage::measured(0, 0, 2),
@@ -494,6 +496,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         200
     );
     let retry_failure = ExternalResult::Failed {
+        repair_hint: None,
         physical_evidence: Some(evidence()),
         code: "retry failed".into(),
         usage: Usage::measured(0, 0, 0),
@@ -572,6 +575,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         completeness: EvidenceCompleteness::Complete,
     };
     let invalid = ExternalResult::Failed {
+        repair_hint: None,
         physical_evidence: Some(oversized),
         code: "invalid".into(),
         usage: Usage::measured(0, 0, 0),

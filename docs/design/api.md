@@ -58,7 +58,7 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postgres JSONB再読取りのキー順変更でもreceiptを同じ候補へ照合する。array順と値の違いは保持する。Artifactのraw bytes hashは従来どおりbytesそのものに結び付ける。
 
-修正可否はhostのValidationReceipt.repairableへ束縛する。JSON_SYNTAXはdriverが修正可能とし、ValidationChainはschema違反およびhostがrepairable_codesへ明示するcodeと、子validatorのreceipt分類を統合する。型付きhost validatorはschema合格後にだけ実行する。修正回数・時間はRepairPolicyの任意上限だけを使い、既定上限を持たない。tool入力（非objectを含む）と最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。保存・認可・証跡不一致のErrorは修正診断へ変換しない。
+最終出力の修正可否はhostのValidationReceipt.repairableへ束縛する。JSON_SYNTAXはdriverが修正可能とし、ValidationChainはschema違反およびhostがrepairable_codesへ明示するcodeと、子validatorのreceipt分類を統合する。型付きhost validatorはschema合格後にだけ実行する。修正回数・時間はRepairPolicyの任意上限だけを使い、既定上限を持たない。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗の分類契約は以下のCorrectable tool execution failuresを参照する。
 
 通常driverはmetadata.stop_reason=max_tokensを継続可能な応答として扱う。usageを先に精算し、応答のtool callは採用しない。RunSpec.continuationの文面（汎用の短文を既定）を履歴へ追加して別operationを作り、出力枠を再見積りする。回数の固定上限はなく、任意max_continuations・予算・deadlineで停止する。
 
@@ -77,6 +77,48 @@ checkpoint の context は元メッセージを `facts` へ位置順に一度だ
 三つのゲートを分ける。(1) Cargo featureはコンパイルする能力。現行の標準Rust adapterは常に利用可能で、Python builder/script variantだけ`python`で追加する。(2) ToolSetの選択結果と`pin_catalog(run, policy, tools)`がAgentへ提示する定義。(3) 現在の`Policy::authorize`が個々のdispatch・開始・再開・保存を認可する。featureや選択は認可の代わりにならない。
 
 `Tool::operation_kind`は通常Tool、ExecutionToolはSandbox。RegisteredTool・設定adapter・StoredOutputToolはこれを保持する。driverはSandbox toolでも同じcatalog digest・account・version・operation kindを照合して取消・復旧へ配送する。低水準`execute_backend`は引き続きhostが明示的に実行する共通契約であり、モデル向けtoolの互換wrapperではない。hostはExecutionToolとRuntimeへ同じControlStore・Policy・Clockを接続する。
+
+## Correctable tool execution failures
+
+`ExternalResult::Failed.repair_hint` explicitly opts a terminal operation failure
+into model repair. `None` retains the existing fatal behavior; `Some` contains
+only a safe, actionable hint, and `code` must be safe for model consumption.
+Adapters must not classify storage, authorization, uncertain side effects, or
+Run/resource stop conditions as correctable. `retry_after` is for automatic
+retry of the same operation and takes precedence over model repair.
+
+The driver returns classified failures as failed tool messages, shares the
+existing `tool_repair` count/start time and validator repair policy, and saves
+the protocol answer, messages and counter in one checkpoint. The failed
+operation remains settled in the ledger; recovery reuses its saved result.
+Successful completion permits a classified failed Tool operation only after its
+ID is acknowledged in `tool_repair.operations` in the same checkpoint as the
+protocol answer. A hint alone never bypasses the completion guard.
+Only a new model call may attempt a corrected action. Budgets, deadlines,
+authorization and unknown-outcome reconciliation remain mandatory.
+
+File tools opt in only known input/match errors and workspace CAS/path lookup
+failures. Limit/capacity, storage, permission, artifact-integrity and unknown
+errors remain fatal. Feedback excludes file bodies, raw decoder errors and
+secrets. Acceptance covers deterministic Memory and PostgreSQL driver repair,
+shared limits and recovery without re-executing a saved operation.
+
+| File error | Classification and correction |
+| --- | --- |
+| `NO_MATCH`, `MULTIPLE_MATCHES`, `EMPTY_MATCH` | Repair: read exact current text and provide a nonempty unique match |
+| `PATH_NOT_CANONICAL`, `PATH_ALIAS`, `FILE_PARENT`, `DUPLICATE_PATH` | Repair: list files and correct the path or edit set |
+| `CURSOR`, `RANGE` | Repair: restart pagination or correct the byte offset |
+| `BINARY`, `NON_UTF8` | Repair: choose a UTF-8 text file/text edits |
+| Invalid `expected_revision` shape | Schema repair before invocation; adapter diagnostic also allows correcting revision |
+| Workspace `Conflict`, `NotFound` | Repair: refresh list/read revision/digest/cursor or select/create the correct path |
+| Artifact `Conflict`, `NotFound` | Fatal: do not reinterpret missing/inconsistent owned references as workspace CAS |
+| `INPUT_LIMIT`, `EDIT_LIMIT`, `PAGE_LIMIT`, `RANGE_LIMIT`, `SEARCH_LIMIT`, `SEARCH_MATCH_TOO_LARGE` | Fatal resource/output stop; limits are unchanged |
+| `CAPACITY`, other capacity/identity/metadata errors, decoder errors, unknown invalid codes | Fatal; no guessed classification |
+| `Storage`, `PermissionDenied`, other errors | Fatal; never ask the model to repair host authority or storage |
+
+Custom `StandardToolStore` adapters must reserve workspace `Conflict` for
+known atomic CAS/input conflicts and `NotFound` for requested paths; report
+backend/transaction uncertainty as `Storage` or the appropriate non-input error.
 
 <!-- generated-contracts -->
 ## Rust契約定義

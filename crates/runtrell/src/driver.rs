@@ -1129,6 +1129,38 @@ impl<
         Ok(())
     }
 
+    /// Shared by pre-execution schema diagnostics and settled execution failures.
+    /// The counter and protocol answer are committed by the caller in one CAS.
+    async fn prepare_tool_repair(
+        &self,
+        c: &Claim,
+        current: &RunRecord,
+        diagnostic: Value,
+    ) -> Result<Checkpoint> {
+        let policy = self.validator.repair_policy();
+        let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+        cp.payload["last_tool_validation"] = diagnostic;
+        let started = repair_started(current).unwrap_or(self.clock.now());
+        if policy
+            .max_repairs
+            .is_some_and(|max| repair_count(current) >= max)
+            || policy
+                .max_elapsed
+                .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
+        {
+            Box::pin(
+                self.store
+                    .checkpoint(c, current.revision, cp, self.clock.now()),
+            )
+            .await?;
+            return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
+        }
+        let count = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0);
+        cp.payload["tool_repair"]["count"] = count.checked_add(1).ok_or(Error::Conflict)?.into();
+        cp.payload["tool_repair"]["started"] = started.into();
+        Ok(cp)
+    }
+
     async fn drive_tools(
         &self,
         c: &Claim,
@@ -1179,24 +1211,7 @@ impl<
             if !diagnostics.is_empty() {
                 let output =
                     serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
-                let policy = self.validator.repair_policy();
-                let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
-                cp.payload["last_tool_validation"] = serde_json::json!({"candidate":input,"repairable":true,"diagnostics":diagnostics});
-                let started = repair_started(&current).unwrap_or(self.clock.now());
-                if policy
-                    .max_repairs
-                    .is_some_and(|max| repair_count(&current) >= max)
-                    || policy
-                        .max_elapsed
-                        .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
-                {
-                    Box::pin(
-                        self.store
-                            .checkpoint(c, current.revision, cp, self.clock.now()),
-                    )
-                    .await?;
-                    return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
-                }
+                let mut cp = self.prepare_tool_repair(c, &current, serde_json::json!({"candidate":input,"repairable":true,"diagnostics":diagnostics})).await?;
                 messages.push(Message {
                     role: "tool".into(),
                     text: String::new(),
@@ -1218,8 +1233,6 @@ impl<
                 run.answer(answer)
                     .map_err(|e| Error::Invalid(e.to_string()))?;
                 *cursor += 1;
-                let count = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0);
-                cp.payload["tool_repair"] = serde_json::json!({"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started});
                 cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
                 cp.messages = messages.clone();
                 cp.cursor = *cursor;
@@ -1274,6 +1287,58 @@ impl<
                 |ctx| async move { tool.lookup(&ctx, lookup_input).await },
             ))
             .await?;
+            if let ExternalResult::Failed {
+                code,
+                repair_hint: Some(hint),
+                retry_after: None,
+                ..
+            } = &result
+            {
+                if tool.operation_kind() != OperationKind::Tool {
+                    return Err(Error::Invalid(code.clone()));
+                }
+                let output = serde_json::json!({"code":code,"repairable":true,"hint":hint});
+                if serde_json::to_vec(&output)
+                    .map_err(|_| Error::Storage)?
+                    .len()
+                    > descriptor.max_output_bytes
+                {
+                    return Err(Error::Invalid("tool output exceeds declared limit".into()));
+                }
+                let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+                let mut cp = self
+                    .prepare_tool_repair(c, &current, output.clone())
+                    .await?;
+                let op = Box::pin(self.store.operation(&c.run, &key))
+                    .await?
+                    .ok_or(Error::Conflict)?;
+                if !op.settled || op.result.as_ref() != Some(&result) {
+                    return Err(Error::Conflict);
+                }
+                cp.payload["tool_repair"]["operations"][&op.id] = true.into();
+                messages.push(Message {
+                    role: "tool".into(),
+                    text: String::new(),
+                    call_id: Some(call.id().to_string()),
+                    tool: Some(name),
+                    data: output.clone(),
+                });
+                run.answer(call.answer(ToolResult::failed(ToolExecutionError::new(
+                    ToolErrorKind::InvalidArgs,
+                    output.to_string(),
+                ))))
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+                *cursor += 1;
+                cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
+                cp.messages = messages.clone();
+                cp.cursor = *cursor;
+                Box::pin(
+                    self.store
+                        .checkpoint(c, current.revision, cp, self.clock.now()),
+                )
+                .await?;
+                continue;
+            }
             let output = completed(result)?;
             let current = Box::pin(self.store.get(&c.run)).await?;
             tool.authorize_result(&current, &output).await?;
