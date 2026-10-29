@@ -679,6 +679,8 @@ impl TargetValidator for RejectRules {
     }
     fn check(&self, _: &Target) -> Result<Vec<Diagnostic>> {
         Ok(vec![Diagnostic {
+            repair: DiagnosticRepair::Unknown,
+            observation: None,
             schema_path: None,
             code: "MISSING_EVIDENCE".into(),
             severity: "error".into(),
@@ -692,6 +694,60 @@ impl TargetValidator for RejectRules {
             hint: "Attach an existing source".into(),
         }])
     }
+}
+#[test]
+fn host_diagnostic_classification_controls_receipt() {
+    struct Rules(Vec<Diagnostic>);
+    impl TargetValidator for Rules {
+        fn key(&self) -> ValidatorKey {
+            ValidatorKey::new("business", "1")
+        }
+        fn check(&self, _: &Target) -> Result<Vec<Diagnostic>> {
+            Ok(self.0.clone())
+        }
+    }
+    drive(async {
+        let store = DataStore::memory(StoragePolicy::default());
+        let access = Access::owner(ns("classification"));
+        let target = Target::structured(json!(0), 1, "cfg");
+        for repair in [
+            DiagnosticRepair::Agent,
+            DiagnosticRepair::Host,
+            DiagnosticRepair::Operator,
+            DiagnosticRepair::Unknown,
+        ] {
+            let mut diagnostics = schema_diagnostics(&target.value, &json!({"minimum":1})).unwrap();
+            diagnostics[0].code = "BUSINESS_RULE".into();
+            diagnostics[0].repair = repair;
+            let evidence = store
+                .validate(
+                    &access,
+                    &target,
+                    std::sync::Arc::new(Rules(diagnostics.clone())),
+                )
+                .await
+                .unwrap();
+            assert!(!evidence.receipt.passed);
+            assert_eq!(
+                evidence.receipt.repairable,
+                repair == DiagnosticRepair::Agent
+            );
+            assert_eq!(repair.agent_can_write(), evidence.receipt.repairable);
+            let decoded: ValidationReceipt =
+                serde_json::from_value(serde_json::to_value(&evidence.receipt).unwrap()).unwrap();
+            assert_eq!(decoded, evidence.receipt);
+            if repair != DiagnosticRepair::Agent {
+                let mut agent = diagnostics[0].clone();
+                agent.repair = DiagnosticRepair::Agent;
+                diagnostics.push(agent);
+                let evidence = store
+                    .validate(&access, &target, std::sync::Arc::new(Rules(diagnostics)))
+                    .await
+                    .unwrap();
+                assert!(!evidence.receipt.repairable);
+            }
+        }
+    });
 }
 #[test]
 fn diagnostic_locations_and_workspace_validator_cannot_self_certify() {

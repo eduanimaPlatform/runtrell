@@ -114,7 +114,6 @@ fn chain_verifies_each_receipt_before_using_diagnostics() {
             }],
             schema: json!({"type":"object"}),
             repair: RepairPolicy::default(),
-            repairable_codes: BTreeSet::new(),
         };
         assert!(chain.validate(&run, &value).unwrap().passed);
         // Typed host validators must not turn a schema failure into an error

@@ -1400,13 +1400,12 @@ fn repair_checkpoint_reopens_with_independent_pool_and_runtime() {
     use runtrell::assembly::ValidationChain;
     use runtrell_testkit::{BusinessTool, DecisionFinalizer, FakeModel, FakePolicy, TestClock};
     use serde_json::json;
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::sync::Arc;
     fn validator() -> ValidationChain {
         ValidationChain {
             validators: vec![],
             schema: json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer","minimum":1}}}),
             repair: RepairPolicy::default(),
-            repairable_codes: BTreeSet::from(["SCHEMA_VALIDATION".into()]),
         }
     }
     fn executor() -> tokio::runtime::Runtime {
@@ -1519,13 +1518,12 @@ fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
     use runtrell::assembly::ValidationChain;
     use runtrell_testkit::{BusinessTool, DecisionFinalizer, FakeModel, FakePolicy, TestClock};
     use serde_json::json;
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::sync::Arc;
     fn validator() -> ValidationChain {
         ValidationChain {
             validators: vec![],
             schema: json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer","minimum":1}}}),
             repair: RepairPolicy::default(),
-            repairable_codes: BTreeSet::from(["JSON_SYNTAX".into()]),
         }
     }
     fn executor() -> tokio::runtime::Runtime {

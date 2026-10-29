@@ -22,7 +22,6 @@ async fn drive(store: Arc<PgStore>, claim: &Claim, answer: i32, now: u64) -> Run
             validators: vec![],
             schema: json!({"type":"object","properties":{"answer":{"type":"integer","minimum":1}},"required":["answer"]}),
             repair: RepairPolicy::default(),
-            repairable_codes: Default::default(),
         }),
         finalizer: Arc::new(DecisionFinalizer),
     }.drive(claim).await.unwrap()
@@ -97,6 +96,58 @@ async fn context_prefix_survives_process_restart() {
 }
 
 #[tokio::test]
+async fn no_progress_survives_process_restart_and_compaction() {
+    let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated database required");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    let schema = format!("repair_{}", uuid::Uuid::new_v4().simple());
+    let store = Arc::new(
+        PgStore::open(pool, &schema, Capacity::default())
+            .await
+            .unwrap(),
+    );
+    let account = store
+        .create_account("t", Amount::new(1000, 1000), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new("t", "repair-process", account, "repair");
+    spec.compaction = Some(CompactionPolicy {
+        min_remaining_tokens: 2000,
+    });
+    let run = store.start(spec).await.unwrap();
+    let claim = store.claim(&run, "first", 0, 100).await.unwrap();
+    let pending = drive(store.clone(), &claim, 0, 0).await;
+    assert_eq!(
+        pending.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+        1
+    );
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "resume_context_in_child_process", "--nocapture"])
+        .env("RUNTRELL_CONTEXT_SCHEMA", &schema)
+        .env("RUNTRELL_CONTEXT_RUN", &run.id)
+        .env("RUNTRELL_CONTEXT_NO_PROGRESS", "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let stopped = store.get(&run).await.unwrap();
+    assert!(
+        matches!(stopped.state, RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("VALIDATION_NO_PROGRESS"))
+    );
+    assert_eq!(
+        stopped.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+        3
+    );
+    let operations = store.list_operations(&run).await.unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| op.request.kind == OperationKind::Compaction)
+            .count(),
+        3
+    );
+    assert!(operations.iter().all(|op| op.settled));
+}
+
+#[tokio::test]
 async fn resume_context_in_child_process() {
     let Ok(schema) = std::env::var("RUNTRELL_CONTEXT_SCHEMA") else {
         return;
@@ -112,6 +163,21 @@ async fn resume_context_in_child_process() {
         tenant: "t".into(),
         id: std::env::var("RUNTRELL_CONTEXT_RUN").unwrap(),
     };
+    if std::env::var("RUNTRELL_CONTEXT_NO_PROGRESS").is_ok() {
+        for turn in 1..=2 {
+            let now = turn * 101;
+            let claim = store.claim(&run, "child", now, 100).await.unwrap();
+            let result = drive(store.clone(), &claim, 0, now).await;
+            if turn == 1 {
+                assert_eq!(result.state, RunState::Waiting("validation repair".into()));
+            } else {
+                assert!(
+                    matches!(result.state, RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("VALIDATION_NO_PROGRESS"))
+                );
+            }
+        }
+        return;
+    }
     let claim = store.claim(&run, "second", 101, 100).await.unwrap();
     let completed = drive(store, &claim, 2, 101).await;
     assert_eq!(completed.state, RunState::Terminal(Terminal::Succeeded));

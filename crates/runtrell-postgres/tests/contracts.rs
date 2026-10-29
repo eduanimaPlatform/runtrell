@@ -138,3 +138,11 @@ fn validation_no_progress_survives_resume() {
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
+#[test]
+fn artifact_content_defines_progress() {
+    support::block_on(
+        runtrell_testkit::repair_contracts::artifact_progress_contract(std::sync::Arc::new(
+            support::TestPg::default(),
+        )),
+    );
+}

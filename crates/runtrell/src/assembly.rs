@@ -104,7 +104,6 @@ pub struct ValidationChain {
     pub validators: Vec<VersionedValidator>,
     pub schema: Value,
     pub repair: RepairPolicy,
-    pub repairable_codes: BTreeSet<String>,
 }
 /// Verify provenance before accepting either passing or failing diagnostics.
 pub fn verify_receipt(
@@ -138,8 +137,7 @@ impl Validator for ValidationChain {
                 verify_receipt(run, value, &receipt, &validator.key)?;
                 passed &= receipt.passed;
                 repairable &= receipt.passed
-                    || receipt.repairable
-                    || self.codes_repairable(&receipt.diagnostics);
+                    || (receipt.repairable && diagnostics_agent_repairable(&receipt.diagnostics));
                 diagnostics.extend(receipt.diagnostics);
             }
         }
@@ -150,19 +148,9 @@ impl Validator for ValidationChain {
             validator: run.spec.validator.clone(),
             validator_version: run.spec.validator_version.clone(),
             passed,
-            repairable: !passed && repairable,
+            repairable: !passed && repairable && diagnostics_agent_repairable(&diagnostics),
             diagnostics,
         })
-    }
-}
-impl ValidationChain {
-    fn codes_repairable(&self, diagnostics: &[Diagnostic]) -> bool {
-        !diagnostics.is_empty()
-            && diagnostics.iter().all(|d| {
-                matches!(d.severity.as_str(), "info" | "warning")
-                    || (d.severity == "error" && self.repairable_codes.contains(&d.code))
-            })
-            && diagnostics.iter().any(|d| d.severity == "error")
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

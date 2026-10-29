@@ -429,7 +429,6 @@ pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
                 max_elapsed: None,
                 ..RepairPolicy::default()
             },
-            repairable_codes: Default::default(),
         };
         let rt = Runtime {
             store: store.clone(),
@@ -515,7 +514,6 @@ pub async fn automatic_compaction<S: ControlStore>(store: Arc<S>, reopened: Arc<
         validators: vec![],
         schema: json!({"type":"object","properties":{"answer":{"type":"integer","minimum":1}},"required":["answer"]}),
         repair: RepairPolicy::default(),
-        repairable_codes: Default::default(),
     });
     let rt = Runtime {
         store: store.clone(),

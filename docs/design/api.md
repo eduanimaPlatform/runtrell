@@ -58,9 +58,15 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postgres JSONB再読取りのキー順変更でもreceiptを同じ候補へ照合する。array順と値の違いは保持する。Artifactのraw bytes hashは従来どおりbytesそのものに結び付ける。
 
-最終出力の修正可否はhostのValidationReceipt.repairableへ束縛する。JSON_SYNTAXはdriverが修正可能とし、ValidationChainはschema違反およびhostがrepairable_codesへ明示するcodeと、子validatorのreceipt分類を統合する。型付きhost validatorはschema合格後にだけ実行する。修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、`RepairPolicy.max_no_progress: NonZeroU64` の既定値3で、同じ候補と安定した診断の組が3回連続したら `VALIDATION_NO_PROGRESS` で失敗終了する。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗の分類契約は以下のCorrectable tool execution failuresを参照する。
+最終出力の修正可否は、hostのValidationReceipt.repairableと全blocking診断の明示分類を両方満たす場合にだけ許可する。Diagnostic.repairはDiagnosticRepair::{Agent,Host,Operator,Unknown}の単一判定であり、修復担当を表す。agent_can_write()とrepairable()はAgentの場合だけtrueとなる。hostがagentCanWrite等へ投影するときもこのメソッドを使い、code・パスや別の既定値から再判定しない。DataStoreのTargetValidatorは業務codeにも同じ分類を宣言できる。ValidationChain.repairable_codesは削除し、schema合格後の子validatorのreceiptと診断を保守的に統合する。driverの直接Validator経路でもHost/Operator/Unknownをreceipt flagだけで昇格させない。info/warning以外の未知severityは修復不能とする。candidateのJSON_SYNTAX／schema診断はAgentと明示する。json_artifact_diagnosticsはbytes/hashを照合して観測を設定するが、保存先の書込み権限は判断せずUnknownを返す。hostが実際の権限・修復方法を確認して分類する。host retry／operator actionの実行はhostの責務であり、RuntrellはAgentへ誤配送しない。
 
-無進展の `fingerprint` と `consecutive` は `repair.no_progress`／`tool_repair.no_progress` に保存し、runtime・claimの再作成後も継続する。正常JSONはcanonical digest（キー順・空白を無視、array順と文字列値は保持）、不正JSONのraw文字列は連続空白を1空白へ正規化する。診断はcode/file/path/schema_path/artifact/field/ruleの集合を整列・重複除去して照合し、自由文cause/hintとposition/spanを除外する。候補か安定診断が変わると連続数は1へ戻る。toolはtool名と入力を候補に含め、schema違反・修正可能な実行失敗を同じ仕組みで判定する。終了理由は最大4個の64文字以内の大文字ASCII codeだけを付け、本文・パス・hintを流出させない。直近の完全な診断は既存のlast_validation／last_tool_validationに残る。これは品質向上の判定ではなく連続同一失敗の検出であり、A/Bを交互に返す場合は既存の回数・時間・予算・期限が停止を担う。新fieldは必須の公開契約であり旧形式fallbackはない。無進展停止は費用・停滞を抑える制御であり、診断欠落やowner不備そのものの修正完了を意味しない。反復時はモデル能力よりhost/tool/schema/validatorと検証対象の配線を優先調査し、原因修正後に同じ最小再現で成功を確認する。
+修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: NonZeroU64の既定値3で、同じ失敗fingerprintが3回出現するとVALIDATION_NO_PROGRESSで失敗終了する。A→B→A→B→AでもAの3回目で停止する。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
+
+進展の観測はDiagnostic.observation: Option<ArtifactObservation>でhostが渡す。artifactは安定した対象識別子、versionはArtifactVersion::ContentDigest（検査したbytesのdigest）またはRevision（内容を表すhost管理の版）とする。内容が同じ書込みでも増える保存世代・Runのcheckpoint revisionを内容版として使わず、その場合はcontent digestを使う。Runtrellはパスを推測せず、ファイルを独自に読み直さず、品質改善を推定しない。観測がある診断は対象・内容・規則・担当の変化を進展として扱い、completion envelopeや文面だけの変化は進展としない。観測のない診断はcandidateを含めて照合するため、混合receiptのcandidate側の修正も検出できる。対象の内容が変われば最終envelopeが同じでも別fingerprintとなる。hostは診断と同じ検査時点の正しい観測を渡し、stale digest等はConflictとして扱う。
+
+fingerprintはrun・修復role（validation/tool）・validator名/版・config・basisへ束縛する。code/file/path/schema_path/artifact/field/rule/repair/observationと、必要なcandidateを診断ごとにcanonical化し、集合を整列・重複除去する。info/warning、cause/hint、position/spanは進展判定から除外する。正常JSONはキー順・表記空白を無視し、array順と文字列値は保持する。不正JSONのraw文字列は連続空白を1空白へ正規化する。toolはtool名と入力をcandidateへ含める。repair.no_progress／tool_repair.no_progressへfingerprint・occurrences・visits（fingerprint別出現数）を保存し、runtime・claim再作成、process再起動、context compactionで失わない。visitsは異なる失敗の数に比例して増えるため、通常のhost予算・期限・任意修正上限とcheckpoint保存制約を維持する。旧consecutive形式の読替えは追加しない。
+
+終了理由は最大4個の64文字以内の大文字ASCII codeだけを付け、本文・パス・hintを流出させない。直近の完全な診断はlast_validation／last_tool_validationに残す。新しい公開fieldは必須であり、旧形式fallbackはない。無進展停止は費用・停滞を抑える制御であり、診断欠落やowner不備そのものの修正完了を意味しない。反復時はモデル能力よりhost/tool/schema/validatorと検証対象の配線を優先調査し、原因修正後に同じ最小再現で成功を確認する。
 
 通常driverはmetadata.stop_reason=max_tokensを継続可能な応答として扱う。usageを先に精算し、応答のtool callは採用しない。RunSpec.continuationの文面（汎用の短文を既定）を履歴へ追加して別operationを作り、出力枠を再見積りする。回数の固定上限はなく、任意max_continuations・予算・deadlineで停止する。
 
@@ -248,6 +254,10 @@ pub struct ValidationReceipt {
 }
 
 pub struct Diagnostic {
+    /// Trusted host classification; never inferred from a code or path.
+    pub repair: DiagnosticRepair,
+    /// Content observed by the validator, not a global workspace generation.
+    pub observation: Option<ArtifactObservation>,
     pub code: String,
     pub severity: String,
     /// Instance JSON Pointer (or business diagnostic location).
@@ -400,7 +410,7 @@ pub trait Tool: Send + Sync {
 pub struct RepairPolicy {
     pub max_repairs: Option<u64>,
     pub max_elapsed: Option<u64>,
-    /// Stop on this many consecutive identical candidate/diagnostic pairs.
+    /// Stop on this many occurrences of the same observed failure, including cycles.
     pub max_no_progress: std::num::NonZeroU64,
 }
 impl Default for RepairPolicy {

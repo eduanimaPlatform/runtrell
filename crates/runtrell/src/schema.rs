@@ -25,6 +25,8 @@ pub fn parse_json(bytes: &[u8]) -> std::result::Result<Value, Vec<Diagnostic>> {
                 .min(bytes.len())
         };
         vec![Diagnostic {
+            repair: DiagnosticRepair::Agent,
+            observation: None,
             code: "JSON_SYNTAX".into(),
             severity: "error".into(),
             path: String::new(),
@@ -56,6 +58,12 @@ pub fn json_artifact_diagnostics(bytes: &[u8], artifact: &ArtifactRef) -> Result
     let mut diagnostics = parse_json(bytes).err().unwrap_or_default();
     for diagnostic in &mut diagnostics {
         diagnostic.artifact = Some(artifact.id.clone());
+        // Storage access/ownership is a host decision, not implied by valid bytes.
+        diagnostic.repair = DiagnosticRepair::Unknown;
+        diagnostic.observation = Some(ArtifactObservation {
+            artifact: artifact.id.clone(),
+            version: ArtifactVersion::ContentDigest(artifact.hash.clone()),
+        });
     }
     Ok(diagnostics)
 }
@@ -138,6 +146,8 @@ pub fn schema_diagnostics(value: &Value, schema: &Value) -> Result<Vec<Diagnosti
     Ok(validator
         .iter_errors(value)
         .map(|e| Diagnostic {
+            repair: DiagnosticRepair::Agent,
+            observation: None,
             code: "SCHEMA_VALIDATION".into(),
             severity: "error".into(),
             path: e.instance_path().to_string(),

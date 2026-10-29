@@ -827,7 +827,7 @@ impl<
             return Err(Error::Conflict);
         }
         if !receipt.passed {
-            if !receipt.repairable {
+            if !receipt.repairable || !diagnostics_agent_repairable(&receipt.diagnostics) {
                 return self
                     .validation_failure(c, &current, output, receipt, "VALIDATION_UNREPAIRABLE")
                     .await;
@@ -843,8 +843,14 @@ impl<
             let mut progress = previous.clone();
             let diagnostics =
                 serde_json::to_value(&receipt.diagnostics).map_err(|_| Error::Storage)?;
-            let stalled =
-                record_repair_progress(&mut progress, &progress_candidate, &diagnostics, &policy);
+            let stalled = record_repair_progress(
+                &mut progress,
+                &current,
+                "validation",
+                &progress_candidate,
+                &diagnostics,
+                &policy,
+            );
             if stalled {
                 let mut stopped = current.clone();
                 stopped.checkpoint.as_mut().ok_or(Error::Conflict)?.payload["repair"]["no_progress"] =
@@ -1180,6 +1186,8 @@ impl<
             serde_json::json!({"tool":diagnostic["tool"],"input":diagnostic["candidate"]});
         if record_repair_progress(
             &mut cp.payload["tool_repair"],
+            current,
+            "tool",
             &candidate,
             &diagnostics,
             &policy,
@@ -1452,6 +1460,8 @@ fn operation_prefix(run: &RunRecord) -> String {
 // Persist only a digest of stable diagnostic identity, excluding prose and positions.
 fn record_repair_progress(
     state: &mut Value,
+    run: &RunRecord,
+    role: &str,
     candidate: &Value,
     diagnostics: &Value,
     policy: &RepairPolicy,
@@ -1460,6 +1470,7 @@ fn record_repair_progress(
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|diagnostic| !matches!(diagnostic["severity"].as_str(), Some("info" | "warning")))
         .map(|diagnostic| {
             let mut identity = serde_json::Map::new();
             for key in [
@@ -1470,31 +1481,44 @@ fn record_repair_progress(
                 "artifact",
                 "field",
                 "rule",
+                "repair",
+                "observation",
             ] {
                 if let Some(value) = diagnostic.get(key) {
                     identity.insert(key.into(), value.clone());
                 }
             }
-            Value::Object(identity).to_string()
+            // Once the host observes an artifact, envelope/prose changes do not
+            // constitute progress. Unobserved candidate diagnostics still bind
+            // the candidate, even in a mixed receipt.
+            if diagnostic.get("observation").is_none_or(Value::is_null) {
+                identity.insert("candidate".into(), candidate.clone());
+            }
+            digest(&Value::Object(identity))
         })
         .collect();
     identities.sort();
     identities.dedup();
-    let fingerprint = digest(&serde_json::json!({"candidate":candidate,"diagnostics":identities}));
-    let previous = &state["no_progress"];
-    let consecutive = if previous["fingerprint"] == fingerprint {
-        previous["consecutive"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(1)
-    } else {
-        1
-    };
+    let fingerprint = digest(&serde_json::json!({
+        "run":run.handle,"role":role,"validator":run.spec.validator,
+        "validator_version":run.spec.validator_version,"config":run.spec.config_version,
+        "basis":run.spec.basis_revision,"diagnostics":identities,
+        "empty_candidate":if identities.is_empty() {candidate} else {&Value::Null},
+    }));
     if state.is_null() {
         *state = serde_json::json!({});
     }
-    state["no_progress"] = serde_json::json!({"fingerprint":fingerprint,"consecutive":consecutive});
-    consecutive >= policy.max_no_progress.get()
+    if state["no_progress"].is_null() {
+        state["no_progress"] = serde_json::json!({"visits":{}});
+    }
+    let occurrences = state["no_progress"]["visits"][&fingerprint]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(1);
+    state["no_progress"]["visits"][&fingerprint] = occurrences.into();
+    state["no_progress"]["fingerprint"] = fingerprint.into();
+    state["no_progress"]["occurrences"] = occurrences.into();
+    occurrences >= policy.max_no_progress.get()
 }
 fn no_progress_reason(diagnostics: &Value) -> String {
     // Never copy candidate, paths, free-text causes or hints into the terminal reason.

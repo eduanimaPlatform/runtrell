@@ -811,6 +811,10 @@ pub struct JsonPosition {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
+    /// Trusted host classification; never inferred from a code or path.
+    pub repair: DiagnosticRepair,
+    /// Content observed by the validator, not a global workspace generation.
+    pub observation: Option<ArtifactObservation>,
     pub code: String,
     pub severity: String,
     /// Instance JSON Pointer (or business diagnostic location).
@@ -825,6 +829,42 @@ pub struct Diagnostic {
     pub position: Option<JsonPosition>,
     pub cause: String,
     pub hint: String,
+}
+/// One classification supplies repair owner, write permission and repairability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiagnosticRepair {
+    Agent,
+    Host,
+    Operator,
+    Unknown,
+}
+impl DiagnosticRepair {
+    pub fn agent_can_write(self) -> bool {
+        self == Self::Agent
+    }
+    pub fn repairable(self) -> bool {
+        self.agent_can_write()
+    }
+}
+/// The host binds a stable artifact identity to the bytes/revision it checked.
+/// Supply a content digest when rewriting identical bytes advances storage revisions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactObservation {
+    pub artifact: String,
+    pub version: ArtifactVersion,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArtifactVersion {
+    ContentDigest(String),
+    Revision(String),
+}
+/// Every blocking diagnostic must explicitly permit Agent repair.
+pub fn diagnostics_agent_repairable(diagnostics: &[Diagnostic]) -> bool {
+    diagnostics.iter().any(|d| d.severity == "error")
+        && diagnostics.iter().all(|d| {
+            matches!(d.severity.as_str(), "info" | "warning")
+                || (d.severity == "error" && d.repair.repairable())
+        })
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ValidationReceipt {
@@ -984,7 +1024,7 @@ pub trait Tool: Send + Sync {
 pub struct RepairPolicy {
     pub max_repairs: Option<u64>,
     pub max_elapsed: Option<u64>,
-    /// Stop on this many consecutive identical candidate/diagnostic pairs.
+    /// Stop on this many occurrences of the same observed failure, including cycles.
     pub max_no_progress: std::num::NonZeroU64,
 }
 impl Default for RepairPolicy {

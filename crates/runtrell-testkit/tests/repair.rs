@@ -2,13 +2,12 @@
 use runtrell::{assembly::*, memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 fn chain() -> ValidationChain {
     ValidationChain {
         validators: vec![],
         schema: json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer","minimum":1}}}),
         repair: RepairPolicy::default(),
-        repairable_codes: BTreeSet::from(["SCHEMA_VALIDATION".into(), "JSON_SYNTAX".into()]),
     }
 }
 async fn setup(budget: u64, deadline: Option<u64>) -> (Arc<MemoryStore>, Claim, String) {
@@ -492,4 +491,71 @@ fn validation_no_progress_survives_resume() {
     block_on(repair_contracts::no_progress_contract(Arc::new(
         MemoryStore::default(),
     )));
+}
+#[test]
+fn artifact_content_defines_progress() {
+    block_on(repair_contracts::artifact_progress_contract(Arc::new(
+        MemoryStore::default(),
+    )));
+}
+
+#[test]
+fn receipt_flag_cannot_promote_host_or_unknown_diagnostics() {
+    struct Classified(DiagnosticRepair);
+    impl Validator for Classified {
+        fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt> {
+            let mut diagnostics = schema_diagnostics(candidate, &json!({"required":["missing"]}))?;
+            diagnostics[0].repair = self.0;
+            Ok(ValidationReceipt {
+                hash: digest(candidate),
+                basis_revision: run.spec.basis_revision,
+                config_version: run.spec.config_version.clone(),
+                validator: run.spec.validator.clone(),
+                validator_version: run.spec.validator_version.clone(),
+                passed: false,
+                repairable: true,
+                diagnostics,
+            })
+        }
+    }
+    block_on(async {
+        for repair in [
+            DiagnosticRepair::Host,
+            DiagnosticRepair::Operator,
+            DiagnosticRepair::Unknown,
+        ] {
+            let (store, claim, _) = setup(1000, None).await;
+            let run = store.get(&claim.run).await.unwrap();
+            let chain = ValidationChain {
+                schema: json!({}),
+                repair: RepairPolicy::default(),
+                validators: vec![VersionedValidator {
+                    key: runtrell::data::ValidatorKey::new(
+                        &run.spec.validator,
+                        &run.spec.validator_version,
+                    ),
+                    validator: Arc::new(Classified(repair)),
+                }],
+            };
+            assert!(!chain.validate(&run, &json!({})).unwrap().repairable);
+            // The direct Validator path must enforce the same rule as the chain.
+            let model = FakeModel::scripted(vec![FakeModel::decision(json!({}))]);
+            let result = Runtime {
+                store,
+                model: model.clone(),
+                tools: Vec::<BusinessTool>::new(),
+                policy: FakePolicy::default(),
+                clock: TestClock::default(),
+                validator: Arc::new(Classified(repair)),
+                finalizer: Arc::new(DecisionFinalizer),
+            }
+            .drive(&claim)
+            .await
+            .unwrap();
+            assert!(
+                matches!(result.state, RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("VALIDATION_UNREPAIRABLE"))
+            );
+            assert_eq!(model.requests.lock().unwrap().len(), 1);
+        }
+    });
 }
