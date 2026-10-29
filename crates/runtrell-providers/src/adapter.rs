@@ -3,6 +3,7 @@ use crate::*;
 use reqwest::{Client, Url, header::HeaderValue};
 use runtrell::*;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +38,56 @@ pub(crate) enum HttpResult {
 }
 fn invalid() -> Error {
     Error::Invalid("provider request or configuration".into())
+}
+
+// Request-local reversible aliases. History is included because a past call can
+// refer to a tool no longer advertised in the current catalog.
+struct ToolNames {
+    to_wire: BTreeMap<String, String>,
+    to_logical: BTreeMap<String, String>,
+}
+impl ToolNames {
+    fn new(request: &PreparedModelRequest, wire: Wire) -> Result<Self> {
+        let mut names = Self {
+            to_wire: BTreeMap::new(),
+            to_logical: BTreeMap::new(),
+        };
+        for name in request.tools.iter().map(|t| t.name.as_str()).chain(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.role != "provider")
+                .filter_map(|m| m.tool.as_deref()),
+        ) {
+            let alias = if wire == Wire::GenerateContent
+                || (!name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')))
+            {
+                name.to_owned()
+            } else {
+                digest(&json!(name))
+            };
+            if names
+                .to_logical
+                .get(&alias)
+                .is_some_and(|previous| previous != name)
+            {
+                return Err(Error::Invalid("provider tool name collision".into()));
+            }
+            names.to_logical.insert(alias.clone(), name.to_owned());
+            names.to_wire.insert(name.to_owned(), alias);
+        }
+        Ok(names)
+    }
+    fn wire(&self, name: &str) -> Result<&str> {
+        self.to_wire
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(invalid)
+    }
 }
 impl Adapter {
     pub(crate) fn new(config: Config, wire: Wire) -> Result<Self> {
@@ -108,6 +159,7 @@ impl Adapter {
             return Err(Error::PermissionDenied);
         }
         self.document_bound(request)?;
+        let names = ToolNames::new(request, self.wire)?;
         let c = &self.config.capabilities;
         let l = &c.limits;
         if request.model != l.model
@@ -180,7 +232,7 @@ impl Adapter {
                     if m.role == "tool" {
                         json!({"type":"function_call_output","call_id":m.call_id.as_ref().ok_or_else(invalid)?,"output":output})
                     } else if let Some(id) = &m.call_id {
-                        json!({"type":"function_call","call_id":id,"name":m.tool.as_ref().ok_or_else(invalid)?,"arguments":m.data.to_string()})
+                        json!({"type":"function_call","call_id":id,"name":names.wire(m.tool.as_deref().ok_or_else(invalid)?)?,"arguments":m.data.to_string()})
                     } else {
                         json!({"role":m.role,"content":[{"type":if m.role == "assistant" {"output_text"} else {"input_text"},"text":m.text}]})
                     }
@@ -189,7 +241,7 @@ impl Adapter {
                     if m.role == "tool" {
                         json!({"role":"tool","tool_call_id":m.call_id.as_ref().ok_or_else(invalid)?,"content":output})
                     } else if let Some(id) = &m.call_id {
-                        json!({"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":m.tool.as_ref().ok_or_else(invalid)?,"arguments":m.data.to_string()}}]})
+                        json!({"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":names.wire(m.tool.as_deref().ok_or_else(invalid)?)?,"arguments":m.data.to_string()}}]})
                     } else {
                         json!({"role":m.role,"content":m.text})
                     }
@@ -219,11 +271,11 @@ impl Adapter {
                 Wire::GenerateContent => messages.push(json!({"role":"user","parts":images.iter().map(|i| json!({"inlineData":{"mimeType":i.mime_type(),"data":i.data_base64()}})).collect::<Vec<_>>()})),
             }
         }
-        let functions: Vec<_> = request.tools.iter().map(|t| match self.wire {
-            Wire::Responses => json!({"type":"function","name":t.name,"description":t.capability,"parameters":t.input_schema,"strict":false}),
-            Wire::Chat => json!({"type":"function","function":{"name":t.name,"description":t.capability,"parameters":t.input_schema}}),
+        let functions: Vec<_> = request.tools.iter().map(|t| Ok(match self.wire {
+            Wire::Responses => json!({"type":"function","name":names.wire(&t.name)?,"description":t.capability,"parameters":t.input_schema,"strict":false}),
+            Wire::Chat => json!({"type":"function","function":{"name":names.wire(&t.name)?,"description":t.capability,"parameters":t.input_schema}}),
             Wire::GenerateContent => json!({"name":t.name,"description":t.capability,"parametersJsonSchema":t.input_schema}),
-        }).collect();
+        })).collect::<Result<_>>()?;
         let mut body = match self.wire {
             Wire::Responses => {
                 json!({"model":l.model,"input":messages,"max_output_tokens":request.max_output,"store":false,"include":["reasoning.encrypted_content"]})
@@ -399,6 +451,7 @@ impl Adapter {
         Ok(HttpResult::Json(parsed))
     }
     fn reply(&self, v: &Value, request: &PreparedModelRequest) -> Result<ExternalResult> {
+        let names = ToolNames::new(request, self.wire)?;
         let usage = self.usage(v)?;
         let mut text = String::new();
         let mut calls = Vec::new();
@@ -534,6 +587,13 @@ impl Adapter {
                 (stop, candidate["content"].clone(), v["responseId"].as_str())
             }
         };
+        for call in &mut calls {
+            if let Some(logical) = names.to_logical.get(&call.name) {
+                call.name = logical.clone();
+            } else {
+                partial_calls = true;
+            }
+        }
         if (partial_calls && matches!(stop, StopReason::Completed | StopReason::ToolCall))
             || (stop == StopReason::ToolCall
                 && (calls
@@ -863,3 +923,6 @@ macro_rules! adapter {
 adapter!(OpenAi, "openai", Responses);
 adapter!(Gemini, "gemini", GenerateContent);
 adapter!(OpenRouter, "openrouter", Chat);
+
+#[cfg(test)]
+mod tool_name_tests;

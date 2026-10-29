@@ -890,3 +890,189 @@ async fn gemini_failure_preserves_usage() {
 async fn openrouter_failure_preserves_usage() {
     failure_usage(OpenRouter::new).await;
 }
+
+fn named_request(names: &[&str]) -> ModelRequest {
+    let mut req = tool_request();
+    let descriptor = req.tools[0].clone();
+    req.tools = names
+        .iter()
+        .map(|name| {
+            let mut tool = descriptor.clone();
+            tool.name = (*name).into();
+            tool
+        })
+        .collect();
+    req
+}
+fn tool_wire_name(name: &str, kind: &str) -> String {
+    if kind == "gemini"
+        || (name.len() <= 64
+            && !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
+        name.into()
+    } else {
+        digest(&json!(name))
+    }
+}
+fn named_response(kind: &str, name: &str) -> Value {
+    let mut v = response(kind, "tool_call", true);
+    match kind {
+        "openai" => v["output"][0]["name"] = json!(name),
+        "gemini" => v["candidates"][0]["content"]["parts"][0]["functionCall"]["name"] = json!(name),
+        _ => v["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = json!(name),
+    }
+    v
+}
+async fn tool_name_contract<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
+    let long = "x".repeat(65);
+    let names = ["files.list", "files_list", long.as_str(), "x", "a"];
+    let wire_name = tool_wire_name("files.list", kind);
+    let (url, task) = server(200, "", named_response(kind, &wire_name)).await;
+    let model = make(config(url.clone())).unwrap();
+    let mut req = named_request(&names);
+    req.messages.push(Message {
+        role: "assistant".into(),
+        text: String::new(),
+        call_id: Some("old-call".into()),
+        tool: Some("files.list".into()),
+        data: json!({"q":1}),
+    });
+    req.messages.push(Message {
+        role: "tool".into(),
+        text: String::new(),
+        call_id: Some("old-call".into()),
+        tool: Some("files.list".into()),
+        data: json!({"value":2}),
+    });
+    let identity = digest(&serde_json::to_value(&req).unwrap());
+    let (reply, _) = applied(model.invoke(&context(), text(req.clone())).await.unwrap());
+    assert_eq!(reply.calls.len(), 1);
+    assert_eq!(reply.calls[0].name, "files.list");
+    assert_eq!(reply.calls[0].id, "call-1");
+    assert_eq!(digest(&serde_json::to_value(&req).unwrap()), identity);
+    // Reconstruct an adapter and replay its saved provider state.
+    let mut next = req.clone();
+    next.tools.reverse();
+    next.messages.push(Message {
+        role: "provider".into(),
+        text: String::new(),
+        call_id: None,
+        tool: None,
+        data: reply.metadata,
+    });
+    next.messages.push(Message {
+        role: "assistant".into(),
+        text: String::new(),
+        call_id: Some("call-1".into()),
+        tool: Some("files.list".into()),
+        data: json!({"q":1}),
+    });
+    next.messages.push(Message {
+        role: "tool".into(),
+        text: String::new(),
+        call_id: Some("call-1".into()),
+        tool: Some("files.list".into()),
+        data: json!({"value":2}),
+    });
+    let (again, _) = applied(
+        make(config(url))
+            .unwrap()
+            .invoke(&context(), text(next))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(again.calls[0].name, "files.list");
+    let sent = task.await.unwrap();
+    assert_eq!(sent.len(), 2);
+    for raw in sent {
+        let body: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let definitions = match kind {
+            "gemini" => body["tools"][0]["functionDeclarations"].as_array().unwrap(),
+            _ => body["tools"].as_array().unwrap(),
+        };
+        let mut actual = Vec::new();
+        for def in definitions {
+            let name = if kind == "openrouter" {
+                def["function"]["name"].as_str().unwrap()
+            } else {
+                def["name"].as_str().unwrap()
+            };
+            if kind != "gemini" {
+                assert!(name.len() <= 64);
+                assert!(
+                    name.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                );
+            }
+            actual.push(name.to_owned());
+        }
+        let mut expected: Vec<_> = names.iter().map(|n| tool_wire_name(n, kind)).collect();
+        expected.sort();
+        actual.sort();
+        assert_eq!(actual, expected);
+        actual.dedup();
+        assert_eq!(actual.len(), names.len());
+        match kind {
+            "openai" => {
+                assert_eq!(body["input"][1]["name"], wire_name);
+                if body["input"].as_array().unwrap().len() > 3 {
+                    assert_eq!(body["input"][3]["name"], wire_name);
+                }
+            }
+            "gemini" => assert_eq!(
+                body["contents"][1]["parts"][0]["functionCall"]["name"],
+                "files.list"
+            ),
+            _ => {
+                assert_eq!(
+                    body["messages"][1]["tool_calls"][0]["function"]["name"],
+                    wire_name
+                );
+                if body["messages"].as_array().unwrap().len() > 3 {
+                    assert_eq!(
+                        body["messages"][3]["tool_calls"][0]["function"]["name"],
+                        wire_name
+                    );
+                }
+            }
+        }
+    }
+    let (url, task) = server(200, "", named_response(kind, "unknown_wire_name")).await;
+    let (reply, _) = applied(
+        make(config(url))
+            .unwrap()
+            .invoke(&context(), text(req))
+            .await
+            .unwrap(),
+    );
+    assert!(reply.calls.is_empty());
+    assert_eq!(reply.metadata["stop_reason"], "unknown");
+    assert_eq!(task.await.unwrap().len(), 1);
+    if kind != "gemini" {
+        let collision = tool_wire_name("files.list", kind);
+        let (url, task) = server(200, "", response(kind, "completed", false)).await;
+        let model = make(config(url)).unwrap();
+        let req = text(named_request(&["files.list", &collision]));
+        assert!(model.input_upper_bound(&req).is_err());
+        assert!(model.invoke(&context(), req).await.is_err());
+        assert!(task.await.unwrap().is_empty());
+    }
+}
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn openai_tool_names() {
+    tool_name_contract(OpenAi::new, "openai").await;
+}
+#[cfg(feature = "openrouter")]
+#[tokio::test]
+async fn chat_tool_names() {
+    tool_name_contract(OpenRouter::new, "openrouter").await;
+}
+#[cfg(feature = "gemini")]
+#[tokio::test]
+async fn gemini_tool_names() {
+    tool_name_contract(Gemini::new, "gemini").await;
+}

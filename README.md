@@ -64,6 +64,11 @@ the owning Run/session before sending. Public OSS image adapters `OpenAiImages`
 (`openai`) and `GeminiImages` (`gemini`) supply optional generation and reference
 editing through the same standard image tools. Models are host supplied.
 Remote lookup/idempotency are not claimed.
+OpenAI Responses and chat completions (including OpenRouter) translate tool names
+to deterministic wire names matching `[a-zA-Z0-9_-]{1,64}` and restore logical
+names in returned calls. Definitions and function-call history use the same table;
+collisions fail before sending. Gemini names are unchanged. See the
+[tool-name contract](docs/design/providers.md#contract) for mapping and replay details.
 Optional [attachments](docs/design/attachments.md) support fixed external
 URL/bytes and authorized Workspace/Artifact versions. `DocumentView` inspects PDF
 page count and attaches selected pages; PNG/JPEG/WebP use ordinary image input

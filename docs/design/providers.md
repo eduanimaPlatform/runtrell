@@ -22,6 +22,20 @@ host's ImageLimits; PNG is the default, still JPEG/WebP are opt-in. See
 
 ## Contract
 
+OpenAI Responses and chat completions (including OpenRouter) use a per-request
+tool-name table for definitions, ordinary function-call history, and returned
+calls. Nonempty names of at most 64 ASCII letters, digits, underscores or hyphens
+are unchanged; other logical names use the 64 lowercase hexadecimal characters
+of `digest(JSON string of the logical name)` (SHA-256). The table includes logical
+names from tools and ordinary history. Any collision between distinct logical
+names is a configuration error before sending, rather than a guessed alias.
+Names are independent of catalog order. Returned names must match the table and
+the current tool catalog; unknown names produce the existing unknown-stop reply.
+Host requests, catalog identities, call IDs and replay proofs retain logical
+names. Saved provider continuation content retains wire names for exact replay;
+the deterministic mapping also applies after adapter reconstruction. Gemini
+generateContent keeps logical names unchanged.
+
 Optional file attachments use `ModelRequest.attachments`: external declarations
 fix opaque reference ID, version, page range, MIME, byte length and SHA-256.
 Stored attachments reuse the existing Workspace/Artifact `ImageReference` contract.
