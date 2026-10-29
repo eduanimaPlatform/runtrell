@@ -54,7 +54,8 @@ queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。�
 |---|---|
 | 受付 | request同値照合、Run、session sequence、有限queueとpermit |
 | 子受付 | 親claimのfence、固定入力spec同値照合、新規作成時の取消/終端/絶対期限/session/tenant/口座の検査、子Run/queue/permit、ChildRun slot、親操作のAccepted結果（child Run ID）。同じtransaction内でstartの遷移を再使用し、外部送信はしない |
-| claim/renew | owner/generation/lease、Run revision、claim時のactive slotとqueue除去 |
+| claim | owner/generation/lease、Run revision、active slotとqueue除去 |
+| renew | 現行owner/generation/expiryを検査し、ownerのlease_untilだけを延長。Run revisionは維持し、checkpoint CASと衝突させない |
 | begin | 現owner/取消/期限/session、全祖先予約、attempt intent、帰属参照、kind別slot |
 | mark_sent | 現ownerと新規業務のfence、送信世代/回数、再送保証の世代/scope/期限 |
 | 結果 | 同値二重精算no-op/異値拒否、result/usage、全祖先の精算・unknown、slot解放、配送状態 |

@@ -391,6 +391,10 @@ pub struct Event {
 }
 
 pub trait RunStore: Send + Sync {
+    /// Extend the current owner's lease without changing RunRecord::revision.
+    /// The returned Claim and persisted owner.lease_until witness renewal;
+    /// checkpoint CAS remains valid across same-generation heartbeats.
+    /// Expired leases and mismatched worker/generation remain fenced out.
     fn renew(
         &self,
         claim: &Claim,

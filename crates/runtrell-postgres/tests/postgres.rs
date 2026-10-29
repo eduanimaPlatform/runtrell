@@ -1203,15 +1203,19 @@ async fn parallel_run_update_throughput_measurement() {
             .unwrap();
         claims.push(s.claim(&h, "worker", 0, 100).await.unwrap());
     }
-    for concurrency in [1, 8, 24] {
+    for (round, concurrency) in [1, 8, 24].into_iter().enumerate() {
         let start = std::time::Instant::now();
         for chunk in claims.chunks(concurrency) {
             let mut tasks = Vec::new();
             for c in chunk {
                 let (store, claim) = (s.clone(), c.clone());
                 tasks.push(tokio::spawn(async move {
-                    for _ in 0..20 {
-                        store.renew(&claim, 1, 100).await.unwrap();
+                    for step in 1..=20 {
+                        let now = (round as u64) * 20 + step;
+                        let renewed = store.renew(&claim, now, 100).await.unwrap();
+                        assert_eq!(renewed.worker, claim.worker);
+                        assert_eq!(renewed.generation, claim.generation);
+                        assert_eq!(renewed.lease_until, now + 100);
                     }
                 }));
             }
@@ -1227,7 +1231,15 @@ async fn parallel_run_update_throughput_measurement() {
         );
     }
     for c in claims {
-        assert_eq!(s.get(&c.run).await.unwrap().revision, 61);
+        let saved = s.get(&c.run).await.unwrap();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(
+            saved.owner,
+            Some(Claim {
+                lease_until: 160,
+                ..c
+            })
+        );
     }
 }
 

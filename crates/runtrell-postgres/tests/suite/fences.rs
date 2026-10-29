@@ -137,6 +137,84 @@ fn intent_save_failure_is_before_any_external_io() {
     });
 }
 #[test]
+fn renewal_between_check_and_checkpoint_preserves_cas() {
+    block_on(async {
+        let (s, c, _) = setup().await;
+        let before = s.check(&c, 90, true).await.unwrap();
+        let cp = Checkpoint {
+            schema: 1,
+            revision: before.revision,
+            payload: json!({"saved": "after heartbeat"}),
+            messages: vec![],
+            cursor: 0,
+        };
+        // Deterministic save interleaving: read -> heartbeat -> CAS, no sleeps.
+        let renewed = s.renew(&c, 90, 100).await.unwrap();
+        assert_eq!(renewed.run, c.run);
+        assert_eq!(renewed.worker, c.worker);
+        assert_eq!(renewed.generation, c.generation);
+        assert_eq!(renewed.lease_until, 190);
+        let mut expected = before.clone();
+        expected.owner = Some(renewed.clone());
+        assert_eq!(s.get(&c.run).await.unwrap(), expected);
+        // A shorter request cannot shorten the persisted lease, and even an
+        // unchanged heartbeat must leave the checkpoint revision intact.
+        assert_eq!(s.renew(&c, 91, 1).await.unwrap(), renewed);
+        let result = s.checkpoint(&c, before.revision, cp.clone(), 101).await;
+        assert_eq!(result, Ok(()), "same-generation heartbeat must not conflict");
+        let saved = s.get(&c.run).await.unwrap();
+        assert_eq!(saved.owner, Some(renewed));
+        assert_eq!(saved.revision, before.revision + 1);
+        assert_eq!(saved.checkpoint, Some(cp.clone()));
+        assert_eq!(
+            s.checkpoint(&c, before.revision, cp.clone(), 101).await,
+            Err(Error::Conflict),
+            "a real checkpoint write must still invalidate the old revision"
+        );
+        assert_eq!(s.get(&c.run).await.unwrap(), saved);
+        assert_eq!(s.renew(&c, 190, 100).await, Err(Error::OwnershipLost));
+        assert_eq!(
+            s.checkpoint(&c, saved.revision, cp, 190).await,
+            Err(Error::OwnershipLost)
+        );
+    });
+}
+#[test]
+fn renewal_keeps_checkpoint_cancel_and_deadline_guards() {
+    block_on(async {
+        for cancel in [false, true] {
+            let s = MemoryStore::default();
+            let a = s.create_account("t", Amount::new(100, 100), None).await.unwrap();
+            let mut spec = RunSpec::new("t", "guard", a, "input");
+            spec.deadline = Some(50);
+            let h = s.start(spec).await.unwrap();
+            let c = s.claim(&h, "worker", 0, 100).await.unwrap();
+            let before = s.check(&c, 40, true).await.unwrap();
+            if cancel {
+                s.cancel(&h, "stop").await.unwrap();
+            }
+            // Renewal remains available for cleanup after cancel/deadline,
+            // but must never authorize a new checkpoint.
+            s.renew(&c, 50, 100).await.unwrap();
+            let current = s.get(&h).await.unwrap();
+            assert_eq!(
+                s.checkpoint(&c, before.revision, Checkpoint {
+                    schema: 1,
+                    revision: before.revision,
+                    payload: Value::Null,
+                    messages: vec![],
+                    cursor: 0,
+                }, 50).await,
+                Err(if cancel { Error::Closed } else { Error::Deadline })
+            );
+            assert_eq!(s.get(&h).await.unwrap(), current);
+            assert_eq!(s.renew(&c, 50, 0).await, Err(Error::Invalid("zero lease".into())));
+            assert_eq!(s.renew(&c, 50, u64::MAX).await, Err(Error::Conflict));
+            assert_eq!(s.get(&h).await.unwrap(), current);
+        }
+    });
+}
+#[test]
 fn stale_result_and_checkpoint_are_fenced_after_lease_renew_and_handoff() {
     block_on(async {
         let (s, c, _) = setup().await;

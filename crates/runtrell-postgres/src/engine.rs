@@ -331,9 +331,8 @@ impl RunStore for PgStore {
             owner.lease_until = owner
                 .lease_until
                 .max(now.checked_add(lease).ok_or(Error::Conflict)?);
-            let renewed = owner.clone();
-            r.revision += 1;
-            Ok(renewed)
+            // Liveness is independent of checkpoint CAS; fencing uses the owner.
+            Ok(owner.clone())
         })
         .await
     }
