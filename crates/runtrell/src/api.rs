@@ -980,10 +980,21 @@ pub trait Tool: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 /// Host supplies limits and business-specific diagnostic classification.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepairPolicy {
     pub max_repairs: Option<u64>,
     pub max_elapsed: Option<u64>,
+    /// Stop on this many consecutive identical candidate/diagnostic pairs.
+    pub max_no_progress: std::num::NonZeroU64,
+}
+impl Default for RepairPolicy {
+    fn default() -> Self {
+        Self {
+            max_repairs: None,
+            max_elapsed: None,
+            max_no_progress: std::num::NonZeroU64::new(3).unwrap(),
+        }
+    }
 }
 pub trait Validator: Send + Sync {
     fn repair_policy(&self) -> RepairPolicy {

@@ -113,3 +113,170 @@ pub async fn json_artifact_repair_contract<S: ControlStore>(store: Arc<S>) {
             .any(|m| m.text.contains("JSON_SYNTAX"))
     );
 }
+
+/// Repeated failure stops before budget; candidate/diagnostic changes reset the streak.
+/// Recreate the runtime and claim after every checkpoint, for both store adapters.
+pub async fn no_progress_contract<S: ControlStore>(store: Arc<S>) {
+    use runtrell::assembly::ValidationChain;
+    struct NoisyValidator {
+        inner: ValidationChain,
+        turn: usize,
+        noise: bool,
+    }
+    impl Validator for NoisyValidator {
+        fn repair_policy(&self) -> RepairPolicy {
+            self.inner.repair_policy()
+        }
+        fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt> {
+            let mut receipt = self.inner.validate(run, candidate)?;
+            if self.noise {
+                for diagnostic in &mut receipt.diagnostics {
+                    diagnostic.cause = format!("private cause {}", self.turn);
+                    diagnostic.hint = format!("private hint {}", self.turn);
+                    diagnostic.file = Some("/private/sensitive".into());
+                }
+                if let Some(diagnostic) = receipt.diagnostics.first().cloned() {
+                    let mut unsafe_code = diagnostic.clone();
+                    unsafe_code.code = "private\nunsafe".into();
+                    receipt.diagnostics.extend([diagnostic, unsafe_code]);
+                }
+                if self.turn % 2 == 1 {
+                    receipt.diagnostics.reverse();
+                }
+            }
+            Ok(receipt)
+        }
+    }
+    for mode in [
+        "same",
+        "raw_normalized",
+        "host_limit",
+        "normalized",
+        "noise",
+        "candidate",
+        "diagnostic",
+    ] {
+        let account = store
+            .create_account("t", Amount::new(10000, 10000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new(
+                "t",
+                &format!("no-progress-{mode}"),
+                account.clone(),
+                "repair",
+            ))
+            .await
+            .unwrap();
+        let replies = match mode {
+            "raw_normalized" => vec![
+                "host recovery required",
+                " host  recovery\nrequired ",
+                "host recovery required",
+            ],
+            "host_limit" => vec!["host recovery required"; 4],
+            "normalized" => vec!["{\"answer\":0}", " { \"answer\" : 0 } ", "{\"answer\":0}"],
+            "noise" => vec!["{\"answer\":0}"; 3],
+            "candidate" => vec![
+                "{\"answer\":0}",
+                "{\"answer\":-1}",
+                "{\"answer\":-2}",
+                "{\"answer\":1}",
+            ],
+            "diagnostic" => vec![
+                "{\"answer\":0}",
+                "{\"answer\":0}",
+                "{\"answer\":0}",
+                "{\"answer\":1}",
+            ],
+            _ => vec![
+                "host recovery required",
+                "host recovery required",
+                "host recovery required",
+            ],
+        };
+        let model = FakeModel::scripted(
+            replies
+                .iter()
+                .map(|text| ModelReply {
+                    text: (*text).into(),
+                    ..FakeModel::decision(Value::Null)
+                })
+                .collect(),
+        );
+        for turn in 0..replies.len() {
+            let now = turn as u64 * 101;
+            let claim = store
+                .claim(&run, &format!("worker-{turn}"), now, 100)
+                .await
+                .unwrap();
+            let clock = TestClock::default();
+            clock.set(now);
+            let validator = ValidationChain {
+                validators: vec![],
+                // Same candidate with a genuinely changed rule/location.
+                schema: if mode == "diagnostic" && turn == 1 {
+                    json!({"required":["other"]})
+                } else {
+                    json!({"properties":{"answer":{"minimum":1}}})
+                },
+                repair: RepairPolicy {
+                    max_no_progress: std::num::NonZeroU64::new(if mode == "host_limit" {
+                        4
+                    } else {
+                        3
+                    })
+                    .unwrap(),
+                    ..RepairPolicy::default()
+                },
+                repairable_codes: std::collections::BTreeSet::from([
+                    "SCHEMA_VALIDATION".into(),
+                    "JSON_SYNTAX".into(),
+                ]),
+            };
+            let rt = Runtime {
+                store: store.clone(),
+                model: model.clone(),
+                tools: Vec::<BusinessTool>::new(),
+                policy: FakePolicy::default(),
+                clock,
+                validator: Arc::new(NoisyValidator {
+                    inner: validator,
+                    turn,
+                    noise: mode == "noise",
+                }),
+                finalizer: Arc::new(DecisionFinalizer),
+            };
+            let result = rt.drive(&claim).await.unwrap();
+            if turn + 1 < replies.len() {
+                assert_eq!(result.state, RunState::Waiting("validation repair".into()));
+            } else if matches!(mode, "candidate" | "diagnostic") {
+                assert_eq!(result.state, RunState::Terminal(Terminal::Succeeded));
+            } else {
+                let RunState::Terminal(Terminal::Failed(reason)) = result.state else {
+                    panic!("no-progress did not stop: {:?}", result.state)
+                };
+                assert!(reason.contains("VALIDATION_NO_PROGRESS"), "{reason}");
+                assert!(reason.contains(
+                    if matches!(mode, "same" | "raw_normalized" | "host_limit") {
+                        "JSON_SYNTAX"
+                    } else {
+                        "SCHEMA_VALIDATION"
+                    }
+                ));
+                assert!(!reason.contains("host recovery"));
+                assert!(!reason.contains("private"));
+                assert!(!reason.contains("sensitive"));
+                let cp = result.checkpoint.unwrap();
+                assert_eq!(
+                    cp.payload["repair"]["no_progress"]["consecutive"],
+                    replies.len()
+                );
+                assert!(cp.payload["last_validation"]["receipt"]["diagnostics"].is_array());
+            }
+        }
+        assert_eq!(model.requests.lock().unwrap().len(), replies.len());
+        assert!(store.account(&account).await.unwrap().used.tokens < 10000);
+    }
+}

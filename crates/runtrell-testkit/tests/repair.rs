@@ -486,3 +486,10 @@ fn repeated_json_syntax_failure_stops_at_host_repair_count() {
         assert_eq!(store.account(&account).await.unwrap().used.tokens, 8);
     });
 }
+
+#[test]
+fn validation_no_progress_survives_resume() {
+    block_on(repair_contracts::no_progress_contract(Arc::new(
+        MemoryStore::default(),
+    )));
+}

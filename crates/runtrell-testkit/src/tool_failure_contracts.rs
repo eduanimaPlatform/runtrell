@@ -327,7 +327,15 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
 }
 
 pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
-    for mode in ["count", "elapsed", "mixed", "budget", "edit_limit"] {
+    for mode in [
+        "count",
+        "elapsed",
+        "mixed",
+        "budget",
+        "edit_limit",
+        "no_progress",
+        "no_progress_schema",
+    ] {
         let account = store
             .create_account(
                 "t",
@@ -357,7 +365,7 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             .unwrap();
         let bad = json!({"expected_revision":1,"edits":[{"path":"a","expected_digest":file.hash,"old_text":"alpha","new_text":"gamma"}]});
         let first = match mode {
-            "mixed" => json!({"expected_revision":"bad","edits":[]}),
+            "mixed" | "no_progress_schema" => json!({"expected_revision":"bad","edits":[]}),
             "edit_limit" => json!({"expected_revision":1,"edits":[]}),
             _ => bad.clone(),
         };
@@ -368,9 +376,15 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 arguments,
             }])
         };
+        let repeated = if mode == "no_progress_schema" {
+            first.clone()
+        } else {
+            bad.clone()
+        };
         let model = FakeModel::scripted(vec![
             call("first", first),
-            call("second", bad),
+            call("second", repeated.clone()),
+            call("third", repeated),
             FakeModel::decision(json!({"decision":"keep"})),
         ]);
         let validator = runtrell::assembly::ValidationChain {
@@ -379,6 +393,7 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             repair: RepairPolicy {
                 max_repairs: matches!(mode, "count" | "mixed").then_some(1),
                 max_elapsed: (mode == "elapsed").then_some(0),
+                ..RepairPolicy::default()
             },
             repairable_codes: Default::default(),
         };
@@ -397,6 +412,9 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         };
         let done = rt.drive(&claim).await.unwrap();
         match mode {
+            "no_progress" | "no_progress_schema" => assert!(
+                matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_NO_PROGRESS"))
+            ),
             "budget" => assert!(matches!(
                 done.state,
                 RunState::Terminal(Terminal::BudgetReached(_))
@@ -410,7 +428,9 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         }
         assert_eq!(
             model.requests.lock().unwrap().len(),
-            if matches!(mode, "count" | "mixed") {
+            if mode.starts_with("no_progress") {
+                3
+            } else if matches!(mode, "count" | "mixed") {
                 2
             } else {
                 1
@@ -423,7 +443,9 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             done.checkpoint.unwrap().payload["tool_repair"]["count"]
                 .as_u64()
                 .unwrap_or(0),
-            if matches!(mode, "count" | "mixed" | "budget") {
+            if mode.starts_with("no_progress") {
+                2
+            } else if matches!(mode, "count" | "mixed" | "budget") {
                 1
             } else {
                 0

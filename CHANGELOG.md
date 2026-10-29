@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add required `RepairPolicy.max_no_progress: NonZeroU64` (default 3). Validation
+  and tool repair checkpoint consecutive identical normalized candidate/stable
+  diagnostic pairs and stop with `VALIDATION_NO_PROGRESS` plus bounded safe codes,
+  independently of repair limits, budgets and deadlines. Changed candidate or
+  diagnostic identity resets the streak; restart preserves it. Hosts must update
+  policy literals/serialized policies; no old-format fallback. See docs/design/api.md.
+
 - Add `ExternalResult::Failed.repair_hint: Option<String>` to the public tool
   contract (adapters must set it explicitly; no old-format fallback). Known
   correctable file failures now return safe code/hint tool feedback instead of

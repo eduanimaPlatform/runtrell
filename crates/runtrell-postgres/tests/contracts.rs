@@ -131,3 +131,10 @@ fn json_artifact_syntax_repairs_with_new_runtime() {
         )),
     );
 }
+
+#[test]
+fn validation_no_progress_survives_resume() {
+    support::block_on(runtrell_testkit::repair_contracts::no_progress_contract(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}

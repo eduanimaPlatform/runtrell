@@ -784,9 +784,21 @@ impl<
             .as_ref()
             .cloned()
             .unwrap_or_else(|_| Value::String(raw));
+        let progress_candidate = if parsed.is_err() {
+            Value::String(
+                output
+                    .as_str()
+                    .unwrap()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        } else {
+            output.clone()
+        };
         let current = self.store.check(c, self.clock.now(), true).await?;
         self.policy.authorize(&current, "finalize", "finalize")?;
-        // No call-count gate: only current budget, deadline and trusted receipts.
+        // Enforce budget/deadline before validation; repair policy follows the receipt.
         self.store.finalization_allowed(c, self.clock.now()).await?;
         let validator = self.validator.clone();
         let validation_run = current.clone();
@@ -828,6 +840,25 @@ impl<
             let count = previous["count"].as_u64().unwrap_or(0);
             let started = repair_started(&current).unwrap_or(self.clock.now());
             let policy = self.validator.repair_policy();
+            let mut progress = previous.clone();
+            let diagnostics =
+                serde_json::to_value(&receipt.diagnostics).map_err(|_| Error::Storage)?;
+            let stalled =
+                record_repair_progress(&mut progress, &progress_candidate, &diagnostics, &policy);
+            if stalled {
+                let mut stopped = current.clone();
+                stopped.checkpoint.as_mut().ok_or(Error::Conflict)?.payload["repair"]["no_progress"] =
+                    progress["no_progress"].clone();
+                return self
+                    .validation_failure(
+                        c,
+                        &stopped,
+                        output,
+                        receipt,
+                        &no_progress_reason(&diagnostics),
+                    )
+                    .await;
+            }
             if policy
                 .max_repairs
                 .is_some_and(|max| repair_count(&current) >= max)
@@ -845,6 +876,7 @@ impl<
             let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
             cp.payload["protocol"] = serde_json::to_value(next).map_err(|_| Error::Storage)?;
             cp.payload["repair"] = serde_json::json!({"schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started,"candidate":output,"receipt":receipt});
+            cp.payload["repair"]["no_progress"] = progress["no_progress"].clone();
             cp.messages = messages;
             self.store
                 .checkpoint(c, current.revision, cp, self.clock.now())
@@ -1139,7 +1171,26 @@ impl<
     ) -> Result<Checkpoint> {
         let policy = self.validator.repair_policy();
         let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
-        cp.payload["last_tool_validation"] = diagnostic;
+        cp.payload["last_tool_validation"] = diagnostic.clone();
+        let diagnostics = diagnostic
+            .get("diagnostics")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([{ "code": diagnostic["code"] }]));
+        let candidate =
+            serde_json::json!({"tool":diagnostic["tool"],"input":diagnostic["candidate"]});
+        if record_repair_progress(
+            &mut cp.payload["tool_repair"],
+            &candidate,
+            &diagnostics,
+            &policy,
+        ) {
+            Box::pin(
+                self.store
+                    .checkpoint(c, current.revision, cp, self.clock.now()),
+            )
+            .await?;
+            return Err(Error::Invalid(no_progress_reason(&diagnostics)));
+        }
         let started = repair_started(current).unwrap_or(self.clock.now());
         if policy
             .max_repairs
@@ -1211,7 +1262,7 @@ impl<
             if !diagnostics.is_empty() {
                 let output =
                     serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
-                let mut cp = self.prepare_tool_repair(c, &current, serde_json::json!({"candidate":input,"repairable":true,"diagnostics":diagnostics})).await?;
+                let mut cp = self.prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":input,"repairable":true,"diagnostics":diagnostics})).await?;
                 messages.push(Message {
                     role: "tool".into(),
                     text: String::new(),
@@ -1276,6 +1327,7 @@ impl<
                 return Err(Error::Conflict);
             }
             let lookup_input = input.clone();
+            let repair_input = input.clone();
             if let Some(op) = &old {
                 d = Box::pin(self.next_attempt(c, op, descriptor.retry.clone())).await?;
             }
@@ -1307,7 +1359,7 @@ impl<
                 }
                 let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
                 let mut cp = self
-                    .prepare_tool_repair(c, &current, output.clone())
+                    .prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":repair_input,"code":code,"repairable":true,"hint":hint}))
                     .await?;
                 let op = Box::pin(self.store.operation(&c.run, &key))
                     .await?
@@ -1396,6 +1448,75 @@ fn operation_prefix(run: &RunRecord) -> String {
         }
     }
     prefix
+}
+// Persist only a digest of stable diagnostic identity, excluding prose and positions.
+fn record_repair_progress(
+    state: &mut Value,
+    candidate: &Value,
+    diagnostics: &Value,
+    policy: &RepairPolicy,
+) -> bool {
+    let mut identities: Vec<String> = diagnostics
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|diagnostic| {
+            let mut identity = serde_json::Map::new();
+            for key in [
+                "code",
+                "file",
+                "path",
+                "schema_path",
+                "artifact",
+                "field",
+                "rule",
+            ] {
+                if let Some(value) = diagnostic.get(key) {
+                    identity.insert(key.into(), value.clone());
+                }
+            }
+            Value::Object(identity).to_string()
+        })
+        .collect();
+    identities.sort();
+    identities.dedup();
+    let fingerprint = digest(&serde_json::json!({"candidate":candidate,"diagnostics":identities}));
+    let previous = &state["no_progress"];
+    let consecutive = if previous["fingerprint"] == fingerprint {
+        previous["consecutive"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(1)
+    } else {
+        1
+    };
+    if state.is_null() {
+        *state = serde_json::json!({});
+    }
+    state["no_progress"] = serde_json::json!({"fingerprint":fingerprint,"consecutive":consecutive});
+    consecutive >= policy.max_no_progress.get()
+}
+fn no_progress_reason(diagnostics: &Value) -> String {
+    // Never copy candidate, paths, free-text causes or hints into the terminal reason.
+    let mut codes: Vec<_> = diagnostics
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["code"].as_str())
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .collect();
+    codes.sort();
+    codes.dedup();
+    format!(
+        "VALIDATION_NO_PROGRESS: {}",
+        codes.into_iter().take(4).collect::<Vec<_>>().join(",")
+    )
 }
 fn repair_started(run: &RunRecord) -> Option<u64> {
     let cp = run.checkpoint.as_ref()?;

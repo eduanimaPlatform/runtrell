@@ -314,7 +314,10 @@ pub async fn receipt_classification<S: ControlStore>(store: Arc<S>) {
             .await
             .unwrap();
         let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
-        let mut replies = vec![FakeModel::decision(json!({"approved":false})); 5];
+        // Keep exercising host classification while candidates make progress.
+        let mut replies: Vec<_> = (0..5)
+            .map(|attempt| FakeModel::decision(json!({"approved":false,"attempt":attempt})))
+            .collect();
         replies.push(FakeModel::decision(json!({"approved":true})));
         let model = FakeModel::scripted(replies);
         let rt = Runtime {
@@ -396,14 +399,15 @@ pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
             .await
             .unwrap();
         let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
-        let mut replies = vec![
-            FakeModel::calls(vec![ToolCall {
-                id: "bad".into(),
-                name: "typed".into(),
-                arguments: json!({"value":"bad"})
-            }]);
-            5
-        ];
+        let mut replies: Vec<_> = (0..5)
+            .map(|attempt| {
+                FakeModel::calls(vec![ToolCall {
+                    id: format!("bad-{attempt}"),
+                    name: "typed".into(),
+                    arguments: json!({"value":format!("bad-{attempt}")}),
+                }])
+            })
+            .collect();
         replies.push(FakeModel::calls(vec![ToolCall {
             id: "malformed".into(),
             name: "typed".into(),
@@ -423,6 +427,7 @@ pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
             repair: RepairPolicy {
                 max_repairs: limited.then_some(0),
                 max_elapsed: None,
+                ..RepairPolicy::default()
             },
             repairable_codes: Default::default(),
         };
