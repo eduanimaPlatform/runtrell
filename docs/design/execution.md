@@ -23,7 +23,7 @@ flockが残り得る。Readyの競合は非同期に待ち直し、元のwall枠
 冪等に成功する。Acquiring/Unknownは開始成功としない。ロック取得後はrecordを再読し、
 同じoperationを二重起動しない。単体試験は複製fdとfake supervisorで競合を固定する。
 実Linuxの並行試験は同一Runの重複start・開始直後の遷移・Run別成果物の一回だけの生成を
-確認する（Hosted未実行）。停止待ちの上限は変更しない。
+確認する。固定 SHA の Hosted 実行結果は下記「GitHub-hosted CIの受入境界」に記録する。停止待ちの上限は変更しない。
 
 ## 目的と受入境界
 
@@ -149,7 +149,7 @@ payloadの権限は管理側と別。bubblewrapの`--unshare-user`を必須と�
 
 既存のbaseline実行・CPU閾値・OOM・PID quota・ENOSPC・出力上限・network/書込み拒否・子孫停止・別process停止後の再発見・冪等回収・Python成果物保存のassertionは維持する。環境変数不足は成功returnせず失敗する。CIの結果照合だけでは将来追加される早期returnを検出できないため、payload実行と制限発動のassertionも必須条件である。
 
-本改訂のHosted runは未実行・未確認。過去のHosted成功・失敗は対応する固定commitの証拠であり、この未commit差分の成功へ読み替えない。本macOS sandboxではLinux実隔離を実行せず、Docker操作もしない。Seatbeltは入れ子sandboxの適用拒否により実隔離をローカル検証できない。修正後はHostedの各必須名と結果を確認する。
+2026-10-30 に GitHub API で確認した [run 40980045762](https://github.com/eduanimaPlatform/runtrell/actions/runs/40980045762) は commit `4f8fe3020cc9ef0652f07590b8860e7b2589369f` に対して completed/success。Linux contracts default/python、Linux isolation default/python、macOS Seatbelt の5 job がすべて成功した。証拠は当該 SHA と ubuntu-24.04 / macos-latest 構成に限定し、後続の差分や配備先に一般化しない。当時のローカル調査で Linux 実隔離を実行しなかったこと、macOS の入れ子 sandbox が Seatbelt 適用を拒否したことは、この Hosted 結果と別の環境・時点の記録である。文書だけの修正では実隔離を再実行しない。
 
 Hosted成功後も、本番構成のkernel・immutable runtime・委譲設定・tmpfs権限・耐久管理FS・mount namespace・別管理processからの回収、実provider usage/費用との整合は別途受入が必要。DB kill・電源断・failover・長時間負荷も未検証。公開CI成功は利用側の統合受入や有料操作の実行許可を意味しない。
 
@@ -160,7 +160,7 @@ Hosted成功後も、本番構成のkernel・immutable runtime・委譲設定・
 
 本番ではsystemd等で専用サービスidentity、管理state directory（0700）、`Delegate=cpu memory pids`の専用cgroup subtreeを用意し、supervisorをoperation子groupへ入れない。管理サービスにはmount/unmountを行うnamespace内のCAP_SYS_ADMINと、選択したbubblewrap・uid/gid mapping・signal・ファイル所有権操作に必要な権限だけを与える。CapabilityBoundingSet等で上限を設け、秘密情報・ネットワーク・他サービスの管理権限を与えない。CAP_SYS_ADMINだけで全配布環境が成立することは未実証であり、サービスidentity・kernel・bubblewrap版に合わせて必要権限を検証する。`PrivateMounts`等でmount namespaceを分ける場合、復旧管理processも同じnamespaceへ接続しなければならない。state rootはbubblewrapが権限を落とした後も辿れる管理配置に置く。
 
-payloadにはuser namespaceを必須とし、uid/gid 65534、capability全集合0、no_new_privs、追加userns禁止、network分離とread-only runtimeを適用する。host mount管理権限はpayloadへ渡さない。privileged DockerやsudoのHosted VMで成功しても、最小権限の本番systemd構成が実証されたことにはならない。この変更のLinux実試験は未実行で、管理側の実行担当が次を確認する。
+payloadにはuser namespaceを必須とし、uid/gid 65534、capability全集合0、no_new_privs、追加userns禁止、network分離とread-only runtimeを適用する。host mount管理権限はpayloadへ渡さない。privileged DockerやsudoのHosted VMで成功しても、最小権限の本番systemd構成が実証されたことにはならない。Hosted 構成での固定 SHA の実試験と、本番最小権限構成の受入は別である。新しい実行環境の管理側担当は次を確認する。
 
 - `cargo test -p runtrell --test linux_execution --no-run`（Python構成は`--features python`も付ける）。
 - cgroup v2・host mount権限・userns・immutable runtimeを備えた専用環境で、`RUNTRELL_LINUX_TEST=1`、`RUNTRELL_CGROUP_ROOT`、`RUNTRELL_LINUX_STATE_ROOT`を設定する。

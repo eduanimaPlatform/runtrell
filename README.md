@@ -34,8 +34,15 @@ discarding partial tool calls and reserving a newly sized request. Hosts set
 routes by request model. Original history and the active summary remain in the
 same Run checkpoint and survive resume. See [driver contracts](docs/design/api.md).
 Schema failures return JSON Pointer, cause and hint diagnostics for repair.
-Host validators classify custom failures with `ValidationReceipt.repairable`.
-Repair counts have no default limit; `RepairPolicy` supplies optional host limits.
+Host validators classify each diagnostic with
+`DiagnosticRepair::{Agent, Host, Operator, Unknown}`. Agent repair requires both
+`ValidationReceipt.repairable` and explicit Agent classification for every blocking
+diagnostic. A receipt flag cannot promote Host/Operator/Unknown failures to Agent
+responsibility; code names and paths do not grant write permission.
+Total repair counts (`max_repairs`) and elapsed time have no default limit.
+The separate required `RepairPolicy.max_no_progress: NonZeroU64` defaults to 3
+and stops a repeated failure fingerprint, including after resume. See the
+[repair contract](docs/design/api.md).
 Storage, authorization and evidence failures remain separate errors.
 
 ## PostgreSQL transaction API
@@ -135,6 +142,13 @@ no interpreter or dependency is installed. See [API](docs/design/api.md),
 [execution](docs/design/execution.md) and [Workspace](docs/design/workspace.md).
 
 ## Requirement acceptance
+
+The generated summary below and [generated trace](docs/design/requirements-trace.md)
+retain older repair/Hosted status wording. The current repair contract is stated
+above and in [API](docs/design/api.md); fixed-SHA Hosted evidence is recorded in
+[GitHub-hosted CI](#github-hosted-ci). Updating generated wording requires changes
+to `crates/xtask/src/main.rs` and regeneration, outside this documentation-only
+change. The generated counts remain unchanged.
 
 <!-- requirement-summary -->
 分類は責任の配置、状態は要件全体の到達点であり独立した軸。公開ソースに存在することや試験件数は、134要件の全達成を意味しない。利用側の責任のfake接続試験は、実hostでの業務受入の証明ではない。
@@ -309,14 +323,22 @@ no private-service secrets and cancellation of older runs for the same ref.
 Linux contract jobs use a disposable PostgreSQL 18 service and exercise both
 Python feature settings, public examples, trace generation, pinned Rig source
 hashes and package inventory. Separate isolation jobs require every expected
-test name to finish `ok`: Linux default 6 / Python 7, macOS Seatbelt 1.
+test name to finish `ok`. The [required-name inventory](crates/xtask/src/isolation.rs)
+is the reference: Linux integration default 9 / Python 10, acquisition-crash
+unit tests 3 for each feature, and macOS Seatbelt 2. These counts are not
+independent requirement totals.
 
 The Linux administrative supervisor runs through `sudo` to prepare/use the
 cgroup subtree and bounded tmpfs. The payload requires a new user namespace,
 uid/gid 65534 and no capabilities; a dedicated real-execution test checks this.
 Environment refusal, skipped tests, missing results or incomplete recovery fail
-the job. This workflow is prepared but has no confirmed hosted run yet.
-A hosted success will establish that runner configuration only. Production
+the job. [Run 40980045762](https://github.com/eduanimaPlatform/runtrell/actions/runs/40980045762)
+for commit `4f8fe3020cc9ef0652f07590b8860e7b2589369f` completed successfully:
+Linux contracts default/Python, Linux isolation default/Python and macOS
+Seatbelt all passed (five jobs). This is evidence for that SHA and those hosted
+runner configurations only. Public OSS uses the adopted standard hosted runners
+when their cost conditions are met; private-service self-hosted policy does not
+automatically apply here. This document does not guarantee account-specific pricing. Production
 kernel/runtime images, delegation, mounts, recovery storage and actual provider
 connections still require deployment-specific acceptance. See
 [execution acceptance](docs/design/execution.md#github-hosted-ciの受入境界).

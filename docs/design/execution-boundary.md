@@ -19,10 +19,10 @@ NotFound再送は、同じscope・retention内の未実行保証がある場合�
 
 ## 検証不合格と修正（rt-3c）
 
-検証の失敗結果は`passed=false`のreceiptと構造化diagnostics。`Validator::repairable`がseverity/codeを業務方針に照らして判定する。権限拒否・保存障害・receiptのhash/根拠版/構成版/検証器版不一致はErrorであり修正候補にしない。driverは最終候補でもreceiptを照合してから分類する。
+検証の失敗結果は`passed=false`のreceiptと構造化diagnostics。現在の `Validator` trait に `repairable` method はない。host は各 `Diagnostic.repair` を `DiagnosticRepair::{Agent,Host,Operator,Unknown}` で明示し、`ValidationReceipt.repairable` が true かつ全 blocking 診断が Agent の場合だけ修正可能とする。Host/Operator/Unknown を receipt flag、code、path だけで Agent へ昇格させない。info/warning 以外の未知 severity も修復不能。権限拒否・保存障害・receiptのhash/根拠版/構成版/検証器版不一致はErrorであり修正候補にしない。driverは最終候補でもreceiptを照合してから分類する。
 
 修正可能なら、候補・失敗receipt・開始時刻・修正回数・次のprotocol状態・モデル入力へ追加する診断を一つのcheckpoint CASで保存してmachine waitに移る。実行slotは解放し、hostの通常の再pollで再開する。checkpoint失敗時は追加モデルを呼ばない。Worker再起動でも同じ修正番号のoperation keyを用い、送信済み呼出しは通常のlookup経路で照合する。修正結果は毎回Validatorへ戻し、古いreceiptを転用しない。
 
-`RepairPolicy`の回数/経過時間上限はhostが供給し、既定はどちらもNone（回数上限を設けない方針）。Runの予算・期限・所有権・認可は常時適用する。経過時間上限は次のpoll開始時にも照合し、修正モデル呼出しのtimeoutにも反映する。候補での上限到達/修正不能は最新候補とreceiptを`last_validation`へ保存して理由付きFailed、予算/Run期限は既存の終端理由へ収束する。無料確定を許す口座でも追加LLMは`dispatch`の通常予約対象。保存障害・証跡不整合はErrorとしてhostへ返し、成功や修正待ちへ変換しない。
+`RepairPolicy.max_repairs` と `max_elapsed` は host が供給する任意上限で、既定はどちらも None。これとは別に `max_no_progress: NonZeroU64` は必須で既定3。失敗 fingerprint ごとの出現数を checkpoint に保持し、A→B→A→B→A のような再出現でも3回目で `VALIDATION_NO_PROGRESS` に停止する。総修正上限なしを無進展停止なしと解釈しない。詳細は [API](api.md)。Runの予算・期限・所有権・認可は常時適用する。経過時間上限は次のpoll開始時にも照合し、修正モデル呼出しのtimeoutにも反映する。候補での上限到達/修正不能は最新候補とreceiptを`last_validation`へ保存して理由付きFailed、予算/Run期限は既存の終端理由へ収束する。無料確定を許す口座でも追加LLMは`dispatch`の通常予約対象。保存障害・証跡不整合はErrorとしてhostへ返し、成功や修正待ちへ変換しない。
 
 予約拒否Waitはstateを保存してdriveを返す。待機中にDB transaction・lock・実行slotを保持しない。hostは期限内に再pollし、同じ許可検査/全祖先予約を繰り返す。Shrinkは`max(接続先min_max_output_tokens, host min_output_budget_tokens)`を満たす予約枠だけを採用する。
