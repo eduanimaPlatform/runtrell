@@ -221,6 +221,8 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
         "CONFLICT_REVISION",
         "CONFLICT_DIGEST",
         "NOT_FOUND",
+        "SEARCH_LIMIT",
+        "SEARCH_BYTES",
     ] {
         let account = store
             .create_account("t", Amount::new(1000, 1000), None)
@@ -240,7 +242,12 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
             .write(&access, "a", None, b"alpha beta alpha")
             .await
             .unwrap();
-        let good = json!({"expected_revision":1,"edits":[{"path":"a","expected_digest":file.hash,"old_text":"alpha beta","new_text":"gamma"}]});
+        let search = code.starts_with("SEARCH_");
+        let good = if search {
+            json!({"query":"alpha","limit":50,"max_bytes":15000})
+        } else {
+            json!({"expected_revision":1,"edits":[{"path":"a","expected_digest":file.hash,"old_text":"alpha beta","new_text":"gamma"}]})
+        };
         let mut bad = good.clone();
         match code {
             "MULTIPLE_MATCHES" => bad["edits"][0]["old_text"] = json!("alpha"),
@@ -248,18 +255,25 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
             "CONFLICT_REVISION" => bad["expected_revision"] = json!(0),
             "CONFLICT_DIGEST" => bad["edits"][0]["expected_digest"] = json!("stale"),
             "NOT_FOUND" => bad["edits"][0]["path"] = json!("missing"),
+            "SEARCH_LIMIT" => bad["query"] = json!(""),
+            "SEARCH_BYTES" => bad["query"] = json!("é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1)),
             _ => unreachable!(),
         }
+        let name = if search {
+            "files.search"
+        } else {
+            "files.exact_replace"
+        };
         let model = FakeModel::scripted(vec![
             FakeModel::calls(vec![ToolCall {
                 id: "bad".into(),
-                name: "files.exact_replace".into(),
+                name: name.into(),
                 arguments: bad,
             }]),
             // Reuse the provider call ID on another turn: operation keys must differ.
             FakeModel::calls(vec![ToolCall {
                 id: "bad".into(),
-                name: "files.exact_replace".into(),
+                name: name.into(),
                 arguments: good,
             }]),
             FakeModel::decision(json!({"decision":"keep"})),
@@ -270,7 +284,11 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
             tools: vec![FileTool {
                 store: data.clone(),
                 access: access.clone(),
-                action: FileAction::ExactReplace,
+                action: if search {
+                    FileAction::Search
+                } else {
+                    FileAction::ExactReplace
+                },
             }],
             policy: FakePolicy::default(),
             clock: TestClock::default(),
@@ -283,7 +301,10 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
             RunState::Terminal(Terminal::Succeeded),
             "{code}"
         );
-        assert_eq!(data.snapshot(&access).await.unwrap().revision, 2);
+        assert_eq!(
+            data.snapshot(&access).await.unwrap().revision,
+            if search { 1 } else { 2 }
+        );
         let feedback = model.requests.lock().unwrap()[1]
             .messages
             .iter()
@@ -293,14 +314,23 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
             .clone();
         assert_eq!(
             feedback["code"],
-            if code.starts_with("CONFLICT_") {
+            if code == "SEARCH_LIMIT" {
+                "TOOL_INPUT_INVALID"
+            } else if code == "SEARCH_BYTES" {
+                "SEARCH_LIMIT"
+            } else if code.starts_with("CONFLICT_") {
                 "CONFLICT"
             } else {
                 code
             }
         );
-        assert_eq!(feedback["repairable"], true);
-        assert!(!feedback["hint"].as_str().unwrap().is_empty());
+        if code == "SEARCH_LIMIT" {
+            assert_eq!(feedback["diagnostics"][0]["path"], "/query");
+            assert_eq!(feedback["diagnostics"][0]["code"], "SCHEMA_VALIDATION");
+        } else {
+            assert_eq!(feedback["repairable"], true);
+            assert!(!feedback["hint"].as_str().unwrap().is_empty());
+        }
         assert!(!feedback.to_string().contains("private-missing-text"));
         assert!(!feedback.to_string().contains("alpha"));
         let cp = done.checkpoint.unwrap();
@@ -310,7 +340,7 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
             .iter()
             .filter(|op| op.request.kind == OperationKind::Tool)
             .collect();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), if code == "SEARCH_LIMIT" { 1 } else { 2 });
         assert!(
             tools
                 .iter()
@@ -321,7 +351,7 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
                 .iter()
                 .filter(|op| op.state == OperationState::Failed)
                 .count(),
-            1
+            usize::from(code != "SEARCH_LIMIT")
         );
     }
 }
@@ -332,7 +362,7 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         "elapsed",
         "mixed",
         "budget",
-        "edit_limit",
+        "input_limit",
         "no_progress",
         "no_progress_schema",
         "no_progress_cycle",
@@ -355,7 +385,11 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             .await
             .unwrap();
         let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
-        let data = DataStore::memory(StoragePolicy::default());
+        let mut policy = StoragePolicy::default();
+        if mode == "input_limit" {
+            policy.max_edit_bytes = 128;
+        }
+        let data = DataStore::memory(policy);
         let access = Access::owner(Namespace {
             owner: run.clone(),
             agent: "main".into(),
@@ -367,7 +401,6 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         let bad = json!({"expected_revision":1,"edits":[{"path":"a","expected_digest":file.hash,"old_text":"alpha","new_text":"gamma"}]});
         let first = match mode {
             "mixed" | "no_progress_schema" => json!({"expected_revision":"bad","edits":[]}),
-            "edit_limit" => json!({"expected_revision":1,"edits":[]}),
             _ => bad.clone(),
         };
         let call = |id: &str, arguments| {
@@ -431,8 +464,8 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 done.state,
                 RunState::Terminal(Terminal::BudgetReached(_))
             )),
-            "edit_limit" => assert!(
-                matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("EDIT_LIMIT"))
+            "input_limit" => assert!(
+                matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("INPUT_LIMIT"))
             ),
             _ => assert!(
                 matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_REPAIR_LIMIT"))

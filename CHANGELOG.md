@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Declare file-tool argument bounds from the active StoragePolicy and shared
+  DataStore path/query constants. `runtrell-files-3` adds bounded list/search
+  counts, read lengths, paths, text and edit arrays. Schema violations return
+  through existing tool repair; runtime `PAGE_LIMIT`, `RANGE_LIMIT`,
+  `SEARCH_LIMIT` and `EDIT_LIMIT` return safe hints with public policy ranges.
+  UTF-8 byte and aggregate checks remain enforced at execution. Storage
+  capacity, serialized input/output limits, authority and storage failures
+  retain terminal behavior. Add shared Memory/Pg empty-query and UTF-8 repair
+  regressions plus nondefault-policy schema/store boundary tests.
+
 - Add required `Diagnostic.repair: DiagnosticRepair` and
   `Diagnostic.observation: Option<ArtifactObservation>`. Hosts declare Agent,
   Host, Operator or Unknown ownership and supply the checked artifact's content
@@ -23,7 +33,7 @@
 - Add `ExternalResult::Failed.repair_hint: Option<String>` to the public tool
   contract (adapters must set it explicitly; no old-format fallback). Known
   correctable file failures now return safe code/hint tool feedback instead of
-  ending the Run. File descriptor version is `runtrell-files-2`; numeric input
+  ending the Run. File descriptor version is `runtrell-files-3`; numeric input
   revisions/ranges must be nonnegative, and create revision is explicitly null.
   Execution and schema repair share checkpointed counts/time limits. Settled
   failures only cease blocking finalization after their protocol feedback is

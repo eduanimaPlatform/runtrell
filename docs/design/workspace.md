@@ -18,6 +18,37 @@ local rootはhost専有の既存directoryを設定する。root自体にもsymli
 
 retentionは2a Clockと同じUnix millisecond。class cleanupは保持中staging・保持中/確定済みblobが残ればPending。確定済みblobはFinal policyも適用した個別deleteを使う。Workspace/Checkpointの全体削除にはowner、期待revision、明示retain境界が必要。Run終端を自動削除許可にしない。context圧縮は明示`Runtime::compact_context`と通常loopの自動接続を提供する。hostがRunSpec.compactionで閾値を設定し、ModelPort.compaction_limitsでモデルを選ぶ。通常loopの原履歴・summary・採用済みモデル入力は同じRunのcheckpointに保存し、再開でも復元する。protocolのtool処理は保持し、summaryを別Runへコピーしない。
 
+## File tool input bounds
+
+`runtrell-files-3` の descriptor は接続された `StandardToolStore::policy()` から範囲を生成する。
+
+| tool / field | 宣言する範囲 |
+| --- | --- |
+| list / limit、search / limit | 1..=max_entries |
+| read、artifacts.read / length | 1..=max_read（byte） |
+| search / query | 非空、最大4096 UTF-8 byte（DataStoreと共有する定数） |
+| search / max_bytes | 128..=max_read（下限はDataStoreと共有する定数） |
+| read、write、delete、exact_replace / path | 1..=1024 ASCII byte、各component 1..=128、正規相対path |
+| write / text | Workspace class の max_bytes を maxLength へ反映 |
+| exact_replace / edits | 1..=max_edits |
+| exact_replace / old_text、new_text | 各 max_edit_bytes を maxLength へ反映、old_text は非空 |
+| revision、offset、expected_revision | u64 の非負範囲。write の expected_revision は明示nullも許す |
+
+JSON Schemaの `maxLength` はUnicode文字数であり、UTF-8 byte数や複数editの合計量を表現しない。
+文字数上限は同じpolicy値から生成する必要条件であり、byte単位の十分条件とはしない。
+queryは最大4096 UTF-8 byte、全editのold_text/new_text合計はmax_edit_bytes、
+全toolのJSON直列化入力はmax_edit_bytes、Workspace全file合計はclass容量という実検査を維持する。
+これらの意味をschemaのdescriptionにも提示する。空のnew_textやwrite textは有効。
+cursorは保存済みpageの値を使い、offsetは現在のfile/blob長との実行時照合を行う。
+ArtifactRefは保存済み参照をそのまま返す。所有権・digest・metadata・manifestの照合は実行時に行い、
+不一致を引数範囲の修復へ分類しない。
+
+schema違反は通常のtool_repairでモデルへ返し、実行時のPAGE_LIMIT／RANGE_LIMIT／SEARCH_LIMIT／EDIT_LIMITも
+policy値入りの固定hintで修正可能にする。容量・保存上限・INPUT_LIMIT・SEARCH_MATCH_TOO_LARGE・権限・storageは終端のまま。
+非既定policyの境界試験でschema宣言とDataStoreの検査を照合し、Unicodeのbyte超過は実行時修復を試験する。
+Memory/Pgの共通driver試験は空query→schema失敗結果→修正search→成功と、Unicode byte超過→実行時失敗結果→修正→成功を保証する。
+PgはControlStoreであり、この試験でもfile bytesはDataStore::memoryが保持する。
+
 ## Backend契約の拡張（rt-3c）
 
 標準ツールはWorkspaceStore/ArtifactStoreと証跡用traitを要求し、具体backendを要求しない。Savedは不変blobとmanifestの照合後、Finalizedは現在版・hash・保存済み証跡を照合したcommit markerの保存後にだけ公開する。blob保存、manifest公開、証跡保存、確定marker、Run終端は順序付きの別境界とし、分散transactionを要求しない。adapterは各境界をCASし、応答喪失後は同一IDで再照会する。stagingは所有namespaceと期限を持ち、未確定データだけを所有者が期限後に回収する。確定済みデータをstaging GCの対象にしてはならない。

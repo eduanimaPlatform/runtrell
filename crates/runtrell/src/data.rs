@@ -22,13 +22,18 @@ fn invalid(code: &str) -> Error {
     Error::Invalid(code.into())
 }
 /// Portable ASCII paths; case aliases are rejected when building a manifest.
+pub const MAX_LOGICAL_PATH_BYTES: usize = 1024;
+pub const MAX_PATH_COMPONENT_BYTES: usize = 128;
+pub const MAX_SEARCH_QUERY_BYTES: usize = 4096;
+pub const MIN_SEARCH_BYTES: usize = 128;
+
 pub fn logical_path(path: &str) -> Result<()> {
-    if path.len() > 1024
+    if path.len() > MAX_LOGICAL_PATH_BYTES
         || path.split('/').any(|p| {
             p.is_empty()
                 || p == "."
                 || p == ".."
-                || p.len() > 128
+                || p.len() > MAX_PATH_COMPONENT_BYTES
                 || !p
                     .bytes()
                     .all(|b| b.is_ascii_alphabetic() || b.is_ascii_digit() || b"._-".contains(&b))
@@ -1384,10 +1389,10 @@ impl WorkspaceStore for DataStore {
             let a = &a;
             let query = &query;
             if query.is_empty()
-                || query.len() > 4096
+                || query.len() > MAX_SEARCH_QUERY_BYTES
                 || limit == 0
                 || limit > this.policy.max_entries
-                || max_bytes < 128
+                || max_bytes < MIN_SEARCH_BYTES
                 || max_bytes > this.policy.max_read
             {
                 return Err(invalid("SEARCH_LIMIT"));

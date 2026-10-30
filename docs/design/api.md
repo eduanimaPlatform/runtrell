@@ -106,7 +106,7 @@ Only a new model call may attempt a corrected action. Budgets, deadlines,
 authorization and unknown-outcome reconciliation remain mandatory.
 
 File tools opt in only known input/match errors and workspace CAS/path lookup
-failures. Limit/capacity, storage, permission, artifact-integrity and unknown
+failures. Storage capacity, output exhaustion, storage, permission, artifact-integrity and unknown
 errors remain fatal. Feedback excludes file bodies, raw decoder errors and
 secrets. Acceptance covers deterministic Memory and PostgreSQL driver repair,
 shared limits and recovery without re-executing a saved operation.
@@ -120,13 +120,24 @@ shared limits and recovery without re-executing a saved operation.
 | Invalid `expected_revision` shape | Schema repair before invocation; adapter diagnostic also allows correcting revision |
 | Workspace `Conflict`, `NotFound` | Repair: refresh list/read revision/digest/cursor or select/create the correct path |
 | Artifact `Conflict`, `NotFound` | Fatal: do not reinterpret missing/inconsistent owned references as workspace CAS |
-| `INPUT_LIMIT`, `EDIT_LIMIT`, `PAGE_LIMIT`, `RANGE_LIMIT`, `SEARCH_LIMIT`, `SEARCH_MATCH_TOO_LARGE` | Fatal resource/output stop; limits are unchanged |
+| `EDIT_LIMIT`, `PAGE_LIMIT`, `RANGE_LIMIT`, `SEARCH_LIMIT` | Repair: correct argument count/byte range using a safe hint generated from the store policy; limits are unchanged |
+| `INPUT_LIMIT`, `SEARCH_MATCH_TOO_LARGE` | Fatal serialized-input/output resource stop; limits are unchanged |
 | `CAPACITY`, other capacity/identity/metadata errors, decoder errors, unknown invalid codes | Fatal; no guessed classification |
 | `Storage`, `PermissionDenied`, other errors | Fatal; never ask the model to repair host authority or storage |
 
 Custom `StandardToolStore` adapters must reserve workspace `Conflict` for
 known atomic CAS/input conflicts and `NotFound` for requested paths; report
 backend/transaction uncertainty as `Storage` or the appropriate non-input error.
+
+File descriptor version `runtrell-files-3` declares the active store's page,
+read/search and edit-count bounds in its input schema. The canonical path and
+search-query constants are shared with `DataStore`. Schema rejection uses the
+existing `TOOL_INPUT_INVALID` feedback and checkpointed `tool_repair` path before
+dispatch; execution rejects byte/count violations with safe fixed prose plus
+public policy values, never copied input or storage diagnostics. A corrected
+call is a new operation. Capacity, authority, integrity and storage errors do
+not become repairable merely because another argument error is repairable.
+See [workspace.md](workspace.md#file-tool-input-bounds) for byte semantics.
 
 <!-- generated-contracts -->
 ## Rust契約定義
