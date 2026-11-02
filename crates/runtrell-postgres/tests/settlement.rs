@@ -90,3 +90,11 @@ fn initialize_adds_the_audit_column_to_an_existing_runtime_and_connect_requires_
             .unwrap();
     });
 }
+
+#[test]
+fn lost_reply_keeps_lookup_recovery() {
+    support::block_on(async {
+        let (store, restarted) = two_stores().await;
+        settlement_contracts::lost_reply_keeps_lookup_recovery(store, restarted).await;
+    });
+}

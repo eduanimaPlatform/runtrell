@@ -45,3 +45,11 @@ fn wait_follows_the_lookup_window() {
         Arc::new(MemoryStore::default()),
     ));
 }
+#[test]
+fn lost_reply_keeps_lookup_recovery() {
+    let store = Arc::new(MemoryStore::default());
+    block_on(settlement_contracts::lost_reply_keeps_lookup_recovery(
+        store.clone(),
+        store,
+    ));
+}

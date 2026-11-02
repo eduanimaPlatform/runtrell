@@ -107,11 +107,19 @@ intersection `cached_image_input`) the lines are `i - cached - image + both`, `c
 `image - both` and `both`; the sum is rounded up once. A counter that can change the bill and is
 `None` makes `Price::cost` return `UsageUnknown`; a category with equal rates needs no count.
 
-A complete saved Applied/Failed result whose usage never settled keeps its reservation and
-unknown mark (`Operation::awaits_operator`). Asking again returns the same saved result, so the
-Run enters `Waiting(OPERATOR_ACTION_WAIT)` once the operation has no lookup window left
+A provider result that is present and complete but whose usage never settled keeps its reservation
+and unknown mark (`Operation::awaits_operator`). Asking again can only return the same evidence,
+so the Run enters `Waiting(OPERATOR_ACTION_WAIT)` once the operation has no lookup window left
 (`Operation::stalled`: `now >= recovery_until` in Unix milliseconds, or never had one) and the
-driver stops reconciling it: no lookup, no provider call, no write. While a lookup window is
+same evidence was just confirmed: a Run that is not yet parked (new worker, or another wait) looks
+the unsettled operations up once and parks only if nothing changed; a parked Run asks nothing and
+sends nothing until the owner changes it.
+
+A result that is **missing or incomplete** is not this case. A model reply flagged
+`complete: false`, or a model result with no input/output totals (for example a response lost in
+transit and saved as an empty reply), keeps the ordinary lookup/recovery path: the reopened Run
+looks it up, recovers the reply or ends `OutcomeUnknown`, never resends and holds the
+reservation. Tool results are the saved receipt itself, so a saved tool result is complete. While a lookup window is
 open the Run keeps its ordinary `external reconciliation` wait, because the adapter may still
 supply corrected measurements. There is no retry count: the state follows the evidence.
 

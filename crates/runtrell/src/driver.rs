@@ -190,11 +190,6 @@ impl<
             if op.settled {
                 continue;
             }
-            // Complete saved result, unsettled usage and no lookup window left: asking again
-            // returns the same evidence. Only the owner recovery can change it.
-            if op.stalled(self.clock.now()) {
-                continue;
-            }
             let permission = if matches!(
                 op.request.kind,
                 OperationKind::Model | OperationKind::Compaction
@@ -661,16 +656,21 @@ impl<
     }
     async fn drive_inner(&self, c: &Claim) -> Result<RunRecord> {
         let r = Box::pin(self.store.check(c, self.clock.now(), false)).await?;
-        // Operator-action wait: no lookup and no provider call while the same unsettled
-        // evidence remains. The state is written once, when it first applies.
+        // A complete provider result whose usage cannot settle. Already parked: the previous
+        // pass asked again and got the same evidence, so nothing is looked up or sent until
+        // the owner changes it. Otherwise (new worker, or another wait) look every unsettled
+        // operation up once; only if the evidence is unchanged does the Run park.
         if !matches!(r.state, RunState::Terminal(_)) && Box::pin(self.operator_blocked(c)).await? {
-            if r.state != RunState::Waiting(OPERATOR_ACTION_WAIT.into()) {
+            if r.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into()) {
+                return Ok(r);
+            }
+            Box::pin(self.reconcile(c)).await?;
+            if Box::pin(self.operator_blocked(c)).await? {
                 self.store
                     .wait(c, OPERATOR_ACTION_WAIT, self.clock.now())
                     .await?;
                 return Box::pin(self.store.get(&c.run)).await;
             }
-            return Ok(r);
         }
         if matches!(r.state, RunState::Terminal(_)) {
             Box::pin(self.reconcile(c)).await?;

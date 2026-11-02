@@ -300,17 +300,50 @@ pub struct SettlementRecord {
     pub at: u64,
 }
 impl Operation {
-    /// True when the saved result is complete but its usage never settled. Looking
-    /// the operation up again returns the same saved result, so this is not waiting
-    /// for the provider.
+    /// True when the provider result is present and complete but its usage never settled,
+    /// so looking the operation up again can only return the same evidence.
+    ///
+    /// A result that is missing or incomplete is not this case and keeps the ordinary
+    /// lookup/recovery path (and its `OutcomeUnknown` ending): a model reply flagged
+    /// `complete: false`, or a model result that reports no input/output totals (for example a
+    /// response lost in transit and saved as an empty reply). Tool results are the saved
+    /// receipt itself.
     pub fn awaits_operator(&self) -> bool {
         !self.settled
             && self.unknown_usage
             && self.recovery.is_none()
-            && matches!(
-                self.result,
-                Some(ExternalResult::Applied { .. } | ExternalResult::Failed { .. })
-            )
+            && self.provider_result_complete()
+    }
+    fn provider_result_complete(&self) -> bool {
+        let model = matches!(
+            self.request.kind,
+            OperationKind::Model | OperationKind::Compaction
+        );
+        match &self.result {
+            Some(ExternalResult::Applied { output, usage, .. }) => {
+                !model
+                    || (output["complete"] != serde_json::Value::Bool(false)
+                        && usage.input.is_some()
+                        && usage.output.is_some())
+            }
+            Some(ExternalResult::Failed { usage, .. }) => {
+                !model || (usage.input.is_some() && usage.output.is_some())
+            }
+            _ => false,
+        }
+    }
+    /// The saved Applied/Failed result: the current one, or the one kept as unsettled
+    /// evidence when a later lookup answered Unknown.
+    fn saved_evidence(&self) -> Option<&ExternalResult> {
+        [self.result.as_ref(), self.unsettled_result.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|r| {
+                matches!(
+                    r,
+                    ExternalResult::Applied { .. } | ExternalResult::Failed { .. }
+                )
+            })
     }
     /// `awaits_operator` and no lookup window left: the pinned recovery window has
     /// ended (`now >= recovery_until`, Unix milliseconds) or the operation never had
@@ -351,7 +384,7 @@ impl Operation {
         if self.settled || !self.unknown_usage {
             return Err(Error::Conflict);
         }
-        let mut result = self.result.clone().ok_or(Error::Conflict)?;
+        let mut result = self.saved_evidence().cloned().ok_or(Error::Conflict)?;
         let stored = match &result {
             ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
                 usage.clone()

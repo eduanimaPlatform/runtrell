@@ -357,6 +357,7 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
 /// A model operation whose Applied result carries no cost.
 struct Unpriced {
     inner: FakeModel,
+    lookups: Arc<AtomicU64>,
 }
 fn strip_cost(result: ExternalResult) -> ExternalResult {
     match result {
@@ -391,6 +392,7 @@ impl ModelPort for Unpriced {
         Ok(strip_cost(self.inner.invoke(c, r).await?))
     }
     async fn lookup(&self, c: &ToolContext, r: PreparedModelRequest) -> Result<Lookup> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         Ok(match self.inner.lookup(c, r).await? {
             Lookup::Found(result) => Lookup::Found(strip_cost(result)),
             other => other,
@@ -413,10 +415,12 @@ pub async fn wait_follows_the_lookup_window<S: ControlStore + 'static>(store: Ar
     let clock = TestClock::default();
     clock.set(start);
     let claim = store.claim(&run, "worker", start, 10 * DAY).await.unwrap();
+    let lookups = Arc::new(AtomicU64::new(0));
     let rt = Runtime {
         store: store.clone(),
         model: Unpriced {
             inner: FakeModel::scripted(vec![FakeModel::decision(json!({"decision":"keep"}))]),
+            lookups: lookups.clone(),
         },
         tools: Vec::<BusinessTool>::new(),
         policy: FakePolicy::default(),
@@ -438,13 +442,22 @@ pub async fn wait_follows_the_lookup_window<S: ControlStore + 'static>(store: Ar
         (start + DAY, true),
     ] {
         clock.set(now);
+        let asked = lookups.load(Ordering::SeqCst);
         let state = rt.drive(&claim).await.unwrap().state;
+        let asked = lookups.load(Ordering::SeqCst) - asked;
         let expected = if stalled {
             RunState::Waiting(OPERATOR_ACTION_WAIT.into())
         } else {
             RunState::Waiting("external reconciliation".into())
         };
         assert_eq!(state, expected, "now={now}");
+        // Window open: asks as before. At the window end the Run asks once more and parks only
+        // because the answer is unchanged; later passes by the same worker ask nothing.
+        if now == start + 1_000 {
+            assert!(asked >= 1, "parked without confirming the evidence");
+        } else if stalled {
+            assert_eq!(asked, 0, "now={now}");
+        }
         let op = store.list_operations(&run).await.unwrap().remove(0);
         assert_eq!(op.stalled(now), stalled, "now={now}");
         // Same evidence throughout: nothing was rewritten and nothing is released.
@@ -474,4 +487,150 @@ pub async fn wait_follows_the_lookup_window<S: ControlStore + 'static>(store: Ar
     assert_eq!(record.amount, Amount::new(4, 4));
     let account = store.account(&account).await.unwrap();
     assert_eq!((account.unknown, account.used), (0, Amount::new(4, 4)));
+}
+
+/// A reply lost in transit: saved as an incomplete Applied reply with no usage at all.
+struct LostReply {
+    inner: FakeModel,
+    invokes: Arc<AtomicU64>,
+    lookups: Arc<AtomicU64>,
+    recoverable: bool,
+}
+impl ModelPort for LostReply {
+    fn limits(&self) -> ModelLimits {
+        self.inner.limits()
+    }
+    fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
+        self.inner.input_upper_bound(request)
+    }
+    // No pinned recovery window: the adapter has no remote lookup guarantee.
+    fn recovery(&self) -> Option<(String, u64)> {
+        None
+    }
+    async fn invoke(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<ExternalResult> {
+        self.invokes.fetch_add(1, Ordering::SeqCst);
+        Ok(ExternalResult::Applied {
+            physical_evidence: None,
+            output: serde_json::to_value(ModelReply {
+                text: String::new(),
+                calls: vec![],
+                complete: false,
+                metadata: json!({"stop_reason":"unknown","usage_status":"absent"}),
+            })
+            .unwrap(),
+            usage: Usage {
+                model: "fake".into(),
+                ..Usage::default()
+            },
+            external_id: None,
+        })
+    }
+    async fn lookup(&self, _: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        if !self.recoverable {
+            return Ok(Lookup::Unknown);
+        }
+        let mut usage = Usage::measured(3, 1, 4);
+        usage.model = "fake".into();
+        usage.cached = Some(0);
+        Ok(Lookup::Found(ExternalResult::Applied {
+            physical_evidence: None,
+            output: serde_json::to_value(FakeModel::decision(json!({"decision":"keep"}))).unwrap(),
+            usage,
+            external_id: None,
+        }))
+    }
+}
+
+/// A provider result that is missing or incomplete is not an operator case: the reopened Run
+/// still looks it up once (no resend, reservation held) and either recovers the reply or ends
+/// with the ordinary `OutcomeUnknown`. It never enters the operator-action wait.
+pub async fn lost_reply_keeps_lookup_recovery<S: ControlStore + 'static>(
+    store: Arc<S>,
+    restarted: Arc<S>,
+) {
+    for recoverable in [true, false] {
+        let account = store
+            .create_account("t", Amount::new(1_000_000, 1_000_000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new(
+                "t",
+                &format!("lost-reply-{recoverable}"),
+                account.clone(),
+                "judge",
+            ))
+            .await
+            .unwrap();
+        let (invokes, lookups) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let clock = TestClock::default();
+        let runtime = |store: Arc<S>| Runtime {
+            store,
+            model: LostReply {
+                inner: FakeModel::default(),
+                invokes: invokes.clone(),
+                lookups: lookups.clone(),
+                recoverable,
+            },
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock: clock.clone(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        clock.set(1_000);
+        let claim = store.claim(&run, "worker", 1_000, 60_000).await.unwrap();
+        let first = runtime(store.clone()).drive(&claim).await.unwrap();
+        assert_eq!(
+            first.state,
+            RunState::Waiting("external reconciliation".into()),
+            "recoverable={recoverable}"
+        );
+        let op = store.list_operations(&run).await.unwrap().remove(0);
+        assert!(!op.awaits_operator() && !op.stalled(u64::MAX) && !op.settled);
+        let held = store.account(&account).await.unwrap();
+        assert_eq!(held.unknown, 1);
+        assert!(held.reserved.tokens > 0);
+        assert_eq!(invokes.load(Ordering::SeqCst), 1);
+
+        // Reopen on another worker and store handle, long after.
+        let now = 1_000 + 3_600_000;
+        clock.set(now);
+        let next = restarted
+            .claim(&run, "restarted", now, 60_000)
+            .await
+            .unwrap();
+        let before = lookups.load(Ordering::SeqCst);
+        let second = runtime(restarted.clone()).drive(&next).await.unwrap();
+        assert_ne!(
+            second.state,
+            RunState::Waiting(OPERATOR_ACTION_WAIT.into()),
+            "recoverable={recoverable}"
+        );
+        assert!(
+            lookups.load(Ordering::SeqCst) > before,
+            "the reopened Run must look the lost reply up"
+        );
+        assert_eq!(invokes.load(Ordering::SeqCst), 1, "no resend");
+        let held = restarted.account(&account).await.unwrap();
+        if recoverable {
+            assert_eq!(second.state, RunState::Terminal(Terminal::Succeeded));
+            assert_eq!((held.unknown, held.reserved), (0, Amount::default()));
+            assert_eq!(held.used, Amount::new(4, 4));
+            let op = restarted.list_operations(&run).await.unwrap().remove(0);
+            assert!(op.settled && op.recovery.is_none());
+        } else {
+            assert_eq!(
+                second.state,
+                RunState::Terminal(Terminal::OutcomeUnknown("usage unavailable".into()))
+            );
+            // Nothing is released or zero-filled: the reservation and unknown mark stay.
+            assert_eq!(held.unknown, 1);
+            assert!(held.reserved.tokens > 0);
+            assert_eq!(held.used, Amount::default());
+            let op = restarted.list_operations(&run).await.unwrap().remove(0);
+            assert!(!op.settled && op.unknown_usage && !op.awaits_operator());
+        }
+    }
 }
