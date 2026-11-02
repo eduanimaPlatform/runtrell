@@ -10,7 +10,26 @@ For example, a `tracing_subscriber::filter::Targets` filter can set `sqlx` to `L
 
 RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、空DBから最新schemaを作るmigrationに置き換える。リリース前のため旧schemaの検出・移行は持たない（空DBから作る）。DB schema version=4と、既存のRun/checkpoint wire schema=1は別の版である。
 
-`PgStore::open`はhostのPgPool・schema名・Capacityを受け、初期化のCOMMIT後に返る。schema名はASCII英数字/underscore、先頭は英字/underscore、最大63 bytes、`pg_` prefix不可。識別子を検証・引用し、値はbindする。再open時のCapacity不一致はConflict。adapterはDocker操作や接続情報の自動読込みをしない。
+`PgStore::initialize`は明示的な初期構築で、hostのPgPool・schema名・Capacityを受け、schema作成・migration SQL・`schema_config`とglobal permitの初期化をCOMMITしてから返る（冪等。再実行時のCapacity不一致はConflict）。デプロイ時に1回、schemaを作成・変更できるroleで呼ぶ。`PgStore::connect`は既存runtimeへ接続するだけの入口で、`READ ONLY` transaction1回でversionとCapacityを検証して返し、DDL・`schema_config`/capacityへの書込みをしない（下記）。旧`PgStore::open`は廃止した。schema名はASCII英数字/underscore、先頭は英字/underscore、最大63 bytes、`pg_` prefix不可。識別子を検証・引用し、値はbindする。adapterはDocker操作や接続情報の自動読込みをしない。
+
+## 接続専用入口（connect）と必要権限
+
+`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の13 tableの存在確認（catalogの`to_regclass`）だけである。結果は次のとおり。
+
+| 状況 | 結果 |
+|---|---|
+| schemaまたはtable、`schema_config`行が無い | `NotFound` |
+| schemaへのUSAGE、または`schema_config`のSELECTが無い | `PermissionDenied` |
+| versionが4以外 | `Unsupported("postgres schema")` |
+| 渡したCapacityが保存済みと異なる | `Conflict` |
+| schema識別子が不正 | `Invalid`（SQL実行前） |
+
+connect自体に必要な権限は次の2つだけで、CREATE・ALTER・ownership・superuserは不要。
+
+- 対象schemaへの`USAGE`
+- `<schema>.schema_config`への`SELECT`
+
+接続後のstoreでoperationを呼ぶには、そのoperationが触れるtableへの権限が別に要る（例: `get`は`runs`のSELECT、書込み系は該当tableのINSERT/UPDATE、permit取得は`capacity_slots`のSELECT/INSERT/UPDATE）。たとえばpermit取得は、tenant/Run scopeを遅延seedするため`capacity_slots`へのINSERTを伴う。operatorコマンドは、使うoperationに必要なtable権限だけを専用roleへ付与し、広域のDELETEやschema所有権を渡さない。`tests/connect.rs`が、ownerで`initialize`した後にCREATE/ALTER/所有権の無い専用LOGIN roleで`connect`でき、`schema_config`・capacity・DDLが接続前後で不変であること、各種不一致が拒否されることを実PostgreSQLで検証する。
 
 ## schemaと検索範囲
 
@@ -42,9 +61,9 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 4. 対象口座と全祖先のIDを不変の親参照から取得し、**口座ID昇順**の一つのSELECTで`FOR UPDATE`。階層の深さによらず全呼出しが同じ順序を使う。
 5. 更新対象slot/queue、容量permit。slotの直接操作はslot keyだけのadvisory lockも使う。
 
-checkpoint/renewは口座・容量のlockを取らない。全Run共通の更新lockは存在しない。schemaのadvisory lockはopenのDDL初期化時だけ使う。
+checkpoint/renewは口座・容量のlockを取らない。全Run共通の更新lockは存在しない。schemaのadvisory lockは`initialize`のDDL初期化時だけ使う。connectはlockしない。
 
-容量割当はglobal→tenant→Runの各**空きpermit**を`FOR UPDATE SKIP LOCKED`で取得する。見つからなければ同じ空き条件を`FOR UPDATE`で再検索し、一時的にlockされた空きpermitを有限に待つ（既存のlock_timeout=5秒）。lock待ち後も空きがなければBackpressure、timeout・SQL失敗はStorageとする。更新処理の失敗は明示的な`rollback().await`の完了後に返し、途中までのpermit割当ても取り消す。占有permitや共通カウンタ行を待たない。global permitは初回利用時の初期化競合も避けるためopenで作る。tenant/Runのpermitは必要なscopeだけ作る。解放は該当holderのpermitだけをscope/ordinal順でlockする。lease失効だけではpermitを解放しない。
+容量割当はglobal→tenant→Runの各**空きpermit**を`FOR UPDATE SKIP LOCKED`で取得する。見つからなければ同じ空き条件を`FOR UPDATE`で再検索し、一時的にlockされた空きpermitを有限に待つ（既存のlock_timeout=5秒）。lock待ち後も空きがなければBackpressure、timeout・SQL失敗はStorageとする。更新処理の失敗は明示的な`rollback().await`の完了後に返し、途中までのpermit割当ても取り消す。占有permitや共通カウンタ行を待たない。global permitは初回利用時の初期化競合も避けるため`initialize`で作る。tenant/Runのpermitは必要なscopeだけ作る。解放は該当holderのpermitだけをscope/ordinal順でlockする。lease失効だけではpermitを解放しない。
 
 queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。既存契約のtenant round-robinと**tenantをまたぐ**優先連続数を厳密に保つため、通常dispatchには専用の`queue_policy`行を使う。これも`SKIP LOCKED`で取得し、他dispatcherが保持中なら待たずNoneを返す。host workerは一時的な候補なしとしてpollする。**queueの順序決定だけは短いtransactionで一つずつ行う**。Run更新・受付・予算・slot操作はこの行を取得せず、全Runのstore処理を直列化しない。entryを別transactionが保持中でも、空いている別entryを取得できる。
 

@@ -26,7 +26,7 @@ async fn saved_file_failure_recovers_without_reexecution() {
         .connect(&url)
         .await
         .unwrap();
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     runtrell_testkit::tool_failure_contracts::saved_failure_recovery(
@@ -73,7 +73,7 @@ async fn driver_automatic_context_reopens_with_independent_pool() {
         .await
         .unwrap();
     let reopened = Arc::new(
-        PgStore::open(independent, &schema, Capacity::default())
+        PgStore::initialize(independent, &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -96,10 +96,10 @@ async fn empty_database_initializes_and_reopens() {
         .unwrap();
     println!("PostgreSQL server_version={version}");
     let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
-    PgStore::open(pool.clone(), &schema, Capacity::default())
+    PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
         .unwrap();
-    PgStore::open(pool, &schema, Capacity::default())
+    PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
 }
@@ -113,7 +113,7 @@ async fn setup() -> (sqlx::PgPool, String, PgStore, String, Claim) {
         .await
         .unwrap();
     let schema = format!("postgres_test_{}", uuid::Uuid::new_v4().simple());
-    let store = PgStore::open(pool.clone(), &schema, Capacity::default())
+    let store = PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
         .unwrap();
     let account = store
@@ -159,7 +159,7 @@ async fn stale_response_is_durable_observation_without_settlement() {
         s.record(&c, &op.id, applied(), 101).await,
         Err(Error::OwnershipLost)
     );
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     let late = reopened.late_results(&next, 101).await.unwrap();
@@ -207,7 +207,7 @@ async fn failed_intent_transaction_rolls_back_all_ancestors_and_slot() {
         s.begin(&owner, request("rollback", 10), 0).await,
         Err(Error::Storage)
     );
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     assert_eq!(
@@ -238,7 +238,7 @@ async fn failed_result_transaction_preserves_unknown_reservation_for_recovery() 
         s.record(&c, &op.id, applied(), 0).await,
         Err(Error::Storage)
     );
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     let b = reopened.account(&a).await.unwrap();
@@ -304,7 +304,7 @@ async fn independent_connections_compete_for_all_ancestor_balances() {
         .connect(&url)
         .await
         .unwrap();
-    let second = PgStore::open(second_pool, &schema, Capacity::default())
+    let second = PgStore::initialize(second_pool, &schema, Capacity::default())
         .await
         .unwrap();
     let (x, y) = tokio::join!(
@@ -313,7 +313,7 @@ async fn independent_connections_compete_for_all_ancestor_balances() {
     );
     assert_eq!(usize::from(x.is_ok()) + usize::from(y.is_ok()), 1);
     assert!(x == Err(Error::ReservationDenied) || y == Err(Error::ReservationDenied));
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     assert_eq!(
@@ -338,7 +338,7 @@ async fn independent_connections_compete_for_all_ancestor_balances() {
 #[tokio::test]
 async fn parallel_claim_has_one_winner_and_failed_handoff_has_no_generation_change() {
     let (pool, schema, s, _, c) = setup().await;
-    let other = PgStore::open(pool.clone(), &schema, Capacity::default())
+    let other = PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
         .unwrap();
     let (a, b) = tokio::join!(
@@ -394,7 +394,7 @@ async fn queue_slots_fairness_and_cleanup_survive_all_connections_being_discarde
     pool.close().await;
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let new_pool = PgPoolOptions::new().connect(&url).await.unwrap();
-    let s = PgStore::open(new_pool, &schema, Capacity::default())
+    let s = PgStore::initialize(new_pool, &schema, Capacity::default())
         .await
         .unwrap();
     assert_eq!(s.queue_len().await.unwrap(), 3);
@@ -441,7 +441,7 @@ async fn different_tokio_runtimes_share_one_durable_reservation_authority() {
                         .connect(&url)
                         .await
                         .unwrap();
-                    let s = PgStore::open(pool, &schema, Capacity::default())
+                    let s = PgStore::initialize(pool, &schema, Capacity::default())
                         .await
                         .unwrap();
                     s.begin(
@@ -492,14 +492,14 @@ async fn invalid_schema_and_capacity_disagreement_are_rejected() {
         "a\"b",
     ] {
         assert!(matches!(
-            PgStore::open(pool.clone(), name, Capacity::default()).await,
+            PgStore::initialize(pool.clone(), name, Capacity::default()).await,
             Err(Error::Invalid(_))
         ));
     }
     let mut cap = Capacity::default();
     cap.queue += 1;
     assert!(matches!(
-        PgStore::open(pool, &schema, cap).await,
+        PgStore::initialize(pool, &schema, cap).await,
         Err(Error::Conflict)
     ));
 }
@@ -549,7 +549,7 @@ async fn separate_agent_runtimes_cannot_double_reserve_and_loser_never_invokes()
         .unwrap();
     let c1 = s.claim(&h1, "one", 0, 100).await.unwrap();
     let c2 = s.claim(&h2, "two", 0, 100).await.unwrap();
-    let second = PgStore::open(pool, &schema, Capacity::default())
+    let second = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     let rt1 = runtime(Arc::new(s), runtrell_testkit::FakeModel::default());
@@ -615,7 +615,7 @@ async fn fresh_pool_and_agent_runtime_recover_lost_reply_without_second_model_se
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let new_pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let store = Arc::new(
-        PgStore::open(new_pool, &schema, Capacity::default())
+        PgStore::initialize(new_pool, &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -684,7 +684,7 @@ async fn sql_failure_at_start_checkpoint_cancel_and_finalize_is_not_success() {
         s.finalize(&c, completion.clone(), 0).await,
         Err(Error::Storage)
     );
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     assert_eq!(reopened.get(&c.run).await.unwrap(), before);
@@ -699,7 +699,7 @@ async fn sql_failure_at_start_checkpoint_cancel_and_finalize_is_not_success() {
 #[tokio::test]
 async fn concurrent_start_deduplicates_and_rejects_different_digest() {
     let (pool, schema, s, a, _) = setup().await;
-    let second = PgStore::open(pool, &schema, Capacity::default())
+    let second = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     let spec = RunSpec::new("t", "concurrent", a, "input");
@@ -746,7 +746,7 @@ async fn dropped_save_request_does_not_acknowledge_or_partially_accept_run() {
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     blocker.rollback().await.unwrap();
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     assert_eq!(reopened.find_request(&spec).await.unwrap(), None);
@@ -759,7 +759,7 @@ async fn dropped_save_request_does_not_acknowledge_or_partially_accept_run() {
 async fn cancel_and_finalize_use_one_transaction_order_across_pools() {
     use runtrell_testkit::{DecisionFinalizer, DecisionValidator};
     let (pool, schema, s, _, c) = setup().await;
-    let second = PgStore::open(pool, &schema, Capacity::default())
+    let second = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     let before = s.get(&c.run).await.unwrap();
@@ -809,10 +809,10 @@ async fn every_slot_kind_enforces_global_tenant_and_run_limits() {
         capacity.run.insert(kind, 1);
     }
     let schema = format!("slot_test_{}", uuid::Uuid::new_v4().simple());
-    let s = PgStore::open(pool.clone(), &schema, capacity.clone())
+    let s = PgStore::initialize(pool.clone(), &schema, capacity.clone())
         .await
         .unwrap();
-    let second = PgStore::open(pool, &schema, capacity).await.unwrap();
+    let second = PgStore::initialize(pool, &schema, capacity).await.unwrap();
     for kind in kinds {
         let slot = |key: &str, tenant: &str, run: &str| SlotRequest {
             key: format!("{kind:?}:{key}"),
@@ -847,7 +847,9 @@ async fn locked_free_permits_wait_instead_of_reporting_backpressure() {
     cap.tenant.insert(OperationKind::Tool, 1);
     cap.run.insert(OperationKind::Tool, 1);
     let schema = format!("permit_test_{}", uuid::Uuid::new_v4().simple());
-    let s = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+    let s = PgStore::initialize(pool.clone(), &schema, cap)
+        .await
+        .unwrap();
     let slot = SlotRequest {
         key: "waiting".into(),
         tenant: "t".into(),
@@ -906,7 +908,9 @@ async fn permit_lock_timeout_is_storage_and_rolls_back_partial_allocation() {
     cap.tenant.insert(OperationKind::Tool, 1);
     cap.run.insert(OperationKind::Tool, 1);
     let schema = format!("timeout_test_{}", uuid::Uuid::new_v4().simple());
-    let s = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+    let s = PgStore::initialize(pool.clone(), &schema, cap)
+        .await
+        .unwrap();
     let slot = SlotRequest {
         key: "timeout".into(),
         tenant: "t".into(),
@@ -949,7 +953,9 @@ async fn concurrent_slot_acquisitions_never_exceed_any_scope_limit() {
         cap.tenant.insert(OperationKind::Tool, limits[1]);
         cap.run.insert(OperationKind::Tool, limits[2]);
         let schema = format!("limit_test_{}", uuid::Uuid::new_v4().simple());
-        let s = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+        let s = PgStore::initialize(pool.clone(), &schema, cap)
+            .await
+            .unwrap();
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(48));
         let mut tasks = Vec::new();
         for i in 0..48 {
@@ -997,7 +1003,7 @@ async fn terminal_run_slot_left_by_crashed_worker_is_rediscoverable() {
         .finalize(&before, output, receipt)
         .unwrap();
     s.finalize(&c, completion, 0).await.unwrap();
-    let reopened = PgStore::open(pool, &schema, Capacity::default())
+    let reopened = PgStore::initialize(pool, &schema, Capacity::default())
         .await
         .unwrap();
     assert_eq!(
@@ -1067,7 +1073,9 @@ async fn parallel_store() -> (sqlx::PgPool, String, PgStore) {
         cap.tenant.insert(kind, 64);
         cap.run.insert(kind, 64);
     }
-    let store = PgStore::open(pool.clone(), &schema, cap).await.unwrap();
+    let store = PgStore::initialize(pool.clone(), &schema, cap)
+        .await
+        .unwrap();
     (pool, schema, store)
 }
 
@@ -1387,7 +1395,7 @@ async fn queue_cursor_preserves_original_rotation_and_burst_after_restart() {
         cap.tenant.insert(kind, 64);
         cap.run.insert(kind, 64);
     }
-    let s = PgStore::open(pool, &schema, cap).await.unwrap();
+    let s = PgStore::initialize(pool, &schema, cap).await.unwrap();
     let mut keys = Vec::new();
     while let Some(e) = s.dequeue(0).await.unwrap() {
         keys.push(e.key);
@@ -1425,7 +1433,7 @@ fn repair_checkpoint_reopens_with_independent_pool_and_runtime() {
             .await
             .unwrap();
         let store = Arc::new(
-            PgStore::open(pool.clone(), &schema, Capacity::default())
+            PgStore::initialize(pool.clone(), &schema, Capacity::default())
                 .await
                 .unwrap(),
         );
@@ -1474,7 +1482,7 @@ fn repair_checkpoint_reopens_with_independent_pool_and_runtime() {
             .await
             .unwrap();
         let store = Arc::new(
-            PgStore::open(pool.clone(), &schema, Capacity::default())
+            PgStore::initialize(pool.clone(), &schema, Capacity::default())
                 .await
                 .unwrap(),
         );
@@ -1543,7 +1551,7 @@ fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
             .await
             .unwrap();
         let store = Arc::new(
-            PgStore::open(pool.clone(), &schema, Capacity::default())
+            PgStore::initialize(pool.clone(), &schema, Capacity::default())
                 .await
                 .unwrap(),
         );
@@ -1606,7 +1614,7 @@ fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
             .await
             .unwrap();
         let store = Arc::new(
-            PgStore::open(pool.clone(), &schema, Capacity::default())
+            PgStore::initialize(pool.clone(), &schema, Capacity::default())
                 .await
                 .unwrap(),
         );

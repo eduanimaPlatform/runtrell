@@ -7,7 +7,7 @@ async fn open() -> (sqlx::PgPool, String, PgStore) {
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated database required");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let schema = format!("transaction_{}", uuid::Uuid::new_v4().simple());
-    let store = PgStore::open(pool.clone(), &schema, Capacity::default())
+    let store = PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
         .unwrap();
     sqlx::query(&format!(
@@ -178,7 +178,7 @@ async fn reopen_in_another_process() {
     };
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-    let store = PgStore::open(pool.clone(), &schema, Capacity::default())
+    let store = PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
         .unwrap();
     let run = RunHandle {

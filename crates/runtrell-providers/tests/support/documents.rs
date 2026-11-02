@@ -542,7 +542,7 @@ async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
                 .unwrap();
             let schema = format!("http_docs_{}", tick.as_nanos());
             let store = Arc::new(
-                PgStore::open(pool.clone(), &schema, Capacity::default())
+                PgStore::initialize(pool.clone(), &schema, Capacity::default())
                     .await
                     .unwrap(),
             );
@@ -560,7 +560,7 @@ async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
                 .await
                 .unwrap();
             let claim = store
-                .claim(&handle, "worker", tick.as_secs(), 100)
+                .claim(&handle, "worker", tick.as_millis() as u64, 100)
                 .await
                 .unwrap();
             let mut body = response("gemini", "completed", false);
@@ -597,7 +597,7 @@ async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
                 cached_image_input: 1_000_000,
             });
             let clock = TestClock::default();
-            clock.set(tick.as_secs());
+            clock.set(tick.as_millis() as u64);
             let make_runtime = |store| Runtime {
                 store,
                 model: DocumentModel(Gemini::new(c.clone()).unwrap()),
@@ -629,13 +629,13 @@ async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
                     .await
                     .unwrap();
                 let reopened = Arc::new(
-                    PgStore::open(independent, &schema, Capacity::default())
+                    PgStore::initialize(independent, &schema, Capacity::default())
                         .await
                         .unwrap(),
                 );
-                clock.set(tick.as_secs() + 101);
+                clock.set(tick.as_millis() as u64 + 101);
                 let next = reopened
-                    .claim(&handle, "reopened", tick.as_secs() + 101, 100)
+                    .claim(&handle, "reopened", tick.as_millis() as u64 + 101, 100)
                     .await
                     .unwrap();
                 let run = make_runtime(reopened.clone()).drive(&next).await.unwrap();
@@ -829,10 +829,10 @@ async fn pg_document_view_selects_pages_and_attaches_fixed_workspace_and_artifac
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as u64;
         let schema = format!("document_view_{}", uuid_id());
         let store = Arc::new(
-            PgStore::open(pool.clone(), &schema, Capacity::default())
+            PgStore::initialize(pool.clone(), &schema, Capacity::default())
                 .await
                 .unwrap(),
         );
@@ -924,7 +924,7 @@ async fn pg_document_view_selects_pages_and_attaches_fixed_workspace_and_artifac
         let (endpoint, http) = sequence_server(vec![first, last]).await;
         let mut c = config(endpoint);
         c.run = handle.clone();
-        c.capabilities.limits.timeout = 60;
+        c.capabilities.limits.timeout = 60_000;
         c.capabilities.tool_calling = true;
         c.capabilities.documents.pdf.inline_bytes = true;
         c.capabilities.limits.price = Some(Price {

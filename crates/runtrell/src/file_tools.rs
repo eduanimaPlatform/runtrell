@@ -245,7 +245,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
             input_schema: self.schema(),
             output_schema: json!({"type":"object"}),
             side_effect: write,
-            timeout: 30,
+            timeout: 30_000,
             max_output_bytes: self
                 .store
                 .policy()
@@ -263,7 +263,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
             retry: RetryPolicy {
                 max_attempts: 1,
                 backoff: 0,
-                max_elapsed: 30,
+                max_elapsed: 30_000,
             },
         }
     }
@@ -434,7 +434,7 @@ impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'stati
             input_schema: json!({"type":"object"}),
             output_schema: json!({"type":"object"}),
             side_effect: false,
-            timeout: 30,
+            timeout: 30_000,
             max_output_bytes: self.adapter.store.policy().max_read,
             reserve: Amount::default(),
             quantities: Default::default(),
@@ -442,7 +442,7 @@ impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'stati
             retry: RetryPolicy {
                 max_attempts: 1,
                 backoff: 0,
-                max_elapsed: 30,
+                max_elapsed: 30_000,
             },
         }
     }

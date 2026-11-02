@@ -113,7 +113,7 @@ fn config(endpoint: String) -> Config {
                 max_output: 1024,
                 min_max_output_tokens: 1,
                 price: None,
-                timeout: 2,
+                timeout: 2_000,
             },
             json_schema: true,
             tool_calling: true,
@@ -371,7 +371,7 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
         let failure: Failure = serde_json::from_str(&code).unwrap();
         assert_eq!(failure.class, class);
         assert_eq!(failure.retry_after.as_deref(), Some("7"));
-        assert_eq!(retry_after, Some(7));
+        assert_eq!(retry_after, Some(7_000));
         assert_eq!(usage.input, None);
         assert_eq!(usage.output, None);
         assert_eq!(task.await.unwrap().len(), 1, "hidden retry");
@@ -386,7 +386,7 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
     else {
         panic!("date delay")
     };
-    assert!((58..=60).contains(&delay));
+    assert!((58_000..=60_000).contains(&delay));
     assert_eq!(task.await.unwrap().len(), 1);
     let (target, target_task) = server(200, "", json!({})).await;
     let (url, task) = server(307, &format!("Location: {target}\r\n"), json!({})).await;

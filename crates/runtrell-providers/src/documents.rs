@@ -128,16 +128,18 @@ impl Adapter {
             return Ok(vec![]);
         }
         self.authorize_attachments(context, request)?;
-        let mut timeout = Duration::from_secs(self.config.capabilities.limits.timeout);
+        let mut timeout = Duration::from_millis(self.config.capabilities.limits.timeout);
         if let Some(deadline) = context.deadline {
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map_err(|_| Error::Deadline)?
-                .as_secs();
+                .as_millis();
+            // `deadline` is Unix milliseconds (Clock epoch).
+            let now = u64::try_from(now).map_err(|_| Error::Deadline)?;
             if deadline <= now {
                 return Err(Error::Deadline);
             }
-            timeout = timeout.min(Duration::from_secs(deadline - now));
+            timeout = timeout.min(Duration::from_millis(deadline - now));
         }
         tokio::time::timeout(timeout, async {
             let mut resolved = Vec::new();

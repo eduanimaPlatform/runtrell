@@ -146,3 +146,35 @@ fn artifact_content_defines_progress() {
         )),
     );
 }
+#[test]
+fn time_lease_and_deadline_boundaries() {
+    support::block_on(
+        runtrell_testkit::time_contracts::lease_and_deadline_boundaries(std::sync::Arc::new(
+            support::TestPg::default(),
+        )),
+    );
+}
+#[test]
+fn time_lease_overflow_is_refused() {
+    support::block_on(runtrell_testkit::time_contracts::lease_overflow_is_refused(
+        std::sync::Arc::new(support::TestPg::default()),
+    ));
+}
+#[test]
+fn time_operation_deadline_is_now_plus_timeout_ms() {
+    support::block_on(
+        runtrell_testkit::time_contracts::operation_deadline_is_now_plus_timeout_ms(
+            std::sync::Arc::new(support::TestPg::default()),
+        ),
+    );
+}
+#[test]
+fn time_capacity_wait_default_is_sixty_seconds_in_ms() {
+    support::block_on(
+        runtrell_testkit::time_contracts::capacity_wait_default_is_sixty_seconds_in_ms(
+            std::sync::Arc::new(support::TestPg::new(
+                runtrell_testkit::time_contracts::one_model_slot(),
+            )),
+        ),
+    );
+}

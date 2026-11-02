@@ -171,7 +171,7 @@ async fn openai_malformed_single_result_and_http_spending_errors_keep_usage() {
         };
         let failure: Failure = serde_json::from_str(&code).unwrap();
         assert_eq!(failure.class, ErrorClass::SpendingLimit);
-        assert_eq!(retry_after, Some(2));
+        assert_eq!(retry_after, Some(2_000));
         assert_eq!(usage.amount().unwrap(), Amount::new(8, 8));
         assert!(!code.contains("TEST-KEY"));
         assert_eq!(task.await.unwrap().len(), 1);
@@ -268,7 +268,7 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             .unwrap();
         let schema = format!("openai_image_failure_{}", tick.as_nanos());
         let runs = Arc::new(
-            PgStore::open(pool.clone(), &schema, Capacity::default())
+            PgStore::initialize(pool.clone(), &schema, Capacity::default())
                 .await
                 .unwrap(),
         );
@@ -281,7 +281,7 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             .await
             .unwrap();
         let claim = runs
-            .claim(&handle, "worker", tick.as_secs(), 100)
+            .claim(&handle, "worker", tick.as_millis() as u64, 100)
             .await
             .unwrap();
         let access = Access::owner(Namespace {
@@ -335,7 +335,7 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             cfg.image_limits.max_height = 1;
         }
         let clock = TestClock::default();
-        clock.set(tick.as_secs());
+        clock.set(tick.as_millis() as u64);
         let data = DataStore::memory(StoragePolicy::default());
         let rt = Runtime {
             store: runs.clone(),
@@ -358,7 +358,7 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
                 config: ImageToolConfig {
                     action: ImageAction::Generate,
                     reserve: Amount::new(2048, 2048),
-                    timeout: 30,
+                    timeout: 30_000,
                 },
             }],
             policy: FakePolicy::default(),

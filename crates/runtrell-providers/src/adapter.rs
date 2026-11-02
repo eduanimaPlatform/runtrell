@@ -125,7 +125,7 @@ impl Adapter {
             .retry(reqwest::retry::never())
             .no_proxy()
             .referer(false)
-            .timeout(Duration::from_secs(l.timeout))
+            .timeout(Duration::from_millis(l.timeout))
             .build()
             .map_err(|_| invalid())?;
         Ok(Self {
@@ -370,16 +370,18 @@ impl Adapter {
         if bytes.len() > self.config.max_request_bytes {
             return Err(invalid());
         }
-        let mut timeout = Duration::from_secs(self.config.capabilities.limits.timeout);
+        let mut timeout = Duration::from_millis(self.config.capabilities.limits.timeout);
         if let Some(deadline) = context.deadline {
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map_err(|_| Error::Deadline)?
-                .as_secs();
+                .as_millis();
+            // `deadline` is Unix milliseconds (Clock epoch).
+            let now = u64::try_from(now).map_err(|_| Error::Deadline)?;
             if deadline <= now {
                 return Err(Error::Deadline);
             }
-            timeout = timeout.min(Duration::from_secs(deadline - now));
+            timeout = timeout.min(Duration::from_millis(deadline - now));
         }
         let (header, secret) = if self.wire == Wire::GenerateContent {
             ("x-goog-api-key", self.config.key.0.clone())
@@ -788,14 +790,23 @@ fn safe_retry_after(value: &str) -> Option<String> {
     (value.parse::<u64>().is_ok() || httpdate::parse_http_date(value).is_ok())
         .then(|| value.to_owned())
 }
+/// Retry-After as a runtime delay in milliseconds (the header is delta seconds or an
+/// HTTP date). A value that overflows milliseconds is rejected, not clamped.
 fn retry_delay(value: &str) -> Option<u64> {
-    value.parse().ok().or_else(|| {
-        httpdate::parse_http_date(value).ok().map(|date| {
-            date.duration_since(SystemTime::now())
-                .unwrap_or_default()
-                .as_secs()
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .or_else(|| {
+            httpdate::parse_http_date(value).ok().and_then(|date| {
+                u64::try_from(
+                    date.duration_since(SystemTime::now())
+                        .unwrap_or_default()
+                        .as_millis(),
+                )
+                .ok()
+            })
         })
-    })
 }
 fn classify(status: u16, value: &Value) -> ErrorClass {
     let error = &value["error"];

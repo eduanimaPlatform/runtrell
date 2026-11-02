@@ -16,7 +16,7 @@ contextは開始revision/high-waterを固定し、構造化した目的・制約
 
 local rootはhost専有の既存directoryを設定する。root自体にもsymlinkを許さないので、macOSの`/var`経由はhostが実pathを選ぶ。論理fileはOSのpathへ直接露出せず、将来のcopy/mountの実体化はExecutionBackendの責務。保存状態はnamespace単位のJSONであり、大きいblobもこの初期backendでは同じ状態file内に保持する。範囲APIの返却は有限だがdiskの部分read最適化やthroughput/SLOを保証しない。host processのSIGKILL中に残る未commitの`stage-*`は正本として読まない。namespace lock取得時に孤立した一時stateファイルを回収する。電源断試験は未提供であり、保存済みとの報告には含めない。
 
-retentionは2a Clockと同じUnix millisecond。class cleanupは保持中staging・保持中/確定済みblobが残ればPending。確定済みblobはFinal policyも適用した個別deleteを使う。Workspace/Checkpointの全体削除にはowner、期待revision、明示retain境界が必要。Run終端を自動削除許可にしない。context圧縮は明示`Runtime::compact_context`と通常loopの自動接続を提供する。hostがRunSpec.compactionで閾値を設定し、ModelPort.compaction_limitsでモデルを選ぶ。通常loopの原履歴・summary・採用済みモデル入力は同じRunのcheckpointに保存し、再開でも復元する。protocolのtool処理は保持し、summaryを別Runへコピーしない。
+retentionは2a Clockと同じUnix millisecond（`ClassPolicy.retention`は期間で既定86_400_000 = 1日、`retention_until`・staging `expires_at`は`now + retention`のsaturating加算）。削除は`now >= retention_until`で可能になり、Final確定済みはFinal policyのretentionをさらに加えた時刻以降（既定で保存時刻から合計約2日）。fake clockの境界試験は`crates/runtrell/tests/data.rs`。class cleanupは保持中staging・保持中/確定済みblobが残ればPending。確定済みblobはFinal policyも適用した個別deleteを使う。Workspace/Checkpointの全体削除にはowner、期待revision、明示retain境界が必要。Run終端を自動削除許可にしない。context圧縮は明示`Runtime::compact_context`と通常loopの自動接続を提供する。hostがRunSpec.compactionで閾値を設定し、ModelPort.compaction_limitsでモデルを選ぶ。通常loopの原履歴・summary・採用済みモデル入力は同じRunのcheckpointに保存し、再開でも復元する。protocolのtool処理は保持し、summaryを別Runへコピーしない。
 
 ## File tool input bounds
 

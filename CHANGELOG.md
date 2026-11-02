@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Time-unit contract: every `u64` time and duration in the control API is
+  milliseconds (absolute values are Unix milliseconds in the host `Clock` epoch).
+  `Clock`, `RunSpec.deadline`, leases, operation `timeout`, `RetryPolicy`,
+  `retry_after`, `recovery_until`, retention and queue deadlines are documented in
+  place and in docs/design/api.md. **Breaking for hosts that used seconds:** the
+  defaults changed to milliseconds (`DispatchRequest::new` timeout 30_000, default
+  `RetryPolicy` backoff 1_000 / max_elapsed 60_000, file-tool timeout 30_000,
+  `DocumentViewLimits.timeout` 60_000); `runtrell-providers` now reads
+  `ModelLimits.timeout` as milliseconds, compares `ToolContext.deadline` with Unix
+  milliseconds, and converts HTTP `Retry-After` to milliseconds. The capacity-queue
+  default wait for a Run without a deadline was `now + 60` (60 ms under a
+  millisecond clock) and is now `CAPACITY_WAIT_MS` = 60_000. Add fake-clock
+  boundary contracts (`runtrell-testkit::time_contracts`, retention tests).
+- Split PostgreSQL startup: `PgStore::open` is replaced by explicit
+  `PgStore::initialize` (schema, migration, `schema_config`, capacity seed; same
+  idempotent behavior) and `PgStore::connect`, which verifies the existing
+  schema version, tables and Capacity in one read-only transaction without DDL or
+  writes. `connect` needs only `USAGE` on the schema and `SELECT` on
+  `schema_config` and returns `NotFound`, `PermissionDenied`, `Unsupported` or
+  `Conflict` on a missing or mismatched runtime. Hosts must rename `open` calls to
+  `initialize` and use `connect` for processes that must not change the schema.
+
 - Declare file-tool argument bounds from the active StoragePolicy and shared
   DataStore path/query constants. `runtrell-files-3` adds bounded list/search
   counts, read lengths, paths, text and edit arrays. Schema violations return

@@ -16,7 +16,7 @@ MemoryStoreのmutexは短いtransactionだけを保護し、モデル/toolのawa
 
 Run受付時も有限queue容量を検査する。Scheduler::dequeueがtenantの巡回と優先度を決め、host workerが返されたRunをclaimする。claimは所有権取得の低水準APIでもあり、復旧workerは既知Runを直接再取得できる。tenantの巡回は3tenant以上でも同じ2tenantを交互に選び続けない。operation枠はintentと同時に獲得し、不明結果・外部実行継続中は精算/停止照合前に解放しない。子Runの枠も子の終端確認まで保持する。
 
-Clockの時刻・deadline・timeoutは同じ単位のUTC Unix millisecondとしてhostが実装する。fake clockは0起点の仮想時刻である。leaseの延長、jobの照会、retry待機はRoot Run期限や共有予算を新しくしない。Clock::wait_untilによりI/O待機を打ち切っても、外部停止とは扱わない。2dの[ExecutionBackend](execution.md)は対応能力を照会し、非対応の厳密なCPU/RAM/停止要件を拒否する。Future timeoutは実停止のreceiptではない。
+Clockの時刻・deadline・timeout・lease・backoff・retry_after・retentionは同じ単位、すなわちUTC Unix millisecond（期間はmillisecond）としてhostが実装する。秒を混ぜない（詳細は[api](api.md#時刻と期間の単位)）。fake clockは0起点の仮想時刻である。leaseの延長、jobの照会、retry待機はRoot Run期限や共有予算を新しくしない。Clock::wait_untilによりI/O待機を打ち切っても、外部停止とは扱わない。2dの[ExecutionBackend](execution.md)は対応能力を照会し、非対応の厳密なCPU/RAM/停止要件を拒否する。Future timeoutは実停止のreceiptではない。
 
 2bのファイルtoolはRun内で既定直列。descriptor.conflict_scopeはnamespace、operation.scopeは提示descriptor全体のdigestを固定し、復旧時も実装版/account/schema/認可scopeを照合する。ファイルの競合はnamespace revisionとfile revision CASで拒否する。memoryのmap lockはnamespaceの検索だけ、localのroot gateはnamespace directoryを開くまでで、実データI/O中はnamespace別lockだけを保持する。並行Run全体のglobal I/O lockは置かない。
 

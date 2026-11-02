@@ -27,7 +27,7 @@ fn child_restart_across_processes() {
             .unwrap();
         let store_pool = pool.clone();
         let store = Arc::new(
-            PgStore::open(pool, &schema, Capacity::default())
+            PgStore::initialize(pool, &schema, Capacity::default())
                 .await
                 .unwrap(),
         );

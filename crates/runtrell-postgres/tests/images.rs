@@ -14,7 +14,7 @@ async fn images_reopen_artifacts_with_one_settlement_per_billed_attempt() {
         .unwrap();
     let schema = format!("images_{}", uuid::Uuid::new_v4().simple());
     let first = Arc::new(
-        PgStore::open(pool.clone(), &schema, Capacity::default())
+        PgStore::initialize(pool.clone(), &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -24,7 +24,7 @@ async fn images_reopen_artifacts_with_one_settlement_per_billed_attempt() {
         .await
         .unwrap();
     let reopened = Arc::new(
-        PgStore::open(independent, &schema, Capacity::default())
+        PgStore::initialize(independent, &schema, Capacity::default())
             .await
             .unwrap(),
     );

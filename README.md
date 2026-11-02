@@ -38,6 +38,39 @@ Host validators classify custom failures with `ValidationReceipt.repairable`.
 Repair counts have no default limit; `RepairPolicy` supplies optional host limits.
 Storage, authorization and evidence failures remain separate errors.
 
+## Time units
+
+Every `u64` time or duration in the control API is **milliseconds**. Absolute
+values (`RunSpec.deadline`, `Claim.lease_until`, `recovery_until`,
+`retention_until`, `QueueEntry.deadline`, `created_at`) are Unix milliseconds in
+the epoch the host `Clock` reports; durations (`timeout`, `lease`, `backoff`,
+`max_elapsed`, `retry_after`, `ClassPolicy.retention`) are milliseconds added to
+such a value, with checked or saturating arithmetic. `Clock::now` returns Unix
+milliseconds and `wait_until(deadline)` takes an absolute millisecond deadline.
+The default retention is `86_400_000` (one day); a finalized artifact also waits
+the Final class retention before deletion. A Run without a deadline waits
+`CAPACITY_WAIT_MS` (60 000) in the capacity queue. Never pass seconds: a clock in
+seconds would turn the default retention into 1000 days while a 60 s default wait
+becomes 60 ms. Conversions from seconds (HTTP `Retry-After`, host
+settings) happen once at the boundary. Table and details:
+[docs/design/api.md](docs/design/api.md#時刻と期間の単位).
+
+## PostgreSQL initialization and least-privilege connect
+
+`PgStore::initialize(pool, schema, capacity)` is the explicit initializer: it
+creates the schema and tables, writes `schema_config` and seeds the global
+capacity permits (idempotent; a different `Capacity` is a `Conflict`). Run it once
+at deployment with a role that may create and alter the schema. `PgStore::open`
+no longer exists.
+
+`PgStore::connect(pool, schema, capacity)` attaches to an already initialized
+runtime and changes nothing: one read-only transaction, no DDL, no write to
+`schema_config` or capacity. It needs only `USAGE` on the schema and `SELECT` on
+`schema_config`, and fails with `NotFound` (missing schema/table/config),
+`PermissionDenied`, `Unsupported` (other schema version) or `Conflict` (different
+capacity). Operations on the returned store need the privileges of the tables
+they touch; see [docs/design/postgres.md](docs/design/postgres.md).
+
 ## PostgreSQL transaction API
 
 | API | Stages in the host's `sqlx::Transaction<'_, Postgres>` |
@@ -194,7 +227,7 @@ cargo package --workspace --list --allow-dirty
 ```
 
 PostgreSQL tests require `RUNTRELL_TEST_DATABASE_URL`; they fail rather than skip
-when it is absent. Point it only at a test server, using a role with CREATEDB.
+when it is absent. Point it only at a test server, using a role with CREATEDB (and CREATEROLE for `tests/connect.rs`, which creates and drops its own LOGIN roles).
 Build the test-only `test_db_runner` example before running tests (and rebuild it
 after editing its source). The repository's Unix Cargo target runner gives
 **each binary/example invocation** a disposable

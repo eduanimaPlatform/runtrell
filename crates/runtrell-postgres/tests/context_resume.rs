@@ -33,7 +33,7 @@ async fn context_prefix_survives_process_restart() {
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let schema = format!("context_{}", uuid::Uuid::new_v4().simple());
     let store = Arc::new(
-        PgStore::open(pool, &schema, Capacity::default())
+        PgStore::initialize(pool, &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -101,7 +101,7 @@ async fn no_progress_survives_process_restart_and_compaction() {
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let schema = format!("repair_{}", uuid::Uuid::new_v4().simple());
     let store = Arc::new(
-        PgStore::open(pool, &schema, Capacity::default())
+        PgStore::initialize(pool, &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -155,7 +155,7 @@ async fn resume_context_in_child_process() {
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let store = Arc::new(
-        PgStore::open(pool, &schema, Capacity::default())
+        PgStore::initialize(pool, &schema, Capacity::default())
             .await
             .unwrap(),
     );

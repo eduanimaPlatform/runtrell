@@ -167,6 +167,8 @@ pub enum DataClass {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassPolicy {
     pub max_bytes: usize,
+    /// Retention period in milliseconds (default 86_400_000 = 1 day), added to the
+    /// host Clock `now` (Unix milliseconds) with saturating arithmetic.
     pub retention: u64,
     pub deletable: bool,
 }
@@ -222,6 +224,7 @@ pub struct Staged {
     pub bytes: Vec<u8>,
     pub class: DataClass,
     pub media_type: String,
+    /// Unix milliseconds: `now + retention` of the staging class.
     pub expires_at: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +235,8 @@ pub struct ArtifactRef {
     pub hash: String,
     pub bytes: u64,
     pub manifest: Vec<FileVersion>,
+    /// Unix milliseconds. Deletion is allowed only at or after this time; a
+    /// Final-completed artifact also needs the Final class retention added.
     pub retention_until: u64,
     pub class: DataClass,
     pub media_type: String,

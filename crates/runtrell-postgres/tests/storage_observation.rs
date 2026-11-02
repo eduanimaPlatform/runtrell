@@ -54,7 +54,7 @@ async fn pool() -> PgPool {
 async fn storage_canary_constraint_failure_logs_safe_fields() {
     let pool = pool().await;
     let schema = format!("storage_obs_{}", uuid::Uuid::new_v4().simple());
-    let store = PgStore::open(pool.clone(), &schema, Capacity::default())
+    let store = PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
         .unwrap();
     let canary = "secret-canary-unique-46d8c3";

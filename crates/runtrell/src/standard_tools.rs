@@ -68,6 +68,7 @@ impl StandardTool {
 pub struct ToolPreset(pub BTreeMap<StandardTool, ToolSettings>);
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ToolSettings {
+    /// Operation timeout override in milliseconds.
     pub timeout: Option<u64>,
     pub max_output_bytes: Option<usize>,
     pub reserve: Option<Amount>,

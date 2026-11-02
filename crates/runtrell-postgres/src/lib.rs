@@ -60,9 +60,26 @@ pub struct LateResult {
     pub result: ExternalResult,
 }
 
+/// Tables the schema-4 migration creates; `connect` requires every one.
+const SCHEMA_TABLES: [&str; 13] = [
+    "schema_config",
+    "runs",
+    "sessions",
+    "budget_accounts",
+    "attempts",
+    "attempt_accounts",
+    "slots",
+    "queue_tenants",
+    "queue_entries",
+    "capacity_slots",
+    "late_results",
+    "queue_policy",
+    "executions",
+];
+const SCHEMA_VERSION: i32 = 4;
+
 impl PgStore {
-    /// Initializes an empty host-owned namespace. Capacity must agree across all workers.
-    pub async fn open(pool: PgPool, schema: &str, capacity: Capacity) -> Result<Self> {
+    fn new(pool: PgPool, schema: &str, capacity: Capacity) -> Result<Self> {
         if schema.is_empty()
             || schema.len() > 63
             || schema.to_ascii_lowercase().starts_with("pg_")
@@ -73,30 +90,39 @@ impl PgStore {
         {
             return Err(Error::Invalid("schema identifier".into()));
         }
-        let store = Self {
+        Ok(Self {
             pool,
             schema: format!("\"{schema}\""),
             capacity,
             fail_next: Arc::default(),
-        };
+        })
+    }
+
+    /// Explicitly creates or completes the host-owned schema: runs the migration
+    /// DDL, writes `schema_config` and seeds the global capacity permits. Idempotent;
+    /// a repeat call with a different `Capacity` returns `Conflict`. Run it once at
+    /// deployment with a role that may create and alter the schema. Processes that
+    /// only operate on an existing runtime use [`PgStore::connect`] instead.
+    pub async fn initialize(pool: PgPool, schema: &str, capacity: Capacity) -> Result<Self> {
+        let store = Self::new(pool, schema, capacity)?;
         let mut tx = store
             .pool
             .begin()
             .await
-            .map_err(|e| storage("PgStore::open", e))?;
-        sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit = on; SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s'").await.map_err(|e| storage("PgStore::open", e))?;
+            .map_err(|e| storage("PgStore::initialize", e))?;
+        sqlx::Executor::execute(&mut *tx, "SET LOCAL synchronous_commit = on; SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s'").await.map_err(|e| storage("PgStore::initialize", e))?;
         // Serialize concurrent initializers, including CREATE SCHEMA/INDEX catalog writes.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("runtrell-schema:{}", store.schema))
             .execute(&mut *tx)
             .await
-            .map_err(|e| storage("PgStore::open", e))?;
+            .map_err(|e| storage("PgStore::initialize", e))?;
         sqlx::Executor::execute(
             &mut *tx,
             format!("CREATE SCHEMA IF NOT EXISTS {}", store.schema).as_str(),
         )
         .await
-        .map_err(|e| storage("PgStore::open", e))?;
+        .map_err(|e| storage("PgStore::initialize", e))?;
         sqlx::Executor::execute(
             &mut *tx,
             include_str!("../migrations/0001.sql")
@@ -104,25 +130,84 @@ impl PgStore {
                 .as_str(),
         )
         .await
-        .map_err(|e| storage("PgStore::open", e))?;
+        .map_err(|e| storage("PgStore::initialize", e))?;
         let config = capacity_value(&store.capacity);
-        sqlx::query(&format!("INSERT INTO {}.schema_config(singleton,version,capacity) VALUES(true,4,$1) ON CONFLICT DO NOTHING", store.schema))
-            .bind(&config).execute(&mut *tx).await.map_err(|e| storage("PgStore::open", e))?;
+        sqlx::query(&format!("INSERT INTO {}.schema_config(singleton,version,capacity) VALUES(true,{SCHEMA_VERSION},$1) ON CONFLICT DO NOTHING", store.schema))
+            .bind(&config).execute(&mut *tx).await.map_err(|e| storage("PgStore::initialize", e))?;
         let (version, saved): (i32, Value) = sqlx::query_as(&format!(
             "SELECT version,capacity FROM {}.schema_config WHERE singleton",
             store.schema
         ))
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| storage("PgStore::open", e))?;
-        if version != 4 {
+        .map_err(|e| storage("PgStore::initialize", e))?;
+        if version != SCHEMA_VERSION {
             return Err(Error::Unsupported("postgres schema".into()));
         }
         if saved != config {
             return Err(Error::Conflict);
         }
         store.initialize_capacity(&mut tx).await?;
-        tx.commit().await.map_err(|e| storage("PgStore::open", e))?;
+        tx.commit()
+            .await
+            .map_err(|e| storage("PgStore::initialize", e))?;
+        Ok(store)
+    }
+
+    /// Attaches to a runtime that [`PgStore::initialize`] already created, without
+    /// changing it: one `READ ONLY` transaction, no DDL, and no write to
+    /// `schema_config` or the capacity permits. Intended for least-privilege roles.
+    ///
+    /// Required privileges for this call: `USAGE` on the schema and `SELECT` on
+    /// `schema_config` (existence of the other tables is checked through the
+    /// catalog and needs nothing more). Operations performed on the returned store
+    /// need the DML privileges of the tables they touch; see `docs/design/postgres.md`.
+    ///
+    /// Errors: `NotFound` when the schema, a table or the config row is missing;
+    /// `PermissionDenied` when the role lacks the privileges above;
+    /// `Unsupported("postgres schema")` for another schema version; `Conflict`
+    /// when `capacity` differs from the stored configuration.
+    pub async fn connect(pool: PgPool, schema: &str, capacity: Capacity) -> Result<Self> {
+        let store = Self::new(pool, schema, capacity)?;
+        let mut tx = store
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::connect", e))?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            "SET TRANSACTION READ ONLY; SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '30s'",
+        )
+        .await
+        .map_err(|e| storage("PgStore::connect", e))?;
+        let row: Option<(i32, Value)> = sqlx::query_as(&format!(
+            "SELECT version,capacity FROM {}.schema_config WHERE singleton",
+            store.schema
+        ))
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(connect_error)?;
+        let (version, saved) = row.ok_or(Error::NotFound)?;
+        if version != SCHEMA_VERSION {
+            return Err(Error::Unsupported("postgres schema".into()));
+        }
+        for table in SCHEMA_TABLES {
+            let present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("{}.{table}", store.schema))
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| storage("PgStore::connect", e))?;
+            if !present {
+                return Err(Error::NotFound);
+            }
+        }
+        if saved != capacity_value(&store.capacity) {
+            return Err(Error::Conflict);
+        }
+        // Nothing was written; the read-only transaction ends by rollback.
+        tx.rollback()
+            .await
+            .map_err(|e| storage("PgStore::connect", e))?;
         Ok(store)
     }
 
@@ -208,4 +293,16 @@ fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
 }
 fn capacity_value(c: &Capacity) -> Value {
     json!({"global":c.global,"tenant":c.tenant,"run":c.run,"queue":c.queue,"tenant_queue":c.tenant_queue})
+}
+/// Maps the definite "absent" and "not permitted" SQLSTATEs of the config read.
+fn connect_error(error: sqlx::Error) -> Error {
+    match error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .as_deref()
+    {
+        Some("3F000" | "42P01") => Error::NotFound,
+        Some("42501") => Error::PermissionDenied,
+        _ => storage("PgStore::connect", error),
+    }
 }

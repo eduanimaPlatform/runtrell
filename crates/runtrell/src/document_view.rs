@@ -317,6 +317,7 @@ pub struct DocumentViewInput {
 pub struct DocumentViewLimits {
     pub max_bytes: usize,
     pub max_selected_pages: u32,
+    /// Per-operation timeout in milliseconds.
     pub timeout: u64,
 }
 impl Default for DocumentViewLimits {
@@ -324,7 +325,7 @@ impl Default for DocumentViewLimits {
         Self {
             max_bytes: 16 * 1024 * 1024,
             max_selected_pages: 32,
-            timeout: 60,
+            timeout: 60_000,
         }
     }
 }

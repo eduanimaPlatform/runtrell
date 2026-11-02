@@ -35,7 +35,7 @@ impl TestPg {
                 .await
                 .unwrap();
             Self(
-                PgStore::open(
+                PgStore::initialize(
                     pool,
                     &format!("contract_{}", uuid::Uuid::new_v4().simple()),
                     capacity,

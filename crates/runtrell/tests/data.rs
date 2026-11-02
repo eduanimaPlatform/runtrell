@@ -870,3 +870,167 @@ fn multiple_edits_in_one_file_share_initial_digest_and_commit_once() {
         );
     });
 }
+
+// Time contract: every time is Unix milliseconds on the host Clock; the fake
+// `now` values below are plain numbers and nothing here waits real time.
+const DAY_MS: u64 = 86_400_000;
+fn policy_with_retention(retention: u64) -> StoragePolicy {
+    let mut policy = StoragePolicy::default();
+    for class in policy.classes.values_mut() {
+        class.retention = retention;
+    }
+    policy
+}
+#[test]
+fn default_retention_is_one_day_in_milliseconds() {
+    let policy = StoragePolicy::default();
+    assert!(policy.classes.values().all(|c| c.retention == DAY_MS));
+    assert_eq!(DAY_MS, 24 * 60 * 60 * 1000);
+}
+#[test]
+fn artifact_deletion_boundary_is_exact_in_milliseconds() {
+    drive(async {
+        let s = DataStore::memory(StoragePolicy::default());
+        let a = Access::owner(ns("r"));
+        let saved_at = 1_700_000_000_000;
+        let artifact = s
+            .put(&a, b"bytes", DataClass::Intermediate, saved_at)
+            .await
+            .unwrap();
+        assert_eq!(artifact.retention_until, saved_at + DAY_MS);
+        let until = artifact.retention_until;
+        // Just before the boundary the artifact is retained; one second early
+        // would be 1_000 here, so a seconds-based caller is also refused.
+        for early in [until - 1, until - 1_000, saved_at, saved_at + DAY_MS / 1000] {
+            assert_eq!(
+                s.delete_artifact(&a, &artifact, early).await,
+                Err(Error::PermissionDenied),
+                "now={early}"
+            );
+        }
+        // Equal to the boundary is deletable; later times stay deletable.
+        assert_eq!(
+            s.delete_artifact(&a, &artifact, until).await.unwrap(),
+            Progress::Confirmed
+        );
+        assert_eq!(s.artifact_status(&a, &artifact).await, Err(Error::NotFound));
+        let again = s.put(&a, b"other", DataClass::Log, saved_at).await.unwrap();
+        assert_eq!(
+            s.delete_artifact(&a, &again, until + 1).await.unwrap(),
+            Progress::Confirmed
+        );
+    });
+}
+#[test]
+fn sub_second_retention_is_not_rounded_to_seconds() {
+    drive(async {
+        let s = DataStore::memory(policy_with_retention(500));
+        let a = Access::owner(ns("r"));
+        let artifact = s.put(&a, b"bytes", DataClass::Log, 10_000).await.unwrap();
+        assert_eq!(artifact.retention_until, 10_500);
+        assert_eq!(
+            s.delete_artifact(&a, &artifact, 10_499).await,
+            Err(Error::PermissionDenied)
+        );
+        assert_eq!(
+            s.delete_artifact(&a, &artifact, 10_500).await.unwrap(),
+            Progress::Confirmed
+        );
+        let staged = s.stage(&a, b"pending", DataClass::Log, 20_000).unwrap();
+        assert_eq!(staged.expires_at, 20_500);
+    });
+}
+#[test]
+fn finalized_artifact_needs_class_retention_plus_final_retention() {
+    drive(async {
+        let s = DataStore::memory(StoragePolicy::default());
+        let a = Access::owner(ns("r"));
+        let saved_at = 5_000;
+        let r = s
+            .put(&a, b"evidence", DataClass::Intermediate, saved_at)
+            .await
+            .unwrap();
+        let target =
+            Target::structured(json!({"decision":"keep"}), 1, "cfg").with_artifact(r.clone());
+        let evidence = s
+            .validate(&a, &target, std::sync::Arc::new(Rules))
+            .await
+            .unwrap();
+        let id = s
+            .finalize_target(&a, &target, &[evidence], &[ValidatorKey::new("rules", "1")])
+            .await
+            .unwrap();
+        assert_eq!(
+            s.artifact_status(&a, &r).await.unwrap(),
+            ArtifactStatus::Finalized { completion_id: id }
+        );
+        // The artifact's own retention (1 day) passes, but Final adds another day.
+        let own = saved_at + DAY_MS;
+        let total = own + DAY_MS;
+        assert_eq!(r.retention_until, own);
+        for early in [own, own + 1, total - 1] {
+            assert_eq!(
+                s.delete_artifact(&a, &r, early).await,
+                Err(Error::PermissionDenied),
+                "now={early}"
+            );
+        }
+        assert_eq!(
+            s.delete_artifact(&a, &r, total).await.unwrap(),
+            Progress::Confirmed
+        );
+    });
+}
+#[test]
+fn retention_arithmetic_saturates_instead_of_wrapping() {
+    drive(async {
+        let s = DataStore::memory(StoragePolicy::default());
+        let a = Access::owner(ns("r"));
+        let late = u64::MAX - 10;
+        let artifact = s
+            .put(&a, b"bytes", DataClass::Intermediate, late)
+            .await
+            .unwrap();
+        assert_eq!(artifact.retention_until, u64::MAX);
+        assert_eq!(
+            s.delete_artifact(&a, &artifact, u64::MAX - 1).await,
+            Err(Error::PermissionDenied)
+        );
+        assert_eq!(
+            s.delete_artifact(&a, &artifact, u64::MAX).await.unwrap(),
+            Progress::Confirmed
+        );
+        // A near-overflow explicit boundary saturates and is monotonic.
+        assert_eq!(
+            s.retain(&a, DataClass::Workspace, late).await.unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            s.retain(&a, DataClass::Workspace, 0).await.unwrap(),
+            u64::MAX
+        );
+    });
+}
+#[test]
+fn class_cleanup_boundary_uses_the_retain_time_in_milliseconds() {
+    drive(async {
+        let s = DataStore::memory(StoragePolicy::default());
+        let a = Access::owner(ns("r"));
+        s.write(&a, "a", None, b"saved").await.unwrap();
+        let until = s.retain(&a, DataClass::Workspace, 2_000).await.unwrap();
+        assert_eq!(until, 2_000 + DAY_MS);
+        for early in [2_000, until - 1_000, until - 1] {
+            assert_eq!(
+                s.cleanup_class(&a, DataClass::Workspace, 1, early).await,
+                Err(Error::PermissionDenied),
+                "now={early}"
+            );
+        }
+        assert_eq!(
+            s.cleanup_class(&a, DataClass::Workspace, 1, until)
+                .await
+                .unwrap(),
+            Progress::Confirmed
+        );
+    });
+}

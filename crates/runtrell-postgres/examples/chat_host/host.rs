@@ -62,7 +62,7 @@ impl Host {
             .unwrap();
         // PgStore validates the identifier before the example interpolates it.
         let store = Arc::new(
-            PgStore::open(pool.clone(), schema, Capacity::default())
+            PgStore::initialize(pool.clone(), schema, Capacity::default())
                 .await
                 .unwrap(),
         );

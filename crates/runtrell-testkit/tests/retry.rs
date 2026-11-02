@@ -33,7 +33,7 @@ impl ModelPort for RetryModel {
                 physical_evidence: None,
                 code: "TRANSIENT".into(),
                 usage,
-                retry_after: Some(1),
+                retry_after: Some(1_000),
             })
         } else {
             Ok(ExternalResult::Applied {
@@ -58,7 +58,7 @@ fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
             .start(RunSpec::new("t", "retry", a.clone(), "answer"))
             .await
             .unwrap();
-        let c = s.claim(&h, "worker", 0, 100).await.unwrap();
+        let c = s.claim(&h, "worker", 0, 100_000).await.unwrap();
         let clock = TestClock::default();
         let policy = FakePolicy::default();
         let rt = Runtime {
@@ -84,7 +84,14 @@ fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
             RunState::Waiting(_)
         ));
         assert_eq!(rt.model.calls.load(Ordering::SeqCst), 1);
-        clock.set(1);
+        // retry_after is 1_000 ms: still backing off one millisecond before it.
+        clock.set(999);
+        assert!(matches!(
+            rt.drive(&c).await.unwrap().state,
+            RunState::Waiting(_)
+        ));
+        assert_eq!(rt.model.calls.load(Ordering::SeqCst), 1);
+        clock.set(1_000);
         assert_eq!(
             rt.drive(&c).await.unwrap().state,
             RunState::Terminal(Terminal::Succeeded)
@@ -106,7 +113,7 @@ fn retry_bound_and_authorization_are_rechecked_after_restart() {
                 .start(RunSpec::new("t", "retry", a, "answer"))
                 .await
                 .unwrap();
-            let c = s.claim(&h, "worker", 0, 100).await.unwrap();
+            let c = s.claim(&h, "worker", 0, 100_000).await.unwrap();
             let clock = TestClock::default();
             let policy = FakePolicy::default();
             let rt = Runtime {
@@ -126,7 +133,7 @@ fn retry_bound_and_authorization_are_rechecked_after_restart() {
                 policy.revoked.store(true, Ordering::SeqCst);
             }
             for time in 1..=3 {
-                clock.set(time);
+                clock.set(time * 1_000);
                 rt.drive(&c).await.unwrap();
             }
             assert_eq!(

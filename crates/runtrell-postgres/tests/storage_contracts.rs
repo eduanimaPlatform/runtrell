@@ -20,7 +20,7 @@ async fn open() -> (PgPool, String, Arc<PgStore>) {
         .unwrap();
     let schema = format!("storage_{}", uuid::Uuid::new_v4().simple());
     let store = Arc::new(
-        PgStore::open(pool.clone(), &schema, Capacity::default())
+        PgStore::initialize(pool.clone(), &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -34,7 +34,7 @@ async fn reopen(schema: &str) -> Arc<PgStore> {
         .await
         .unwrap();
     Arc::new(
-        PgStore::open(pool, schema, Capacity::default())
+        PgStore::initialize(pool, schema, Capacity::default())
             .await
             .unwrap(),
     )

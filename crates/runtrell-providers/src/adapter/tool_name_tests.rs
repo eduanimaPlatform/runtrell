@@ -12,7 +12,7 @@ fn config(endpoint: String) -> Config {
                 max_output: 1024,
                 min_max_output_tokens: 1,
                 price: None,
-                timeout: 2,
+                timeout: 2_000,
             },
             json_schema: true,
             tool_calling: true,

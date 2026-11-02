@@ -645,6 +645,7 @@ pub trait ImagePort: Send + Sync {
 pub struct ImageToolConfig {
     pub action: ImageAction,
     pub reserve: Amount,
+    /// Per-operation timeout in milliseconds.
     pub timeout: u64,
 }
 pub struct ImageTool<I, S, P, R, C> {

@@ -21,7 +21,7 @@ impl LedgerHarness for PgHarness {
             .await
             .unwrap();
         let schema = format!("execution_{}", uuid::Uuid::new_v4().simple());
-        let ledger = PgStore::open(pool.clone(), &schema, Capacity::default())
+        let ledger = PgStore::initialize(pool.clone(), &schema, Capacity::default())
             .await
             .unwrap();
         Self {
@@ -34,7 +34,7 @@ impl LedgerHarness for PgHarness {
         &self.ledger
     }
     async fn reopen(&self) -> PgStore {
-        PgStore::open(self.pool.clone(), &self.schema, Capacity::default())
+        PgStore::initialize(self.pool.clone(), &self.schema, Capacity::default())
             .await
             .unwrap()
     }

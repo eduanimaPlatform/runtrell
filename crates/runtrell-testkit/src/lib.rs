@@ -92,7 +92,7 @@ impl ModelPort for FakeModel {
             context: 1024,
             max_output: 16,
             min_max_output_tokens: 1,
-            timeout: 30,
+            timeout: 30_000,
             price: Some(Price {
                 model: "fake".into(),
                 input: 1_000_000,
@@ -357,3 +357,4 @@ pub mod recovery_contracts;
 
 pub mod image_contracts;
 pub mod repair_contracts;
+pub mod time_contracts;

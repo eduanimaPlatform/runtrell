@@ -75,7 +75,7 @@ impl Tool for OpenViews {
             input_schema: json!({"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":5}},"required":["count"],"additionalProperties":false}),
             output_schema: json!({"type":"object"}),
             side_effect: false,
-            timeout: 60,
+            timeout: 60_000,
             max_output_bytes: 16384,
             reserve: Amount::default(),
             quantities: Default::default(),
@@ -120,7 +120,7 @@ async fn tool_count_and_byte_overflow_are_repairable_before_inference_and_preser
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as u64;
         let claim = store.claim(&handle, "worker", now, 100).await.unwrap();
         let access = Access::owner(Namespace {
             owner: handle.clone(),
@@ -230,7 +230,7 @@ fn model_config(endpoint: String, handle: RunHandle) -> Config {
     c.run = handle;
     c.capabilities.tool_calling = true;
     c.capabilities.documents.pdf.inline_bytes = true;
-    c.capabilities.limits.timeout = 60;
+    c.capabilities.limits.timeout = 60_000;
     c.capabilities.limits.price = Some(Price {
         model: "host-model".into(),
         input: 1,
@@ -263,7 +263,7 @@ async fn image_window_survives_two_continuations_and_closes_after_tool_call() {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
     let claim = store.claim(&handle, "worker", now, 100).await.unwrap();
     let access = Access::owner(Namespace {
         owner: handle.clone(),
@@ -439,7 +439,7 @@ async fn process_worker() {
         .await
         .unwrap();
     let store = Arc::new(
-        PgStore::open(pool, &schema, Capacity::default())
+        PgStore::initialize(pool, &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -536,7 +536,7 @@ async fn pg_page_window(continuation: bool) {
         .unwrap();
     let schema = format!("window_{}", uuid_id());
     let store = Arc::new(
-        PgStore::open(pool, &schema, Capacity::default())
+        PgStore::initialize(pool, &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -600,7 +600,7 @@ async fn pg_page_window(continuation: bool) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
     let spawn = |endpoint: String, phase: &str, time: u64| {
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
         cmd.args([

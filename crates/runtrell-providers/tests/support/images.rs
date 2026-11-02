@@ -13,7 +13,7 @@ fn image_config(url: String) -> Config {
     } else {
         url
     });
-    c.capabilities.limits.timeout = 30;
+    c.capabilities.limits.timeout = 30_000;
     c.capabilities.images = ImageCapabilities {
         input: true,
         generation: true,
@@ -71,7 +71,7 @@ async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) 
         config: ImageToolConfig {
             action,
             reserve: Amount::new(2048, 2048),
-            timeout: 30,
+            timeout: 30_000,
         },
     };
     let context = ToolContext {
@@ -202,7 +202,7 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
         assert!(code.contains(expected));
         assert!(!code.contains("TEST-KEY"));
         assert_eq!(usage.input, None);
-        assert_eq!(retry_after, Some(1));
+        assert_eq!(retry_after, Some(1_000));
         assert_eq!(task.await.unwrap().len(), 1);
     }
     for (field, value) in [
@@ -532,7 +532,7 @@ async fn model_image_wire<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &st
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
     let claim = store.claim(&handle, "worker", now, 100).await.unwrap();
     let clock = TestClock::default();
     clock.set(now);
@@ -606,7 +606,7 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
         .unwrap();
     let schema = format!("http_images_{}", tick.as_nanos());
     let runs = Arc::new(
-        PgStore::open(pool.clone(), &schema, Capacity::default())
+        PgStore::initialize(pool.clone(), &schema, Capacity::default())
             .await
             .unwrap(),
     );
@@ -624,7 +624,7 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
         .await
         .unwrap();
     let claim = runs
-        .claim(&handle, "worker", tick.as_secs(), 100)
+        .claim(&handle, "worker", tick.as_millis() as u64, 100)
         .await
         .unwrap();
     let access = Access::owner(Namespace {
@@ -641,7 +641,7 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
     let mut cfg = image_config(endpoint);
     cfg.run = handle.clone();
     let clock = TestClock::default();
-    clock.set(tick.as_secs());
+    clock.set(tick.as_millis() as u64);
     let lose = Arc::new(AtomicBool::new(true));
     let make_runtime = |runs: Arc<PgStore>, data: DataStore| {
         let resolve = || ImageResolver {
@@ -659,7 +659,7 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
             config: ImageToolConfig {
                 action,
                 reserve: Amount::new(2048, 2048),
-                timeout: 30,
+                timeout: 30_000,
             },
         };
         let selected = ToolSet::<DataStore>::default()
@@ -703,15 +703,15 @@ async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
         .await
         .unwrap();
     let reopened = Arc::new(
-        PgStore::open(independent, &schema, Capacity::default())
+        PgStore::initialize(independent, &schema, Capacity::default())
             .await
             .unwrap(),
     );
     let next = reopened
-        .claim(&handle, "reopened", tick.as_secs() + 101, 100)
+        .claim(&handle, "reopened", tick.as_millis() as u64 + 101, 100)
         .await
         .unwrap();
-    clock.set(tick.as_secs() + 101);
+    clock.set(tick.as_millis() as u64 + 101);
     let rt = make_runtime(
         reopened.clone(),
         DataStore::local(&root, StoragePolicy::default()).unwrap(),

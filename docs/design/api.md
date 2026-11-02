@@ -20,7 +20,30 @@ PostgreSQL の外部 transaction 参加 API は `PgStore::{start_in, admit_child
 
 async traitはRustライブラリの静的dispatch契約。安定dynamic ABIではない。ModelPort/Toolはinvokeとlookupを分離、lookupはFound/Pending/Unknown/NotFound（同scope・保存期限内で未実行を保証する証拠）を返す。timeoutやstream断はUnknown。provider内部retryを禁止し、課金retryは新attemptとして共通dispatchへ戻す。元request・予約を再使用するNotFound回復は同attemptの再送であり、新しい予算を作らない。
 
-Policyは毎回現在の認可を検査する。SecretProviderは限定context・対象・期限でsecret利用closureを起動し、生secretをmodelや保存レコードへ返さない。Observerは機密payloadを含めない有限eventの受信口。Clockは単調な試験時刻（永続adapterでは共有epoch時刻）を与える。
+Policyは毎回現在の認可を検査する。SecretProviderは限定context・対象・期限でsecret利用closureを起動し、生secretをmodelや保存レコードへ返さない。Observerは機密payloadを含めない有限eventの受信口。Clockは単調な試験時刻（永続adapterでは共有epoch時刻）をUnix millisecondで与える。
+
+## 時刻と期間の単位
+
+制御APIが`u64`で受け渡す時刻と期間は、すべて**ミリ秒**である。絶対時刻はhost `Clock`が報告するepochのUnix millisecond、期間はそのmillisecondに加える長さ。秒と混在させない。Clockは永続adapterでは全workerが共有するepochを返し、fake clockは0起点でよい。`ExecutionLimits`の`*_ms`も同じ単位。
+
+| 項目 | 種別 | 意味 |
+|---|---|---|
+| `Clock::now` / `wait_until(deadline)` | 絶対 | 現在時刻 / `now() >= deadline`で完了。過去の期限は即完了 |
+| `RunSpec.deadline` | 絶対 | Run期限。`now >= deadline`で新規業務を拒否（`Error::Deadline`）。`None`は無期限 |
+| `claim(.., now, lease)` / `renew` | 時刻 + 期間 | `lease_until = now + lease`（checked、overflowは`Conflict`）。`lease`は非0。`now < lease_until`の間だけ所有。renewは`max(旧, now + lease)`で後退しない |
+| `Claim.lease_until` | 絶対 | 上記の保存値 |
+| `ModelLimits.timeout` / `ToolDescriptor.timeout` / `DispatchRequest.timeout` | 期間 | operation期限 = `min(Run期限, now + timeout)`をToolContext.deadlineへ渡す（saturating） |
+| `RetryPolicy.backoff` / `max_elapsed`、`ExternalResult::Failed.retry_after` | 期間 | 次attemptは`finished_at + max(retry_after, backoff)`以降。初回からの経過が`max_elapsed`以上なら打切り |
+| `RepairPolicy.max_elapsed` | 期間 | 初回repairからの経過 |
+| `DispatchRequest.recovery_until`、`RecoveryProof.expires_at` | 絶対 | 復旧照会の期限。`ModelPort::recovery()`の2つ目は期間で、`now + retention`（checked）をpinする |
+| `Operation.created_at` / `finished_at` | 絶対 | 記録時刻 |
+| `QueueEntry.deadline` | 絶対 | `now >= deadline`で`QueueTimeout`。deadlineの無いRunは`now + CAPACITY_WAIT_MS`（60_000）で待つ |
+| `ReservationPolicy::Wait.until` | 絶対 | 予算待ちの期限 |
+| `ClassPolicy.retention` | 期間 | 既定`86_400_000`（1日）。`ArtifactRef.retention_until` / `Staged.expires_at` = `now + retention`（saturating） |
+| `ArtifactStore::delete_artifact(.., now)`、`cleanup_class` | 時刻 | `now >= retention_until`で削除可。Final確定済みはFinal policyのretentionをさらに加えた時刻以降（既定で合計約2日） |
+| HTTP `Retry-After` | 変換 | adapterが秒/HTTP dateをミリ秒の`retry_after`へ変換（秒×1000はchecked） |
+
+host設定が秒（HTTP timeout、`*_SECONDS`等）の場合は、runtime境界で1回だけcheckedに変換する。実時間のsleepは`Duration::from_millis`。heartbeat間隔のような`Duration`は単位が型で明確なので対象外。時刻は`Clock`以外から取らない（adapterが比較に使うSystemTimeはUnix millisecondへ変換する）。
 
 Validatorは候補hash、根拠revision、設定/検証器版に結び付くValidationReceiptを返す。Finalizerは信頼済み業務拡張であり、外部反映済みreceiptを確認した安定completion IDを返す。RunStoreは現行revisionとreceiptをCAS照合する。別ownerへの業務書込みはoperationとしてdispatchし、その結果をFinalizerが確認する。Finalizer内で未記録の有料I/Oや副作用を実行してはならない。
 
@@ -158,6 +181,7 @@ pub struct RunSpec {
     pub input: String,
     pub images: Vec<crate::images::ImageReference>,
     pub purpose: String,
+    /// Absolute Run deadline in Unix milliseconds (Clock epoch); `None` is unbounded.
     pub deadline: Option<u64>,
     pub trigger: Trigger,
     pub validator: String,
@@ -188,6 +212,7 @@ pub struct ToolContext {
     pub principal: String,
     pub operation: String,
     pub attempt: u32,
+    /// Absolute operation/Run deadline in Unix milliseconds (Clock epoch).
     pub deadline: Option<u64>,
     pub permission: String,
     pub account_binding: String,
@@ -196,7 +221,7 @@ pub struct ToolContext {
 pub struct RecoveryProof {
     pub bytes: Vec<u8>,
     pub generation: String,
-    /// Absolute Clock timestamp. A later preparation must never extend an old reservation.
+    /// Absolute Clock timestamp in Unix milliseconds. A later preparation must never extend an old reservation.
     pub expires_at: u64,
 }
 
@@ -227,6 +252,7 @@ pub struct ToolDescriptor {
     pub input_schema: Value,
     pub output_schema: Value,
     pub side_effect: bool,
+    /// Operation timeout in milliseconds.
     pub timeout: u64,
     pub max_output_bytes: usize,
     pub reserve: Amount,
@@ -292,7 +318,10 @@ pub struct JsonPosition {
 }
 
 pub trait Clock: Send + Sync {
+    /// Current time in Unix milliseconds.
     fn now(&self) -> u64;
+    /// Completes once `now() >= deadline`; `deadline` is absolute Unix milliseconds.
+    /// A deadline already in the past completes immediately.
     fn wait_until(&self, deadline: u64) -> impl std::future::Future<Output = ()> + Send;
 }
 pub trait Policy: Send + Sync {
@@ -344,12 +373,14 @@ pub trait ModelPort: Send + Sync {
     fn retry_policy(&self) -> RetryPolicy {
         RetryPolicy {
             max_attempts: 3,
-            backoff: 1,
-            max_elapsed: 60,
+            backoff: 1_000,
+            max_elapsed: 60_000,
         }
     }
     fn limits(&self) -> ModelLimits;
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
+    /// Recovery scope and retention in milliseconds; the driver pins
+    /// `recovery_until = Clock::now() + retention` (checked).
     fn recovery(&self) -> Option<(String, u64)> {
         None
     }
@@ -420,6 +451,7 @@ pub trait Tool: Send + Sync {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepairPolicy {
     pub max_repairs: Option<u64>,
+    /// Maximum repair time in milliseconds from the first repair.
     pub max_elapsed: Option<u64>,
     /// Stop on this many occurrences of the same observed failure, including cycles.
     pub max_no_progress: std::num::NonZeroU64,
@@ -471,6 +503,8 @@ pub trait RunStore: Send + Sync {
     /// The returned Claim and persisted owner.lease_until witness renewal;
     /// checkpoint CAS remains valid across same-generation heartbeats.
     /// Expired leases and mismatched worker/generation remain fenced out.
+    /// `now` is Unix milliseconds and `lease` is a nonzero duration in
+    /// milliseconds; the expiry only moves forward (`max(old, now + lease)`).
     fn renew(
         &self,
         claim: &Claim,
@@ -501,6 +535,8 @@ pub trait RunStore: Send + Sync {
         now: u64,
     ) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
+    /// `now` is Unix milliseconds and `lease` is a nonzero duration in
+    /// milliseconds; the owner is valid while `now < lease_until`.
     fn claim(
         &self,
         run: &RunHandle,
@@ -653,6 +689,8 @@ pub struct QueueEntry {
     pub key: String,
     pub tenant: String,
     pub scheduling: SchedulingPolicy,
+    /// Absolute Unix milliseconds; at or after this time `dequeue` expires the
+    /// entry with `QueueTimeout`. A Run without a deadline waits `CAPACITY_WAIT_MS`.
     pub deadline: u64,
 }
 #[derive(Clone, Debug)]

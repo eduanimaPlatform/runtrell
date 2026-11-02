@@ -246,6 +246,7 @@ pub struct ModelLimits {
     /// of generated tokens. The host quality floor belongs to ReservationPolicy.
     pub min_max_output_tokens: u64,
     pub price: Option<Price>,
+    /// Per-invocation timeout in milliseconds.
     pub timeout: u64,
 }
 impl ModelLimits {
@@ -319,6 +320,7 @@ pub struct RunSpec {
     pub input: String,
     pub images: Vec<crate::images::ImageReference>,
     pub purpose: String,
+    /// Absolute Run deadline in Unix milliseconds (Clock epoch); `None` is unbounded.
     pub deadline: Option<u64>,
     pub trigger: Trigger,
     pub validator: String,
@@ -418,6 +420,8 @@ pub struct Claim {
     pub run: RunHandle,
     pub worker: String,
     pub generation: u64,
+    /// Absolute lease expiry in Unix milliseconds: `claim`/`renew` set it to
+    /// `now + lease` with both operands in milliseconds.
     pub lease_until: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -498,7 +502,7 @@ pub enum OperationKind {
 pub struct RecoveryProof {
     pub bytes: Vec<u8>,
     pub generation: String,
-    /// Absolute Clock timestamp. A later preparation must never extend an old reservation.
+    /// Absolute Clock timestamp in Unix milliseconds. A later preparation must never extend an old reservation.
     pub expires_at: u64,
 }
 impl RecoveryProof {
@@ -570,8 +574,11 @@ pub struct DispatchRequest {
     pub quantities: BTreeMap<String, u64>,
     pub price: Option<Price>,
     pub scope: Option<String>,
+    /// Absolute Unix milliseconds until which recovery may replay or look up this operation.
     pub recovery_until: Option<u64>,
     pub attempt: u32,
+    /// Operation timeout in milliseconds, added to `Clock::now()` to form the
+    /// operation deadline; `None` leaves only the Run deadline.
     pub timeout: Option<u64>,
 }
 impl DispatchRequest {
@@ -604,7 +611,7 @@ impl DispatchRequest {
             scope: None,
             recovery_until: None,
             attempt: 1,
-            timeout: Some(30),
+            timeout: Some(30_000),
         }
     }
 }
@@ -632,6 +639,7 @@ pub enum ExternalResult {
         physical_evidence: Option<PhysicalSendEvidence>,
         code: String,
         usage: Usage,
+        /// Minimum delay before the next attempt, in milliseconds.
         retry_after: Option<u64>,
         /// Opt in to a new model turn after a known, safely correctable failure.
         /// Both code and hint must be safe to disclose; never include payloads,
@@ -668,7 +676,9 @@ pub struct Operation {
     pub send_generation: Option<u64>,
     pub send_count: u32,
     pub replay_proof_generation: Option<u64>,
+    /// Unix milliseconds (Clock epoch).
     pub created_at: u64,
+    /// Unix milliseconds (Clock epoch).
     pub finished_at: Option<u64>,
     pub usage_observations: Vec<Usage>,
     pub unsettled_result: Option<ExternalResult>,
@@ -754,6 +764,7 @@ pub struct ToolDescriptor {
     pub input_schema: Value,
     pub output_schema: Value,
     pub side_effect: bool,
+    /// Operation timeout in milliseconds.
     pub timeout: u64,
     pub max_output_bytes: usize,
     pub reserve: Amount,
@@ -764,7 +775,9 @@ pub struct ToolDescriptor {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
+    /// Minimum wait before the next attempt, in milliseconds.
     pub backoff: u64,
+    /// Maximum time since the first attempt, in milliseconds.
     pub max_elapsed: u64,
 }
 #[derive(Clone, Debug)]
@@ -774,6 +787,7 @@ pub struct ToolContext {
     pub principal: String,
     pub operation: String,
     pub attempt: u32,
+    /// Absolute operation/Run deadline in Unix milliseconds (Clock epoch).
     pub deadline: Option<u64>,
     pub permission: String,
     pub account_binding: String,
@@ -894,8 +908,22 @@ pub struct Warning {
     pub limit: Amount,
 }
 
+/// Default capacity-queue wait, in milliseconds, for a Run without a deadline.
+pub const CAPACITY_WAIT_MS: u64 = 60_000;
+
+/// Host time source. Every time and duration carried as `u64` by this crate is in
+/// **milliseconds**: absolute values (deadlines, lease expiry, retention and
+/// recovery boundaries, `created_at`) are Unix milliseconds in the epoch this
+/// clock reports, and durations (timeouts, leases, backoff, `max_elapsed`,
+/// retention periods) are milliseconds added to such a value. Never mix in seconds.
+/// Arithmetic on them is checked or saturating. Real-time sleeps use
+/// `Duration::from_millis`. A persistent store shares one epoch across workers;
+/// a fake clock may start at 0.
 pub trait Clock: Send + Sync {
+    /// Current time in Unix milliseconds.
     fn now(&self) -> u64;
+    /// Completes once `now() >= deadline`; `deadline` is absolute Unix milliseconds.
+    /// A deadline already in the past completes immediately.
     fn wait_until(&self, deadline: u64) -> impl std::future::Future<Output = ()> + Send;
 }
 pub trait Policy: Send + Sync {
@@ -947,12 +975,14 @@ pub trait ModelPort: Send + Sync {
     fn retry_policy(&self) -> RetryPolicy {
         RetryPolicy {
             max_attempts: 3,
-            backoff: 1,
-            max_elapsed: 60,
+            backoff: 1_000,
+            max_elapsed: 60_000,
         }
     }
     fn limits(&self) -> ModelLimits;
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
+    /// Recovery scope and retention in milliseconds; the driver pins
+    /// `recovery_until = Clock::now() + retention` (checked).
     fn recovery(&self) -> Option<(String, u64)> {
         None
     }
@@ -1023,6 +1053,7 @@ pub trait Tool: Send + Sync {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepairPolicy {
     pub max_repairs: Option<u64>,
+    /// Maximum repair time in milliseconds from the first repair.
     pub max_elapsed: Option<u64>,
     /// Stop on this many occurrences of the same observed failure, including cycles.
     pub max_no_progress: std::num::NonZeroU64,
@@ -1074,6 +1105,8 @@ pub trait RunStore: Send + Sync {
     /// The returned Claim and persisted owner.lease_until witness renewal;
     /// checkpoint CAS remains valid across same-generation heartbeats.
     /// Expired leases and mismatched worker/generation remain fenced out.
+    /// `now` is Unix milliseconds and `lease` is a nonzero duration in
+    /// milliseconds; the expiry only moves forward (`max(old, now + lease)`).
     fn renew(
         &self,
         claim: &Claim,
@@ -1104,6 +1137,8 @@ pub trait RunStore: Send + Sync {
         now: u64,
     ) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     fn get(&self, run: &RunHandle) -> impl std::future::Future<Output = Result<RunRecord>> + Send;
+    /// `now` is Unix milliseconds and `lease` is a nonzero duration in
+    /// milliseconds; the owner is valid while `now < lease_until`.
     fn claim(
         &self,
         run: &RunHandle,
@@ -1256,6 +1291,8 @@ pub struct QueueEntry {
     pub key: String,
     pub tenant: String,
     pub scheduling: SchedulingPolicy,
+    /// Absolute Unix milliseconds; at or after this time `dequeue` expires the
+    /// entry with `QueueTimeout`. A Run without a deadline waits `CAPACITY_WAIT_MS`.
     pub deadline: u64,
 }
 #[derive(Clone, Debug)]

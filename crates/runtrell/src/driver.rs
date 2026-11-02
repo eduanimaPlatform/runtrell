@@ -602,7 +602,7 @@ impl<
                         deadline: r
                             .spec
                             .deadline
-                            .unwrap_or(self.clock.now().saturating_add(60)),
+                            .unwrap_or(self.clock.now().saturating_add(CAPACITY_WAIT_MS)),
                     })
                     .await?;
                 self.store.wait(c, "capacity", self.clock.now()).await?;

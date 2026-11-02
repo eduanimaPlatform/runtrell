@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReservationPolicy {
     Wait {
+        /// Absolute Unix milliseconds (Clock epoch) until which a Run may wait for budget.
         until: u64,
     },
     Shrink {

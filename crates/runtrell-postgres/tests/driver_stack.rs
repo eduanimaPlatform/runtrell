@@ -24,13 +24,13 @@ fn small_stack<F: Future<Output = ()>>(
                 let schema = format!("driver_stack_{}", uuid::Uuid::new_v4().simple());
                 let pool = PgPoolOptions::new().connect(&url).await.unwrap();
                 let store = Arc::new(
-                    PgStore::open(pool, &schema, Capacity::default())
+                    PgStore::initialize(pool, &schema, Capacity::default())
                         .await
                         .unwrap(),
                 );
                 let independent = PgPoolOptions::new().connect(&url).await.unwrap();
                 let reopened = Arc::new(
-                    PgStore::open(independent, &schema, Capacity::default())
+                    PgStore::initialize(independent, &schema, Capacity::default())
                         .await
                         .unwrap(),
                 );

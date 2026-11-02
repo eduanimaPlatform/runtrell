@@ -6,6 +6,9 @@ Each implements `ModelPort`; the driver contains no provider selection.
 The host supplies the complete endpoint URL, credential, model, limits, price,
 model capabilities, request/response byte bounds, input token upper bound, Run,
 and optional session. No discovery, credential loading, or price catalog is provided.
+`ModelLimits.timeout` is the HTTP timeout in milliseconds, and `ToolContext.deadline`
+is an absolute Unix-millisecond deadline compared with the wall clock; the request
+timeout is the smaller of the two remaining durations.
 
 Public OSS image support is separately provided by `ImagePort` adapters:
 
@@ -141,7 +144,8 @@ errors carry a sanitized classification, status and Retry-After; provider bodies
 messages and credentials are not propagated. Recognizable spending/balance codes
 are separate from transient rate limits; ambiguous quota errors remain rate limits
 or unclassified. Retry-After delta seconds and HTTP dates are converted to the
-runtime delay; raw headers are exposed only through the typed failure result.
+runtime delay in milliseconds (`ExternalResult::Failed.retry_after`; seconds are
+multiplied with overflow checked); raw headers are exposed only through the typed failure result.
 
 Capabilities contain host-overridable model limits, schema/tool/parallel support,
 separate input/generation/reference-edit/mask-edit declarations and counter
