@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{AccountPolicy, PreparedModelRequest, ReservationPolicy, SchedulingPolicy};
+use crate::{
+    AccountPolicy, PreparedModelRequest, ReservationPolicy, SchedulingPolicy, SettlementRecord,
+    SettlementRecovery,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -76,14 +79,22 @@ pub struct Usage {
     pub input: Option<u64>,
     /// Total output tokens, including reasoning and image output.
     pub output: Option<u64>,
+    /// All cached input tokens, image tokens included. `None` is unknown, never 0.
     pub cached: Option<u64>,
     pub reasoning: Option<u64>,
+    /// All image input tokens, cached ones included.
     pub image_input: Option<u64>,
     pub image_output: Option<u64>,
+    /// Input tokens that are both cached and image tokens (the intersection).
     pub cached_image_input: Option<u64>,
     pub quantities: BTreeMap<String, u64>,
     pub micro_usd: Option<u64>,
     pub model: String,
+    /// Safe, fixed reason code (uppercase ASCII, no payload text) saying why a counter
+    /// or the cost is unknown for a response that otherwise arrived. Adapters set it
+    /// only when they deliberately keep a value unknown; it never turns unknown into 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_reason: Option<String>,
 }
 impl Usage {
     pub fn measured(input: u64, output: u64, cost: u64) -> Self {
@@ -127,14 +138,25 @@ impl Usage {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Rates in integer micro-USD per million tokens. The input side is a four-way partition of
+/// disjoint lines, so each token is billed once and every rate is independent:
+/// `input` (neither cached nor image), `cached` (cached, not image), `image_input` (image,
+/// not cached) and `cached_image_input` (both). With `Usage` totals `i`, `cached`, `image`
+/// and intersection `x`: ordinary = i - cached - image + x; cached-only = cached - x;
+/// image-only = image - x; both = x. A counter that can change the bill must be known
+/// or `cost` refuses with `UsageUnknown`.
 pub struct Price {
     pub model: String,
+    /// Input tokens that are neither cached nor image tokens.
     pub input: u64,
+    /// Cached input tokens that are not image tokens.
     pub cached: u64,
     pub output: u64,
     pub reasoning: u64,
+    /// Image input tokens that are not cached.
     pub image_input: u64,
     pub image_output: u64,
+    /// Input tokens that are both cached and image tokens.
     pub cached_image_input: u64,
 }
 impl Price {
@@ -682,6 +704,11 @@ pub struct Operation {
     pub finished_at: Option<u64>,
     pub usage_observations: Vec<Usage>,
     pub unsettled_result: Option<ExternalResult>,
+    /// Present only when the owner settled this operation through
+    /// [`OperationStore::settle_recovered`]; keeps the old usage, the price basis and
+    /// the new usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<Box<SettlementRecord>>,
 }
 impl Operation {
     /// Only a settled, explicitly correctable tool failure whose protocol answer
@@ -1270,6 +1297,19 @@ pub trait OperationStore: Send + Sync {
         id: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+    /// Owner recovery for an operation whose saved Applied/Failed result is complete but
+    /// whose usage never settled. Idempotent for an identical request; makes no provider
+    /// call and takes no Run claim. Releases the reservation and unknown mark only by
+    /// settling the corrected amount, and keeps the old usage, price basis and new usage
+    /// in `Operation.recovery`. Stored evidence that still cannot be settled returns
+    /// `UsageUnknown` and changes nothing. Callers authorize the operator before calling.
+    fn settle_recovered(
+        &self,
+        run: &RunHandle,
+        id: &str,
+        recovery: SettlementRecovery,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<SettlementRecord>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
     fn record(
         &self,

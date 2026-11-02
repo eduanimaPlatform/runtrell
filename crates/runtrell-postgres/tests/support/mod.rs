@@ -175,6 +175,15 @@ impl BudgetAuthority for TestPg {
     }
 }
 impl OperationStore for TestPg {
+    async fn settle_recovered(
+        &self,
+        run: &RunHandle,
+        id: &str,
+        recovery: SettlementRecovery,
+        now: u64,
+    ) -> Result<SettlementRecord> {
+        self.0.settle_recovered(run, id, recovery, now).await
+    }
     async fn observe_result(
         &self,
         claim: &Claim,

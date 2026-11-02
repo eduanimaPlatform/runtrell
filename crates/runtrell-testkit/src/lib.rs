@@ -357,4 +357,5 @@ pub mod recovery_contracts;
 
 pub mod image_contracts;
 pub mod repair_contracts;
+pub mod settlement_contracts;
 pub mod time_contracts;

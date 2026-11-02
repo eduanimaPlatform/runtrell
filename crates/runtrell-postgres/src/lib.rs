@@ -201,6 +201,19 @@ impl PgStore {
                 return Err(Error::NotFound);
             }
         }
+        // Columns added after the first schema 4 release; an older runtime must be
+        // re-initialized by its owner before a least-privilege process can attach.
+        let has_recovery: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) \
+             AND attname = 'recovery' AND NOT attisdropped)",
+        )
+        .bind(format!("{}.attempts", store.schema))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| storage("PgStore::connect", e))?;
+        if !has_recovery {
+            return Err(Error::NotFound);
+        }
         if saved != capacity_value(&store.capacity) {
             return Err(Error::Conflict);
         }

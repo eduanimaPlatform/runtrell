@@ -49,6 +49,11 @@ pub struct ImageCapabilities {
     pub generation: bool,
     pub reference_edit: bool,
     pub mask_edit: bool,
+    /// Exact response model names the host declares as the same billed model as
+    /// `limits.model` (provider snapshot or alias names). A response naming any other
+    /// model is not priced.
+    #[serde(default)]
+    pub response_model_aliases: Vec<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentTransports {
@@ -169,6 +174,10 @@ pub use images::GeminiImages;
 mod openai_images;
 #[cfg(feature = "openai")]
 pub use openai_images::OpenAiImages;
+#[cfg(feature = "openai")]
+pub mod openai_images_usage;
+#[cfg(feature = "openai")]
+pub use openai_images_usage::recovery_for_stored_usage as recovery_for_stored_openai_images_usage;
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")

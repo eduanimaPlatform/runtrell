@@ -55,6 +55,18 @@ becomes 60 ms. Conversions from seconds (HTTP `Retry-After`, host
 settings) happen once at the boundary. Table and details:
 [docs/design/api.md](docs/design/api.md#時刻と期間の単位).
 
+## Unsettled usage and owner recovery
+
+When an adapter's result is saved but its usage cannot be settled (unknown cost, missing
+counters), the reservation and unknown mark stay held. Once no lookup window is left the Run
+waits in `Waiting(OPERATOR_ACTION_WAIT)` and the driver stops asking; there is no retry count.
+`OperationStore::settle_recovered` lets the owner settle the original operation exactly once from
+the stored usage plus a documented rule and a price basis, recording old usage, new usage and
+basis, with no provider call. Evidence the rule cannot settle stays for the operator. The OpenAI
+Images adapter normalizes its own `usage` object, with cached counters 0 only where the vendor
+documents it; see [docs/design/providers.md](docs/design/providers.md#openai-images-usage) and
+[docs/design/budget.md](docs/design/budget.md#price-lines-and-owner-settlement-recovery).
+
 ## PostgreSQL initialization and least-privilege connect
 
 `PgStore::initialize(pool, schema, capacity)` is the explicit initializer: it

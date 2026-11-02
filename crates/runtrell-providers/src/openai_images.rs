@@ -133,10 +133,7 @@ impl ImagePort for OpenAiImages {
             }
             _ => return Ok(ImageResponse::Unknown),
         };
-        let mut usage = match self.adapter.usage(&parsed) {
-            Ok(usage) => usage,
-            Err(_) => return Ok(ImageResponse::Unknown),
-        };
+        let mut usage = crate::openai_images_usage::normalize(&self.adapter.config, &parsed);
         let mut failure = None;
         let data = parsed["data"].as_array();
         let count = data.map_or(0, Vec::len);

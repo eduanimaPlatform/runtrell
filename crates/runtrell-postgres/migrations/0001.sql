@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.attempts (
     send_generation numeric(20,0), send_count bigint NOT NULL,
     replay_proof_generation numeric(20,0), created_at numeric(20,0) NOT NULL,
     finished_at numeric(20,0), usage_observations jsonb NOT NULL, unsettled_result jsonb,
+    recovery jsonb,
     UNIQUE(tenant,run_id,operation_key,attempt),
     FOREIGN KEY(tenant,run_id) REFERENCES {{schema}}.runs(tenant,id)
 );
@@ -103,6 +104,14 @@ CREATE TABLE IF NOT EXISTS {{schema}}.queue_policy (
     last_tenant text, priority_streak integer NOT NULL DEFAULT 0
 );
 INSERT INTO {{schema}}.queue_policy(singleton) VALUES(true) ON CONFLICT DO NOTHING;
+-- Owner settlement audit (old usage, price basis, new usage). Additive; the guard avoids
+-- the ACCESS EXCLUSIVE lock when the column exists, so re-running initialization while workers run is safe.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = '{{schema}}.attempts'::regclass
+                   AND attname = 'recovery' AND NOT attisdropped) THEN
+        ALTER TABLE {{schema}}.attempts ADD COLUMN recovery jsonb;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS attempts_unsettled ON {{schema}}.attempts(tenant,run_id) WHERE NOT settled;
 CREATE INDEX IF NOT EXISTS slot_kind ON {{schema}}.slots(kind);
 -- Independent execution inventory: fixed inputs plus monotonic cleanup receipts.

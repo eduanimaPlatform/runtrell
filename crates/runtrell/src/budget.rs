@@ -266,3 +266,153 @@ pub fn queue_index(entries: &[QueueEntry], streak: usize) -> Option<usize> {
         Some(high.0)
     }
 }
+
+/// A Run waiting in this state has an operation whose complete provider result is
+/// saved but whose usage cannot be settled (`Operation::awaits_operator`). More
+/// lookups cannot change it; only [`OperationStore::settle_recovered`] (or an
+/// explicit operator termination) can. The driver stops reconciling while it holds.
+pub const OPERATOR_ACTION_WAIT: &str = "operator action: usage unsettled";
+
+/// Owner request to settle an operation whose saved result is complete but whose
+/// usage was left unsettled. No provider call is made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementRecovery {
+    /// Fixed, safe identifier of the rule and source that justifies the change
+    /// (1..=256 ASCII graphic characters), recorded verbatim.
+    pub basis: String,
+    /// The stored usage refined by the documented rule. It may only fill counters the
+    /// stored usage left unknown (`None`); `micro_usd` must be `None` because the
+    /// store computes it from `price`.
+    pub usage: Usage,
+    /// Price basis for the amount. `price.model` must equal `usage.model` and the
+    /// operation's pinned price model.
+    pub price: Price,
+}
+/// Audit of one recovery: the old usage, the price basis and the new usage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementRecord {
+    pub basis: String,
+    pub price: Price,
+    pub previous: Usage,
+    pub settled: Usage,
+    pub amount: Amount,
+    /// Unix milliseconds on the host Clock.
+    pub at: u64,
+}
+impl Operation {
+    /// True when the saved result is complete but its usage never settled. Looking
+    /// the operation up again returns the same saved result, so this is not waiting
+    /// for the provider.
+    pub fn awaits_operator(&self) -> bool {
+        !self.settled
+            && self.unknown_usage
+            && self.recovery.is_none()
+            && matches!(
+                self.result,
+                Some(ExternalResult::Applied { .. } | ExternalResult::Failed { .. })
+            )
+    }
+    /// `awaits_operator` and no lookup window left: the pinned recovery window has
+    /// ended (`now >= recovery_until`, Unix milliseconds) or the operation never had
+    /// one, so re-asking cannot yield new evidence. Lookup stays active while the
+    /// window is open because an adapter may still supply corrected measurements.
+    pub fn stalled(&self, now: u64) -> bool {
+        self.awaits_operator() && self.request.recovery_until.is_none_or(|until| now >= until)
+    }
+    /// Validates a recovery against the stored evidence and returns the corrected
+    /// result and audit record. `None` means the same recovery was already applied.
+    /// `UsageUnknown` means the evidence still cannot be settled and stays for the
+    /// operator; nothing is guessed.
+    pub fn plan_recovery(
+        &self,
+        recovery: &SettlementRecovery,
+        now: u64,
+    ) -> Result<Option<(ExternalResult, SettlementRecord)>> {
+        if recovery.basis.is_empty()
+            || recovery.basis.len() > 256
+            || !recovery.basis.bytes().all(|b| b.is_ascii_graphic())
+            || recovery.usage.micro_usd.is_some()
+            || recovery.usage.unknown_reason.is_some()
+        {
+            return Err(Error::Invalid("settlement recovery".into()));
+        }
+        if let Some(done) = self.recovery.as_deref() {
+            let mut requested = recovery.usage.clone();
+            requested.micro_usd = done.settled.micro_usd;
+            return if done.basis == recovery.basis
+                && done.price == recovery.price
+                && requested == done.settled
+            {
+                Ok(None)
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        if self.settled || !self.unknown_usage {
+            return Err(Error::Conflict);
+        }
+        let mut result = self.result.clone().ok_or(Error::Conflict)?;
+        let stored = match &result {
+            ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
+                usage.clone()
+            }
+            _ => return Err(Error::Conflict),
+        };
+        let new = &recovery.usage;
+        let keeps = |old: Option<u64>, new: Option<u64>| old.is_none() || old == new;
+        if stored.micro_usd.is_some()
+            || stored.model != new.model
+            || stored.quantities != new.quantities
+            || !keeps(stored.input, new.input)
+            || !keeps(stored.output, new.output)
+            || !keeps(stored.cached, new.cached)
+            || !keeps(stored.reasoning, new.reasoning)
+            || !keeps(stored.image_input, new.image_input)
+            || !keeps(stored.image_output, new.image_output)
+            || !keeps(stored.cached_image_input, new.cached_image_input)
+        {
+            return Err(Error::Invalid(
+                "recovery must only fill unknown counters".into(),
+            ));
+        }
+        if new.model.is_empty()
+            || recovery.price.model != new.model
+            || self
+                .request
+                .price
+                .as_ref()
+                .is_some_and(|pinned| pinned.model != new.model)
+        {
+            return Err(Error::Invalid("recovery price/model mismatch".into()));
+        }
+        let cost = recovery.price.cost(new)?;
+        let mut settled = new.clone();
+        settled.micro_usd = Some(cost);
+        if !self
+            .request
+            .quantities
+            .keys()
+            .all(|k| settled.quantities.contains_key(k))
+        {
+            return Err(Error::UsageUnknown);
+        }
+        let amount = Amount::new(settled.total()?, cost);
+        match &mut result {
+            ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
+                *usage = settled.clone();
+            }
+            _ => return Err(Error::Conflict),
+        }
+        Ok(Some((
+            result,
+            SettlementRecord {
+                basis: recovery.basis.clone(),
+                price: recovery.price.clone(),
+                previous: stored,
+                settled,
+                amount,
+                at: now,
+            },
+        )))
+    }
+}

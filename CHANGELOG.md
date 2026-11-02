@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- OpenAI Images usage and unsettled-operation recovery. `OpenAiImages` now normalizes the
+  `ImagesUsage` response itself (`runtrell_providers::openai_images_usage`) instead of the
+  Responses parser: cached counters are exactly 0 only for `gpt-image-2` and `gpt-image-2.<n>`
+  models (the vendor states cached pricing does not apply to direct Images API requests) and
+  stay unknown for other models with a distinct `Usage.unknown_reason`. Add
+  `ImageCapabilities.response_model_aliases`. `Price` documents its four independent input lines.
+  An Applied/Failed operation whose saved usage cannot settle now puts the Run in
+  `Waiting(OPERATOR_ACTION_WAIT)` once it has no lookup window left, and the driver stops
+  reconciling it. New `OperationStore::settle_recovered` (implemented by Memory and Pg; **hosts
+  that implement `OperationStore` must add it**) settles the original operation once from a
+  `SettlementRecovery` and records old/new usage and price basis in `Operation.recovery`; the
+  Postgres schema gains `attempts.recovery` (added by `initialize` to an existing runtime;
+  `connect` requires it). `Usage` gains `unknown_reason`.
+
 - Time-unit contract: every `u64` time and duration in the control API is
   milliseconds (absolute values are Unix milliseconds in the host `Clock` epoch).
   `Clock`, `RunSpec.deadline`, leases, operation `timeout`, `RetryPolicy`,

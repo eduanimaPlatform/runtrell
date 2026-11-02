@@ -173,3 +173,54 @@ The endpoints are supplied as full URLs by the host, so generateContent's model
 path is also host-owned. Gemini function-call parallelism has no request switch
 here; a model configured without parallel support returning multiple calls is
 rejected as an unknown stop, and none of those calls is executable.
+
+## OpenAI Images usage
+
+`OpenAiImages` does not reuse the Responses usage parser. `/images/generations` and
+`/images/edits` return the `ImagesUsage` object, so `openai_images_usage::normalize` maps only
+what that schema and the vendor's pricing note state.
+
+Sources, read 2026-11-03: the OpenAI OpenAPI description
+(`github.com/openai/openai-openapi`, `main` at c2aecc2, 2026-10-31), schema `ImagesUsage`; and
+the [image generation guide](https://developers.openai.com/api/docs/guides/image-generation),
+section "Cached input pricing".
+
+| Response field | Runtime counter |
+|---|---|
+| `input_tokens` (= `input_tokens_details.text_tokens` + `image_tokens`) | `input` |
+| `input_tokens_details.image_tokens` | `image_input`; `text_tokens` goes to `quantities.text_input_tokens` |
+| `output_tokens` ("image tokens in the output image"), or `output_tokens_details.image_tokens` when present | `output`, `image_output`; `output_tokens_details.text_tokens` goes to `quantities.text_output_tokens` |
+| `total_tokens` | checked against `input_tokens + output_tokens`, not stored |
+| (none; the schema has no reasoning category but does not say none is billed) | `reasoning` stays `None`; a price whose reasoning rate differs from the output rate therefore refuses the cost (`IMAGE_USAGE_PRICE_COUNTER_UNKNOWN`), and hosts set both rates equal for image models |
+
+`output_tokens_details` is not in `ImagesUsage` but real responses carry it; it is accepted only
+when consistent with `output_tokens`.
+
+**Cached counters.** The schema has no cached counter. The guide states that for GPT Image 2 and
+GPT Image 2.5 cached input pricing "doesn't apply to direct Images API requests, including
+/v1/images/edits", so every input token on this endpoint is billed at the ordinary rate and
+`cached` and `cached_image_input` are exactly 0 for model names `gpt-image-2`,
+`gpt-image-2.<n>…` and `gpt-image-2…-<suffix>`. For any other model the page says nothing, so the
+counters stay unknown (`None`) and the cost is refused, never zero-filled. `Price::cost` keeps
+its refusal semantics and the price is the host's, with all four input rates independent (see
+[budget](budget.md)).
+
+An image that arrived with unsettleable usage is kept; the adapter returns the counters it can
+prove and `Usage.unknown_reason`:
+
+| `unknown_reason` | Meaning |
+|---|---|
+| `IMAGE_USAGE_ABSENT` | no `usage` object |
+| `IMAGE_USAGE_MALFORMED` | a counter is not a non-negative integer |
+| `IMAGE_USAGE_INCOMPLETE` | a schema-required counter is missing |
+| `IMAGE_USAGE_INCONSISTENT` | parts do not add up to the totals |
+| `IMAGE_USAGE_CACHED_UNREPORTED` | model family not covered by the cached-input statement |
+| `IMAGE_USAGE_MODEL_UNPRICED` | the response names a model other than the requested one or a declared alias |
+| `IMAGE_USAGE_NO_PRICE` | the host configured no price |
+| `IMAGE_USAGE_PRICE_COUNTER_UNKNOWN` | another counter that affects the bill is unknown |
+| `IMAGE_USAGE_COST_OVERFLOW` | the bill does not fit a `u64` of micro-USD |
+
+The response carries no model field in the published schema, so an absent model means the
+requested model. `ImageCapabilities.response_model_aliases` lists exact response model names the
+host declares to bill as the requested model; usage is then recorded under the priced model.
+Any other reported model is not priced.

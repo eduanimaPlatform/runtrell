@@ -96,3 +96,35 @@ current owner again at settlement. Conflicting complete observations are refused
 Incomplete observations retain reservations; late results from stale owners
 require independent host verification and are never automatically adopted. After
 settlement, result is authoritative and temporary observation copies are cleared.
+
+## Price lines and owner settlement recovery
+
+`Price` rates are integer micro-USD per million tokens and the input side is a partition of four
+disjoint lines, so a token is billed once and every rate is independent: `input` (neither cached
+nor image), `cached` (cached, not image), `image_input` (image, not cached) and
+`cached_image_input` (both). With `Usage` totals (`cached` and `image_input` include their
+intersection `cached_image_input`) the lines are `i - cached - image + both`, `cached - both`,
+`image - both` and `both`; the sum is rounded up once. A counter that can change the bill and is
+`None` makes `Price::cost` return `UsageUnknown`; a category with equal rates needs no count.
+
+A complete saved Applied/Failed result whose usage never settled keeps its reservation and
+unknown mark (`Operation::awaits_operator`). Asking again returns the same saved result, so the
+Run enters `Waiting(OPERATOR_ACTION_WAIT)` once the operation has no lookup window left
+(`Operation::stalled`: `now >= recovery_until` in Unix milliseconds, or never had one) and the
+driver stops reconciling it: no lookup, no provider call, no write. While a lookup window is
+open the Run keeps its ordinary `external reconciliation` wait, because the adapter may still
+supply corrected measurements. There is no retry count: the state follows the evidence.
+
+`OperationStore::settle_recovered(run, operation, SettlementRecovery, now)` is the owner path
+out. The request carries a fixed `basis` string, the stored usage refined by a documented rule
+and the price basis. The store accepts it only if the operation is Applied/Failed, unsettled and
+unknown, the new usage only fills counters that were `None` (model and quantities equal,
+`micro_usd` still `None`), `price.model` equals the usage and pinned price model, and
+`Price::cost` can compute the bill; otherwise nothing changes (`UsageUnknown` stays for the
+operator). It then settles the original operation in one transaction: releases the reservation
+and unknown mark, charges the corrected amount to every ancestor account, replaces the saved
+result's usage, and stores `Operation.recovery` with the old usage, price basis, new usage,
+amount and Unix-millisecond time. It makes no provider call and takes no Run claim, so callers
+authorize the operator first. An identical repeat returns the stored record without charging
+again; a different basis or price returns `Conflict`. `runtrell-providers` supplies the
+documented rule for OpenAI Images (`recovery_for_stored_openai_images_usage`).

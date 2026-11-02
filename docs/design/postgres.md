@@ -14,7 +14,7 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 
 ## 接続専用入口（connect）と必要権限
 
-`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の13 tableの存在確認（catalogの`to_regclass`）だけである。結果は次のとおり。
+`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の13 tableと`attempts.recovery`列の存在確認（catalogの`to_regclass`・`pg_attribute`）だけである。列が無い古いruntimeはownerが`initialize`を再実行するまでNotFound。結果は次のとおり。
 
 | 状況 | 結果 |
 |---|---|
@@ -48,6 +48,7 @@ connect自体に必要な権限は次の2つだけで、CREATE・ALTER・ownersh
 | queue_entries | 安定key、挿入順sequence、tenant、優先度、deadline。tenant/優先度/順序とdeadlineのindex |
 | queue_tenants / queue_policy | tenant候補、前回tenantと優先連続数。dispatch順序だけの小さな正本 |
 | late_results | attempt/旧世代/worker/digestのappend-only観測、時刻、元result |
+| attempts.recovery | owner settlement（`settle_recovered`）の監査: 旧usage・価格根拠・新usage・額・時刻（JSONB、無ければNULL）。既存runtimeへは`initialize`が列だけを追加する（lockは列が無い時だけ） |
 
 単一の`records(kind,key,data)`台帳は廃止する。revision、generation、sequence、時刻、状態などをentityごとの列に分け、spec・checkpoint・message・request・result・Amountなどの構造化値にはJSONBを使う。tenant、受付key、session、親、ownerの検索列は同じ正本からのgenerated列であり、二重書込みしない。
 

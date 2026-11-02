@@ -19,7 +19,10 @@ pub mod file_tools;
 pub use execution::{ExecutionBackend, ExecutionLimits, ExecutionRef};
 
 pub mod budget;
-pub use budget::{AccountPolicy, ReservationPolicy, SchedulingPolicy};
+pub use budget::{
+    AccountPolicy, OPERATOR_ACTION_WAIT, ReservationPolicy, SchedulingPolicy, SettlementRecord,
+    SettlementRecovery,
+};
 
 pub mod assembly;
 

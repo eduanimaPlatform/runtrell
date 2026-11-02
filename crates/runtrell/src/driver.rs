@@ -190,6 +190,11 @@ impl<
             if op.settled {
                 continue;
             }
+            // Complete saved result, unsettled usage and no lookup window left: asking again
+            // returns the same evidence. Only the owner recovery can change it.
+            if op.stalled(self.clock.now()) {
+                continue;
+            }
             let permission = if matches!(
                 op.request.kind,
                 OperationKind::Model | OperationKind::Compaction
@@ -583,12 +588,28 @@ impl<
         Box::pin(self.finish_drive(c, result)).await
     }
 
+    /// True when some operation is stalled on an owner decision (`Operation::stalled`).
+    async fn operator_blocked(&self, c: &Claim) -> Result<bool> {
+        let now = self.clock.now();
+        Ok(Box::pin(self.store.list_operations(&c.run))
+            .await?
+            .iter()
+            .any(|op| op.stalled(now)))
+    }
+
     async fn finish_drive(&self, c: &Claim, result: Result<RunRecord>) -> Result<RunRecord> {
         if let Err(e) = &result {
             if e == &Error::Closed {
                 return Box::pin(self.store.get(&c.run)).await;
             }
             if let Error::Pending(reason) = e {
+                let reason = if reason == "external reconciliation"
+                    && Box::pin(self.operator_blocked(c)).await?
+                {
+                    OPERATOR_ACTION_WAIT
+                } else {
+                    reason.as_str()
+                };
                 self.store.wait(c, reason, self.clock.now()).await?;
                 return Box::pin(self.store.get(&c.run)).await;
             }
@@ -640,6 +661,17 @@ impl<
     }
     async fn drive_inner(&self, c: &Claim) -> Result<RunRecord> {
         let r = Box::pin(self.store.check(c, self.clock.now(), false)).await?;
+        // Operator-action wait: no lookup and no provider call while the same unsettled
+        // evidence remains. The state is written once, when it first applies.
+        if !matches!(r.state, RunState::Terminal(_)) && Box::pin(self.operator_blocked(c)).await? {
+            if r.state != RunState::Waiting(OPERATOR_ACTION_WAIT.into()) {
+                self.store
+                    .wait(c, OPERATOR_ACTION_WAIT, self.clock.now())
+                    .await?;
+                return Box::pin(self.store.get(&c.run)).await;
+            }
+            return Ok(r);
+        }
         if matches!(r.state, RunState::Terminal(_)) {
             Box::pin(self.reconcile(c)).await?;
             return Box::pin(self.store.get(&c.run)).await;

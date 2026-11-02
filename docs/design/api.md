@@ -22,6 +22,10 @@ async traitはRustライブラリの静的dispatch契約。安定dynamic ABIで�
 
 Policyは毎回現在の認可を検査する。SecretProviderは限定context・対象・期限でsecret利用closureを起動し、生secretをmodelや保存レコードへ返さない。Observerは機密payloadを含めない有限eventの受信口。Clockは単調な試験時刻（永続adapterでは共有epoch時刻）をUnix millisecondで与える。
 
+## 使用量が精算できない操作（operator action）
+
+完全な結果を保存済みだが usage を精算できない操作は、予約と unknown を保持する。再照会しても同じ保存結果が返るため、lookup 窓（`recovery_until`、Unix ms）が尽きた操作（窓が無い操作は即時）が1つでもあれば、Run は `Waiting(OPERATOR_ACTION_WAIT)` に入り、driver は lookup・provider 呼出し・書込みをせず待つ。回数上限は無く、状態は証拠に従う。owner は `OperationStore::settle_recovered` で元の操作を一度だけ冪等に精算する（旧値・価格根拠・新値を `Operation.recovery` に保存、再送0）。精算できない証拠は operator 対応のまま残る。詳細は [budget](budget.md#price-lines-and-owner-settlement-recovery)、OpenAI Images の usage は [providers](providers.md#openai-images-usage)。
+
 ## 時刻と期間の単位
 
 制御APIが`u64`で受け渡す時刻と期間は、すべて**ミリ秒**である。絶対時刻はhost `Clock`が報告するepochのUnix millisecond、期間はそのmillisecondに加える長さ。秒と混在させない。Clockは永続adapterでは全workerが共有するepochを返し、fake clockは0起点でよい。`ExecutionLimits`の`*_ms`も同じ単位。
@@ -668,6 +672,19 @@ pub trait OperationStore: Send + Sync {
         id: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+    /// Owner recovery for an operation whose saved Applied/Failed result is complete but
+    /// whose usage never settled. Idempotent for an identical request; makes no provider
+    /// call and takes no Run claim. Releases the reservation and unknown mark only by
+    /// settling the corrected amount, and keeps the old usage, price basis and new usage
+    /// in `Operation.recovery`. Stored evidence that still cannot be settled returns
+    /// `UsageUnknown` and changes nothing. Callers authorize the operator before calling.
+    fn settle_recovered(
+        &self,
+        run: &RunHandle,
+        id: &str,
+        recovery: SettlementRecovery,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<SettlementRecord>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
     fn record(
         &self,

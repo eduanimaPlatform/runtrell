@@ -430,6 +430,7 @@ fn admit_child(
             finished_at: None,
             usage_observations: vec![],
             unsettled_result: None,
+            recovery: None,
         },
     );
     get_mut(s, &c.run)?.settlement = Progress::Pending;
@@ -945,6 +946,7 @@ impl OperationStore for MemoryStore {
                 finished_at: None,
                 usage_observations: vec![],
                 unsettled_result: None,
+                recovery: None,
             };
             s.operations.insert(id, op.clone());
             get_mut(s, &c.run)?.settlement = Progress::Pending;
@@ -1113,6 +1115,44 @@ impl OperationStore for MemoryStore {
                 Ok(())
             })
         })?
+    }
+    async fn settle_recovered(
+        &self,
+        run: &RunHandle,
+        id: &str,
+        recovery: SettlementRecovery,
+        now: u64,
+    ) -> Result<SettlementRecord> {
+        self.tx(|s| {
+            let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
+            if old.run != *run {
+                return Err(Error::NotFound);
+            }
+            let account = get(s, run)?.spec.account.clone();
+            let Some((result, record)) = old.plan_recovery(&recovery, now)? else {
+                return old.recovery.map(|r| *r).ok_or(Error::Conflict);
+            };
+            for id in ancestors(s, &account)? {
+                let a = s.accounts.get_mut(&id).unwrap();
+                a.unknown = a.unknown.checked_sub(1).ok_or(Error::Conflict)?;
+                a.reserved = a.reserved.subtract(old.request.reserve);
+                a.used = a.used.checked_add(record.amount)?;
+                a.settle_quantities(&old.request, &record.settled)?;
+                if a.reached() {
+                    a.exhausted = true;
+                }
+            }
+            let op = s.operations.get_mut(id).unwrap();
+            op.result = Some(result);
+            op.settled = true;
+            op.unknown_usage = false;
+            op.unsettled_result = None;
+            op.usage_observations.clear();
+            op.recovery = Some(Box::new(record.clone()));
+            s.slots.remove(id);
+            refresh_settlement(s, run);
+            Ok(record)
+        })
     }
 }
 impl Scheduler for MemoryStore {

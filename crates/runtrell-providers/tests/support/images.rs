@@ -19,6 +19,7 @@ fn image_config(url: String) -> Config {
         generation: true,
         reference_edit: true,
         mask_edit: false,
+        ..Default::default()
     };
     c.max_request_bytes = c.image_limits.max_request_bytes;
     c.max_response_bytes = c.image_limits.max_response_bytes;

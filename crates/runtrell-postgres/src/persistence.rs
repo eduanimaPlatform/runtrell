@@ -591,7 +591,7 @@ impl PgStore {
         }
         for (k, o) in &s.operations {
             if before.operations.get(k) != Some(o) {
-                self.put(conn,"attempts","id,run,request,state,result,settled,unknown_usage,send_generation,send_count,replay_proof_generation,created_at,finished_at,usage_observations,unsettled_result","id",json!(o)).await?;
+                self.put(conn,"attempts","id,run,request,state,result,settled,unknown_usage,send_generation,send_count,replay_proof_generation,created_at,finished_at,usage_observations,unsettled_result,recovery","id",json!(o)).await?;
                 if !before.operations.contains_key(k) {
                     let run = s.runs.get(&key(&o.run)).ok_or(Error::Storage)?;
                     for account in ancestors(s, &run.spec.account)? {

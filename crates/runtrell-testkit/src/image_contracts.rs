@@ -153,7 +153,7 @@ impl ModelPort for ImageLoop {
         self.inner.recovery()
     }
 }
-fn resolver(
+pub(crate) fn resolver(
     data: DataStore,
     access: Access,
     limits: ImageLimits,
