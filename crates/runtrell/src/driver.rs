@@ -39,6 +39,16 @@ pub struct Runtime<S, M, T, P, C, V, F> {
     pub validator: Arc<V>,
     pub finalizer: Arc<F>,
 }
+/// Builds a future inside its own short-lived frame and returns it boxed. A debug build gives
+/// every future temporary a slot in the caller's frame for the whole call, so boxing in place
+/// still charges the caller the full (store-specific) future size at each site.
+#[inline(never)]
+fn bx<'a, T, F: std::future::Future<Output = T> + Send + 'a>(
+    f: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>> {
+    Box::pin(f())
+}
+
 impl<
     S: ControlStore,
     M: ModelPort,
@@ -55,11 +65,7 @@ impl<
         id: &str,
         result: ExternalResult,
     ) -> Result<ExternalResult> {
-        match self
-            .store
-            .record(c, id, result.clone(), self.clock.now())
-            .await
-        {
+        match bx(|| self.store.record(c, id, result.clone(), self.clock.now())).await {
             Ok(()) => {}
             Err(Error::UsageUnknown) => return Ok(ExternalResult::Unknown),
             Err(e) => return Err(e),
@@ -67,21 +73,21 @@ impl<
         Ok(result)
     }
     async fn model_budget(&self, c: &Claim, input: u64) -> Result<(u64, Amount)> {
-        let r = self.store.check(c, self.clock.now(), true).await?;
+        let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.model.limits().cap_for_policy(
             input,
-            self.store.remaining(c, self.clock.now()).await?,
+            bx(|| self.store.remaining(c, self.clock.now())).await?,
             &r.spec.budget,
         )
     }
     /// Cancellation, external stop and resource reclamation have separate receipts.
     pub async fn cancel(&self, c: &Claim, reason: &str) -> Result<RunRecord> {
-        self.store.check(c, self.clock.now(), false).await?;
-        self.store.cancel(&c.run, reason).await?;
-        let r = self.store.get(&c.run).await?;
+        bx(|| self.store.check(c, self.clock.now(), false)).await?;
+        bx(|| self.store.cancel(&c.run, reason)).await?;
+        let r = bx(|| self.store.get(&c.run)).await?;
         let mut stop = Progress::Confirmed;
         let mut found = false;
-        for op in self.store.list_operations(&c.run).await? {
+        for op in bx(|| self.store.list_operations(&c.run)).await? {
             if op.settled {
                 continue;
             }
@@ -92,7 +98,7 @@ impl<
                 op.request.kind,
                 OperationKind::Model | OperationKind::Compaction
             ) {
-                self.model.cancel(&ctx).await?
+                bx(|| self.model.cancel(&ctx)).await?
             } else if op.request.kind == OperationKind::Tool
                 || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
             {
@@ -110,7 +116,10 @@ impl<
                     .ok_or(Error::Conflict)?;
                 tool.cancel(&ctx, op.request.input.clone()).await?
             } else if op.request.kind == OperationKind::ChildRun {
-                let child = self.store.get(&op.child_handle()?).await?;
+                let child = {
+                    let handle = op.child_handle()?;
+                    bx(|| self.store.get(&handle)).await?
+                };
                 if child_ready(&child) {
                     Progress::NotRequired
                 } else {
@@ -124,12 +133,14 @@ impl<
             }
         }
         if found {
-            self.store
-                .cleanup(c, stop, Progress::Pending, self.clock.now())
-                .await?;
+            bx(|| {
+                self.store
+                    .cleanup(c, stop, Progress::Pending, self.clock.now())
+            })
+            .await?;
         }
         self.reconcile(c).await?;
-        self.store.get(&c.run).await
+        bx(|| self.store.get(&c.run)).await
     }
     async fn bounded<U>(
         &self,
@@ -151,30 +162,30 @@ impl<
     }
     /// Atomically admits a child and retains its slot until terminal reconciliation.
     pub async fn spawn_child(&self, c: &Claim, key: &str, spec: RunSpec) -> Result<RunHandle> {
-        let parent = self.store.check(c, self.clock.now(), false).await?;
+        let parent = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&parent, "child", "child")?;
-        self.store.admit_child(c, key, spec, self.clock.now()).await
+        bx(|| self.store.admit_child(c, key, spec, self.clock.now())).await
     }
     /// Return the child's saved terminal outcome, or yield the parent execution
     /// permit while its child/cleanup/settlement is still pending. No new work.
     pub async fn join_child(&self, c: &Claim, key: &str) -> Result<RunRecord> {
-        let parent = self.store.check(c, self.clock.now(), false).await?;
+        let parent = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&parent, "child", "reconcile")?;
-        let op = self
-            .store
-            .operation(&c.run, key)
+        let op = bx(|| self.store.operation(&c.run, key))
             .await?
             .ok_or(Error::NotFound)?;
-        let child = self.store.get(&op.child_handle()?).await?;
+        let child = {
+            let handle = op.child_handle()?;
+            bx(|| self.store.get(&handle)).await?
+        };
         if child.spec.parent.as_ref() != Some(&c.run) {
             return Err(Error::Conflict);
         }
         if !op.settled {
             if !child_ready(&child) {
                 if !matches!(parent.state, RunState::Terminal(_)) {
-                    self.store
-                        .wait(c, &format!("child:{key}"), self.clock.now())
-                        .await?;
+                    let reason = format!("child:{key}");
+                    bx(|| self.store.wait(c, &reason, self.clock.now())).await?;
                 }
                 return Err(Error::Pending(format!("child:{key}")));
             }
@@ -185,8 +196,8 @@ impl<
     }
     /// Continues lookup and settlement after run termination. Never invokes new work.
     pub async fn reconcile(&self, c: &Claim) -> Result<()> {
-        let r = self.store.check(c, self.clock.now(), false).await?;
-        for op in self.store.list_operations(&c.run).await? {
+        let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
+        for op in bx(|| self.store.list_operations(&c.run)).await? {
             if op.settled {
                 continue;
             }
@@ -211,7 +222,7 @@ impl<
                 if let Some(result) = saved {
                     Lookup::Found(result)
                 } else {
-                    self.model.lookup(&ctx, request).await?
+                    bx(|| self.model.lookup(&ctx, request)).await?
                 }
             } else if op.request.kind == OperationKind::Tool
                 || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
@@ -241,7 +252,10 @@ impl<
             } else if let Some(result) = saved {
                 Lookup::Found(result)
             } else if op.request.kind == OperationKind::ChildRun {
-                let child = self.store.get(&op.child_handle()?).await?;
+                let child = {
+                    let handle = op.child_handle()?;
+                    bx(|| self.store.get(&handle)).await?
+                };
                 if child.spec.parent.as_ref() != Some(&c.run) {
                     return Err(Error::Conflict);
                 }
@@ -288,7 +302,7 @@ impl<
     {
         // Store and adapter futures can be large for durable hosts. Box the
         // children as well as this dispatcher to bound its live poll frame.
-        let existing = Box::pin(self.store.operation(&c.run, &request.key))
+        let existing = bx(|| self.store.operation(&c.run, &request.key))
             .await?
             .filter(|op| op.request.attempt == request.attempt);
         let op = if let Some(op) = existing {
@@ -307,10 +321,10 @@ impl<
             }
             op
         } else {
-            let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+            let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
             self.policy.authorize(&r, &request.target, permission)?;
             if request.attempt > 1 {
-                let previous = Box::pin(self.store.operation(&c.run, &request.key))
+                let previous = bx(|| self.store.operation(&c.run, &request.key))
                     .await?
                     .ok_or(Error::Conflict)?;
                 request.recovery_until =
@@ -332,8 +346,7 @@ impl<
             ) && self.model.requires_recovery_preparation()
             {
                 Some(
-                    self.model
-                        .prepare_recovery(&preparation, &request.input)
+                    bx(|| self.model.prepare_recovery(&preparation, &request.input))
                         .await?
                         .ok_or(Error::Conflict)?,
                 )
@@ -366,7 +379,7 @@ impl<
                 );
             }
             request.recovery_proof = proof;
-            match Box::pin(self.store.begin(c, request, self.clock.now())).await {
+            match bx(|| self.store.begin(c, request, self.clock.now())).await {
                 Err(Error::ReservationDenied)
                     if matches!(r.spec.budget, ReservationPolicy::Shrink { .. }) =>
                 {
@@ -375,7 +388,7 @@ impl<
                 result => result?,
             }
         };
-        let r = Box::pin(self.store.check(c, self.clock.now(), false)).await?;
+        let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         if op.settled {
             return op.result.ok_or(Error::Conflict);
@@ -390,26 +403,29 @@ impl<
                 .await
                 .unwrap_or(Lookup::Unknown);
             // Fence after lookup even when no result was found.
-            Box::pin(self.store.check(c, self.clock.now(), false)).await?;
+            bx(|| self.store.check(c, self.clock.now(), false)).await?;
             match found {
                 Lookup::Found(result) => {
                     return self.persist_result(c, &op.id, result).await;
                 }
                 Lookup::NotFound { scope } => {
-                    let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+                    let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
                     self.policy.authorize(&r, &op.request.target, permission)?;
-                    if let Err(error) = self
-                        .store
-                        .proven_unsent(c, &op.id, &scope, self.clock.now())
-                        .await
+                    if let Err(error) = bx(|| {
+                        self.store
+                            .proven_unsent(c, &op.id, &scope, self.clock.now())
+                    })
+                    .await
                     {
                         if error == Error::UsageUnknown {
-                            Box::pin(self.store.record(
-                                c,
-                                &op.id,
-                                ExternalResult::Unknown,
-                                self.clock.now(),
-                            ))
+                            bx(|| {
+                                self.store.record(
+                                    c,
+                                    &op.id,
+                                    ExternalResult::Unknown,
+                                    self.clock.now(),
+                                )
+                            })
                             .await?;
                         }
                         return Err(error);
@@ -424,28 +440,26 @@ impl<
                             external_id: op.id.clone(),
                         },
                     };
-                    Box::pin(
+                    bx(|| {
                         self.store
-                            .record(c, &op.id, pending.clone(), self.clock.now()),
-                    )
+                            .record(c, &op.id, pending.clone(), self.clock.now())
+                    })
                     .await?;
                     return Ok(pending);
                 }
                 Lookup::Unknown => {
-                    Box::pin(self.store.record(
-                        c,
-                        &op.id,
-                        ExternalResult::Unknown,
-                        self.clock.now(),
-                    ))
+                    bx(|| {
+                        self.store
+                            .record(c, &op.id, ExternalResult::Unknown, self.clock.now())
+                    })
                     .await?;
                     return Err(Error::UsageUnknown);
                 }
             }
         }
-        let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+        let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
-        self.store.mark_sent(c, &op.id, self.clock.now()).await?;
+        bx(|| self.store.mark_sent(c, &op.id, self.clock.now())).await?;
         let deadline = match (
             r.spec.deadline,
             op.request
@@ -481,7 +495,7 @@ impl<
         cursor: u64,
         catalog: &[ToolDescriptor],
     ) -> Result<()> {
-        let r = self.store.check(c, self.clock.now(), true).await?;
+        let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         let mut payload = r
             .checkpoint
             .as_ref()
@@ -493,8 +507,8 @@ impl<
         payload["model"] = serde_json::to_value(self.model.limits()).map_err(|_| Error::Storage)?;
         payload["compaction_model"] =
             serde_json::to_value(self.model.compaction_limits()).map_err(|_| Error::Storage)?;
-        self.store
-            .checkpoint(
+        bx(|| {
+            self.store.checkpoint(
                 c,
                 r.revision,
                 Checkpoint {
@@ -506,7 +520,8 @@ impl<
                 },
                 self.clock.now(),
             )
-            .await
+        })
+        .await
     }
     async fn validation_failure(
         &self,
@@ -519,9 +534,11 @@ impl<
         let mut checkpoint = current.checkpoint.clone().ok_or(Error::Conflict)?;
         checkpoint.payload["last_validation"] =
             serde_json::json!({"candidate":candidate,"receipt":receipt});
-        self.store
-            .checkpoint(c, current.revision, checkpoint, self.clock.now())
-            .await?;
+        bx(|| {
+            self.store
+                .checkpoint(c, current.revision, checkpoint, self.clock.now())
+        })
+        .await?;
         Err(Error::Invalid(reason.into()))
     }
     async fn next_attempt(
@@ -536,9 +553,7 @@ impl<
             ..
         }) = &old.result
         {
-            let first = self
-                .store
-                .list_operations(&c.run)
+            let first = bx(|| self.store.list_operations(&c.run))
                 .await?
                 .iter()
                 .filter(|op| op.request.key == old.request.key)
@@ -568,50 +583,102 @@ impl<
     /// Drives until a terminal result or machine wait. No runner/workspace is required.
     pub async fn drive(&self, c: &Claim) -> Result<RunRecord> {
         let slot_key = format!("active:{}:{}", c.run.tenant, c.run.id);
-        self.store
-            .acquire(SlotRequest {
+        bx(|| {
+            self.store.acquire(SlotRequest {
                 key: slot_key.clone(),
                 tenant: c.run.tenant.clone(),
                 run: c.run.id.clone(),
                 kind: OperationKind::Run,
             })
-            .await?;
+        })
+        .await?;
         // The loop owns prepared payloads and adapter futures. Keep its storage
         // off caller stacks, including hosts using small executor threads.
-        let result = Box::pin(self.drive_inner(c)).await;
-        self.store.release_slot(&slot_key).await?;
-        Box::pin(self.finish_drive(c, result)).await
+        let result = bx(|| self.drive_gated(c)).await;
+        bx(|| self.store.release_slot(&slot_key)).await?;
+        bx(|| self.finish_drive(c, result)).await
     }
 
     /// True when some operation is stalled on an owner decision (`Operation::stalled`).
     async fn operator_blocked(&self, c: &Claim) -> Result<bool> {
         let now = self.clock.now();
-        Ok(Box::pin(self.store.list_operations(&c.run))
+        Ok(bx(|| self.store.list_operations(&c.run))
             .await?
             .iter()
             .any(|op| op.stalled(now)))
     }
 
+    /// Writes the wait for a machine-pending reason; an unchanged unsettleable result becomes the
+    /// operator-action wait. Kept out of line so it adds nothing to the driver's own poll frame.
+    async fn wait_pending(&self, c: &Claim, reason: &str) -> Result<()> {
+        let reason = if reason == "external reconciliation" && self.operator_blocked(c).await? {
+            OPERATOR_ACTION_WAIT
+        } else {
+            reason
+        };
+        bx(|| self.store.wait(c, reason, self.clock.now())).await
+    }
+
+    /// A complete provider result whose usage cannot settle. Already parked: the previous pass
+    /// asked again and got the same evidence, so nothing is looked up or sent until the owner
+    /// changes it. Otherwise (new worker, or another wait) every unsettled operation is looked
+    /// up once, and the Run parks only if the evidence is unchanged. Returns whether it is parked.
+    /// Out of line, and returning a flag rather than the record, to keep the driver's stack small.
+    async fn park_for_operator(&self, c: &Claim, r: &RunRecord) -> Result<bool> {
+        // Operator hold: stays until the owner calls `resume_held`, settled or not.
+        if r.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into()) {
+            return Ok(true);
+        }
+        if matches!(r.state, RunState::Terminal(_)) || !self.operator_blocked(c).await? {
+            return Ok(false);
+        }
+        if r.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into()) {
+            return Ok(true);
+        }
+        bx(|| self.confirm_operator(c)).await
+    }
+
+    /// Looks every unsettled operation up once and parks only if the evidence is unchanged.
+    /// A separate function: it builds the (large) reconcile future, and a debug build reserves
+    /// that space for the whole call frame, so it must not sit under the common check above.
+    async fn confirm_operator(&self, c: &Claim) -> Result<bool> {
+        bx(|| self.reconcile(c)).await?;
+        if !self.operator_blocked(c).await? {
+            return Ok(false);
+        }
+        bx(|| self.store.wait(c, OPERATOR_ACTION_WAIT, self.clock.now())).await?;
+        Ok(true)
+    }
+
+    /// Operator-hold gate in front of the step loop. Only boxed futures live in this frame, so
+    /// the hold check adds almost nothing under the (very large) `drive_inner` frame.
+    async fn drive_gated(&self, c: &Claim) -> Result<RunRecord> {
+        match bx(|| self.parked(c)).await {
+            Ok(true) => bx(|| self.store.get(&c.run)).await,
+            Ok(false) => bx(|| self.drive_inner(c)).await,
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Checks the operator hold in its own frame so the caller keeps no record of it.
+    async fn parked(&self, c: &Claim) -> Result<bool> {
+        let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
+        self.park_for_operator(c, &r).await
+    }
+
     async fn finish_drive(&self, c: &Claim, result: Result<RunRecord>) -> Result<RunRecord> {
         if let Err(e) = &result {
             if e == &Error::Closed {
-                return Box::pin(self.store.get(&c.run)).await;
+                return bx(|| self.store.get(&c.run)).await;
             }
             if let Error::Pending(reason) = e {
-                let reason = if reason == "external reconciliation"
-                    && Box::pin(self.operator_blocked(c)).await?
-                {
-                    OPERATOR_ACTION_WAIT
-                } else {
-                    reason.as_str()
-                };
-                self.store.wait(c, reason, self.clock.now()).await?;
-                return Box::pin(self.store.get(&c.run)).await;
+                bx(|| self.wait_pending(c, reason)).await?;
+                return bx(|| self.store.get(&c.run)).await;
             }
             if e == &Error::Backpressure {
-                let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
-                self.store
-                    .enqueue(QueueEntry {
+                let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
+                bx(|| {
+                    self.store.enqueue(QueueEntry {
                         key: format!("{}:{}", c.run.tenant, c.run.id),
                         tenant: c.run.tenant.clone(),
                         scheduling: r.spec.scheduling,
@@ -620,9 +687,10 @@ impl<
                             .deadline
                             .unwrap_or(self.clock.now().saturating_add(CAPACITY_WAIT_MS)),
                     })
-                    .await?;
-                self.store.wait(c, "capacity", self.clock.now()).await?;
-                return Box::pin(self.store.get(&c.run)).await;
+                })
+                .await?;
+                bx(|| self.store.wait(c, "capacity", self.clock.now())).await?;
+                return bx(|| self.store.get(&c.run)).await;
             }
             let terminal = match e {
                 Error::Deadline => Some(Terminal::DeadlineReached),
@@ -637,52 +705,36 @@ impl<
             };
             if let Some(t) = terminal {
                 if matches!(e, Error::BudgetAtLimit | Error::ReservationDenied) {
-                    let r = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+                    let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
                     if let ReservationPolicy::Wait { until } = r.spec.budget
                         && self.clock.now() < until
                     {
-                        self.store.wait(c, "budget", self.clock.now()).await?;
-                        return Box::pin(self.store.get(&c.run)).await;
+                        bx(|| self.store.wait(c, "budget", self.clock.now())).await?;
+                        return bx(|| self.store.get(&c.run)).await;
                     }
                     if r.spec.budget == ReservationPolicy::EndAccount {
-                        self.store.exhaust(c, self.clock.now()).await?;
+                        bx(|| self.store.exhaust(c, self.clock.now())).await?;
                     }
                 }
-                self.store.terminate(c, t, self.clock.now()).await?;
-                return Box::pin(self.store.get(&c.run)).await;
+                bx(|| self.store.terminate(c, t, self.clock.now())).await?;
+                return bx(|| self.store.get(&c.run)).await;
             }
         }
         result
     }
     async fn drive_inner(&self, c: &Claim) -> Result<RunRecord> {
-        let r = Box::pin(self.store.check(c, self.clock.now(), false)).await?;
-        // A complete provider result whose usage cannot settle. Already parked: the previous
-        // pass asked again and got the same evidence, so nothing is looked up or sent until
-        // the owner changes it. Otherwise (new worker, or another wait) look every unsettled
-        // operation up once; only if the evidence is unchanged does the Run park.
-        if !matches!(r.state, RunState::Terminal(_)) && Box::pin(self.operator_blocked(c)).await? {
-            if r.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into()) {
-                return Ok(r);
-            }
-            Box::pin(self.reconcile(c)).await?;
-            if Box::pin(self.operator_blocked(c)).await? {
-                self.store
-                    .wait(c, OPERATOR_ACTION_WAIT, self.clock.now())
-                    .await?;
-                return Box::pin(self.store.get(&c.run)).await;
-            }
-        }
+        let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         if matches!(r.state, RunState::Terminal(_)) {
-            Box::pin(self.reconcile(c)).await?;
-            return Box::pin(self.store.get(&c.run)).await;
+            bx(|| self.reconcile(c)).await?;
+            return bx(|| self.store.get(&c.run)).await;
         }
-        if Box::pin(self.store.list_operations(&c.run))
+        if bx(|| self.store.list_operations(&c.run))
             .await?
             .iter()
             .any(|op| op.request.kind == OperationKind::ChildRun && !op.settled)
         {
-            Box::pin(self.reconcile(c)).await?;
-            if Box::pin(self.store.list_operations(&c.run))
+            bx(|| self.reconcile(c)).await?;
+            if bx(|| self.store.list_operations(&c.run))
                 .await?
                 .iter()
                 .any(|op| op.request.kind == OperationKind::ChildRun && !op.settled)
@@ -758,7 +810,7 @@ impl<
             });
         let mut cursor = r.checkpoint.as_ref().map_or(0, |cp| cp.cursor);
         loop {
-            let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+            let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
             if let Some(started) = repair_started(&current)
                 && self
                     .validator
@@ -770,33 +822,29 @@ impl<
             }
             let step = run.next_step().map_err(|e| Error::Invalid(e.to_string()))?;
             // Pending protocol state is recoverable before any external work.
-            Box::pin(self.save(c, &run, messages.clone(), cursor, &catalog)).await?;
+            bx(|| self.save(c, &run, messages.clone(), cursor, &catalog)).await?;
             match step {
                 AgentRunStep::CallModel { history, turn, .. } => {
-                    Box::pin(self.drive_model(
-                        c,
-                        &mut run,
-                        &mut messages,
-                        &mut cursor,
-                        &catalog,
-                        (history, turn),
-                    ))
+                    bx(|| {
+                        self.drive_model(
+                            c,
+                            &mut run,
+                            &mut messages,
+                            &mut cursor,
+                            &catalog,
+                            (history, turn),
+                        )
+                    })
                     .await?;
                 }
                 AgentRunStep::CallTools { calls } => {
-                    Box::pin(self.drive_tools(
-                        c,
-                        &mut run,
-                        &mut messages,
-                        &mut cursor,
-                        &catalog,
-                        calls,
-                    ))
+                    bx(|| {
+                        self.drive_tools(c, &mut run, &mut messages, &mut cursor, &catalog, calls)
+                    })
                     .await?;
                 }
                 AgentRunStep::Done(candidate) => {
-                    return Box::pin(self.finalize_candidate(c, candidate.output(), messages))
-                        .await;
+                    return bx(|| self.finalize_candidate(c, candidate.output(), messages)).await;
                 }
             }
         }
@@ -828,10 +876,10 @@ impl<
         } else {
             output.clone()
         };
-        let current = self.store.check(c, self.clock.now(), true).await?;
+        let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&current, "finalize", "finalize")?;
         // Enforce budget/deadline before validation; repair policy follows the receipt.
-        self.store.finalization_allowed(c, self.clock.now()).await?;
+        bx(|| self.store.finalization_allowed(c, self.clock.now())).await?;
         let validator = self.validator.clone();
         let validation_run = current.clone();
         let validation_output = output.clone();
@@ -916,9 +964,11 @@ impl<
             cp.payload["repair"] = serde_json::json!({"schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started,"candidate":output,"receipt":receipt});
             cp.payload["repair"]["no_progress"] = progress["no_progress"].clone();
             cp.messages = messages;
-            self.store
-                .checkpoint(c, current.revision, cp, self.clock.now())
-                .await?;
+            bx(|| {
+                self.store
+                    .checkpoint(c, current.revision, cp, self.clock.now())
+            })
+            .await?;
             return Err(Error::Pending("validation repair".into()));
         }
         let finalizer = self.finalizer.clone();
@@ -926,8 +976,8 @@ impl<
             tokio::task::spawn_blocking(move || finalizer.finalize(&current, output, receipt))
                 .await
                 .map_err(|_| Error::Storage)??;
-        self.store.finalize(c, completion, self.clock.now()).await?;
-        self.store.get(&c.run).await
+        bx(|| self.store.finalize(c, completion, self.clock.now())).await?;
+        bx(|| self.store.get(&c.run)).await
     }
 
     // Separate poll frames keep branch-local request preparation and decoding
@@ -942,10 +992,10 @@ impl<
         (history, turn): (Vec<Arc<runtrell_protocol::message::Message>>, usize),
     ) -> Result<()> {
         let protocol_spec = ProtocolSpec::new();
-        let current = Box::pin(self.store.get(&c.run)).await?;
+        let current = bx(|| self.store.get(&c.run)).await?;
         let key = format!("{}model:{turn}", operation_prefix(&current));
-        let existing = Box::pin(self.store.operation(&c.run, &key)).await?;
-        let current = Box::pin(self.store.get(&c.run)).await?;
+        let existing = bx(|| self.store.operation(&c.run, &key)).await?;
+        let current = bx(|| self.store.get(&c.run)).await?;
         let descriptors = file_tools::pin_catalog(&current, &self.policy, &self.tools)?;
         if descriptors.iter().any(|d| !catalog.contains(d)) {
             return Err(Error::Conflict);
@@ -956,8 +1006,8 @@ impl<
             serde_json::from_value::<ModelRequest>(op.request.input.clone())
                 .map_err(|e| Error::Invalid(e.to_string()))?
         } else {
-            Box::pin(self.store.warnings(c, self.clock.now())).await?;
-            let current = Box::pin(self.store.get(&c.run)).await?;
+            bx(|| self.store.warnings(c, self.clock.now())).await?;
+            let current = bx(|| self.store.get(&c.run)).await?;
             if let Some(cp) = &current.checkpoint {
                 *messages = cp.messages.clone();
             }
@@ -970,7 +1020,7 @@ impl<
                 metadata: Value::Null,
                 images: images::model_images(&current, messages)?,
             };
-            let prepared = Box::pin(self.model.prepare_request(&current, req)).await?;
+            let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
             let input = self.model.input_upper_bound(&prepared)?;
             if current.spec.compaction.as_ref().is_some_and(|policy| {
                 self.model
@@ -994,9 +1044,9 @@ impl<
                     agent: "driver".into(),
                 });
                 data.stage(&access, &key).await?;
-                Box::pin(self.compact_context(c, &data, &access, &format!("compact:{key}")))
-                    .await?;
-                *messages = Box::pin(self.store.get(&c.run))
+                let compact_key = format!("compact:{key}");
+                bx(|| self.compact_context(c, &data, &access, &compact_key)).await?;
+                *messages = bx(|| self.store.get(&c.run))
                     .await?
                     .checkpoint
                     .ok_or(Error::Conflict)?
@@ -1004,7 +1054,7 @@ impl<
                 // Re-prepare and re-quote from the committed summary on the next pass.
                 return Ok(());
             }
-            let (cap, reserve) = Box::pin(self.model_budget(c, input)).await?;
+            let (cap, reserve) = bx(|| self.model_budget(c, input)).await?;
             quoted_reserve = Some(reserve);
             let prepared = prepared.with_max_output(cap);
             let request = prepared.request().clone();
@@ -1012,7 +1062,7 @@ impl<
             request
         };
         let mut dispatch = if let Some(op) = &existing {
-            Box::pin(self.next_attempt(c, op, self.model.retry_policy())).await?
+            bx(|| self.next_attempt(c, op, self.model.retry_policy())).await?
         } else {
             let reserve = quoted_reserve.ok_or(Error::Conflict)?;
             let mut d = DispatchRequest::new(
@@ -1051,9 +1101,9 @@ impl<
         {
             let mut retry_request = request.clone();
             let prepared =
-                Box::pin(self.model.prepare_request(&current, retry_request.clone())).await?;
+                bx(|| self.model.prepare_request(&current, retry_request.clone())).await?;
             let input = self.model.input_upper_bound(&prepared)?;
-            let (cap, reserve) = Box::pin(self.model_budget(c, input)).await?;
+            let (cap, reserve) = bx(|| self.model_budget(c, input)).await?;
             retry_request.max_output = cap;
             quoted_prepared = Some(prepared.with_max_output(cap));
             dispatch.reserve = reserve;
@@ -1062,38 +1112,40 @@ impl<
         let invoke_request: ModelRequest = serde_json::from_value(dispatch.input.clone())
             .map_err(|e| Error::Invalid(e.to_string()))?;
         let lookup_request = PreparedModelRequest::for_lookup(invoke_request.clone())?;
-        let result = Box::pin(self.dispatch(
-            c,
-            dispatch,
-            "model",
-            |ctx| async move {
-                let prepared = if let Some(prepared) = quoted_prepared {
-                    prepared
-                } else {
-                    Box::pin(self.model.prepare_request(&current, invoke_request.clone())).await?
-                };
-                if prepared.request() != &invoke_request {
-                    return Err(Error::Conflict);
-                }
-                self.model.invoke(&ctx, prepared).await
-            },
-            |ctx| async move {
-                let found = self.model.lookup(&ctx, lookup_request).await?;
-                if let Lookup::NotFound { scope } = &found
-                    && ctx.recovery_proof.is_none()
-                    && self.model.recovery().as_ref().map(|r| &r.0) != Some(scope)
-                {
-                    return Ok(Lookup::Unknown);
-                }
-                Ok(found)
-            },
-        ))
+        let result = bx(|| {
+            self.dispatch(
+                c,
+                dispatch,
+                "model",
+                |ctx| async move {
+                    let prepared = if let Some(prepared) = quoted_prepared {
+                        prepared
+                    } else {
+                        bx(|| self.model.prepare_request(&current, invoke_request.clone())).await?
+                    };
+                    if prepared.request() != &invoke_request {
+                        return Err(Error::Conflict);
+                    }
+                    bx(|| self.model.invoke(&ctx, prepared)).await
+                },
+                |ctx| async move {
+                    let found = bx(|| self.model.lookup(&ctx, lookup_request)).await?;
+                    if let Lookup::NotFound { scope } = &found
+                        && ctx.recovery_proof.is_none()
+                        && self.model.recovery().as_ref().map(|r| &r.0) != Some(scope)
+                    {
+                        return Ok(Lookup::Unknown);
+                    }
+                    Ok(found)
+                },
+            )
+        })
         .await?;
         let output = completed(result)?;
         let reply: ModelReply =
             serde_json::from_value(output).map_err(|e| Error::Invalid(e.to_string()))?;
         if reply.metadata["stop_reason"] == "max_tokens" {
-            let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+            let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
             let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
             let count = cp.payload["continuations"].as_u64().unwrap_or(0);
             if current
@@ -1127,10 +1179,10 @@ impl<
             cp.messages = messages.clone();
             cp.cursor = cursor.checked_add(1).ok_or(Error::Conflict)?;
             *cursor = cp.cursor;
-            Box::pin(
+            bx(|| {
                 self.store
-                    .checkpoint(c, current.revision, cp, self.clock.now()),
-            )
+                    .checkpoint(c, current.revision, cp, self.clock.now())
+            })
             .await?;
             return Ok(());
         }
@@ -1195,7 +1247,7 @@ impl<
         run.model_response(ModelTurn::from_response(&response, &prepared))
             .map_err(|e| Error::Invalid(e.to_string()))?;
         *cursor += 1;
-        Box::pin(self.save(c, run, messages.clone(), *cursor, catalog)).await?;
+        bx(|| self.save(c, run, messages.clone(), *cursor, catalog)).await?;
         Ok(())
     }
 
@@ -1224,10 +1276,10 @@ impl<
             &diagnostics,
             &policy,
         ) {
-            Box::pin(
+            bx(|| {
                 self.store
-                    .checkpoint(c, current.revision, cp, self.clock.now()),
-            )
+                    .checkpoint(c, current.revision, cp, self.clock.now())
+            })
             .await?;
             return Err(Error::Invalid(no_progress_reason(&diagnostics)));
         }
@@ -1239,10 +1291,10 @@ impl<
                 .max_elapsed
                 .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
         {
-            Box::pin(
+            bx(|| {
                 self.store
-                    .checkpoint(c, current.revision, cp, self.clock.now()),
-            )
+                    .checkpoint(c, current.revision, cp, self.clock.now())
+            })
             .await?;
             return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
         }
@@ -1281,12 +1333,12 @@ impl<
                 .find(|t| t.descriptor().name == name)
                 .ok_or_else(|| Error::Unsupported(name.clone()))?;
             let descriptor = tool.descriptor();
-            let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+            let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
             self.policy
                 .authorize(&current, &descriptor.name, &descriptor.permission)?;
             let prefix = operation_prefix(&current);
             let model_key = format!("{prefix}model:{}", run.turn());
-            let presented = Box::pin(self.store.operation(&c.run, &model_key))
+            let presented = bx(|| self.store.operation(&c.run, &model_key))
                 .await?
                 .ok_or(Error::Conflict)?;
             let offered: ModelRequest =
@@ -1327,10 +1379,10 @@ impl<
                 cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
                 cp.messages = messages.clone();
                 cp.cursor = *cursor;
-                Box::pin(
+                bx(|| {
                     self.store
-                        .checkpoint(c, current.revision, cp, self.clock.now()),
-                )
+                        .checkpoint(c, current.revision, cp, self.clock.now())
+                })
                 .await?;
                 continue;
             }
@@ -1342,10 +1394,7 @@ impl<
                 tool.operation_kind(),
                 &name,
                 input.clone(),
-                if Box::pin(self.store.operation(&c.run, &key))
-                    .await?
-                    .is_none()
-                {
+                if bx(|| self.store.operation(&c.run, &key)).await?.is_none() {
                     let quote = tool.quote(&current, &input).await?;
                     Amount::new(
                         quote.tokens.max(descriptor.reserve.tokens),
@@ -1360,7 +1409,7 @@ impl<
             d.scope = Some(file_tools::catalog_digest(&descriptor));
             d.account_binding = descriptor.account.clone();
             d.timeout = Some(descriptor.timeout);
-            let old = Box::pin(self.store.operation(&c.run, &key)).await?;
+            let old = bx(|| self.store.operation(&c.run, &key)).await?;
             if let Some(op) = &old
                 && op.request.input != input
             {
@@ -1369,15 +1418,17 @@ impl<
             let lookup_input = input.clone();
             let repair_input = input.clone();
             if let Some(op) = &old {
-                d = Box::pin(self.next_attempt(c, op, descriptor.retry.clone())).await?;
+                d = bx(|| self.next_attempt(c, op, descriptor.retry.clone())).await?;
             }
-            let result = Box::pin(self.dispatch(
-                c,
-                d,
-                &descriptor.permission,
-                |ctx| async move { tool.invoke(&ctx, input).await },
-                |ctx| async move { tool.lookup(&ctx, lookup_input).await },
-            ))
+            let result = bx(|| {
+                self.dispatch(
+                    c,
+                    d,
+                    &descriptor.permission,
+                    |ctx| async move { tool.invoke(&ctx, input).await },
+                    |ctx| async move { tool.lookup(&ctx, lookup_input).await },
+                )
+            })
             .await?;
             if let ExternalResult::Failed {
                 code,
@@ -1397,11 +1448,11 @@ impl<
                 {
                     return Err(Error::Invalid("tool output exceeds declared limit".into()));
                 }
-                let current = Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+                let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
                 let mut cp = self
                     .prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":repair_input,"code":code,"repairable":true,"hint":hint}))
                     .await?;
-                let op = Box::pin(self.store.operation(&c.run, &key))
+                let op = bx(|| self.store.operation(&c.run, &key))
                     .await?
                     .ok_or(Error::Conflict)?;
                 if !op.settled || op.result.as_ref() != Some(&result) {
@@ -1424,15 +1475,15 @@ impl<
                 cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
                 cp.messages = messages.clone();
                 cp.cursor = *cursor;
-                Box::pin(
+                bx(|| {
                     self.store
-                        .checkpoint(c, current.revision, cp, self.clock.now()),
-                )
+                        .checkpoint(c, current.revision, cp, self.clock.now())
+                })
                 .await?;
                 continue;
             }
             let output = completed(result)?;
-            let current = Box::pin(self.store.get(&c.run)).await?;
+            let current = bx(|| self.store.get(&c.run)).await?;
             tool.authorize_result(&current, &output).await?;
             validate_schema(&output, &descriptor.output_schema)?;
             if serde_json::to_vec(&output).unwrap().len() > descriptor.max_output_bytes {
@@ -1472,7 +1523,7 @@ impl<
             run.answer(call.answer(answer))
                 .map_err(|e| Error::Invalid(e.to_string()))?;
             *cursor += 1;
-            Box::pin(self.save(c, run, messages.clone(), *cursor, catalog)).await?;
+            bx(|| self.save(c, run, messages.clone(), *cursor, catalog)).await?;
         }
         Ok(())
     }
@@ -1649,8 +1700,8 @@ impl<
             metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water,"context_digest":digest(&serde_json::to_value(&base).map_err(|_| Error::Storage)?)}),
             images: vec![],
         };
-        let current = Box::pin(self.store.get(&c.run)).await?;
-        let d = if let Some(op) = Box::pin(self.store.operation(&c.run, key)).await? {
+        let current = bx(|| self.store.get(&c.run)).await?;
+        let d = if let Some(op) = bx(|| self.store.operation(&c.run, key)).await? {
             let stored: ModelRequest =
                 serde_json::from_value(op.request.input.clone()).map_err(|_| Error::Conflict)?;
             if stored.metadata != request.metadata
@@ -1659,13 +1710,13 @@ impl<
             {
                 return Err(Error::Conflict);
             }
-            Box::pin(self.next_attempt(c, &op, self.model.retry_policy())).await?
+            bx(|| self.next_attempt(c, &op, self.model.retry_policy())).await?
         } else {
-            let prepared = Box::pin(self.model.prepare_request(&current, request)).await?;
+            let prepared = bx(|| self.model.prepare_request(&current, request)).await?;
             let input = self.model.input_upper_bound(&prepared)?;
             let (cap, reserve) = limits.cap_for_policy(
                 input,
-                Box::pin(self.store.remaining(c, self.clock.now())).await?,
+                bx(|| self.store.remaining(c, self.clock.now())).await?,
                 &current.spec.budget,
             )?;
             let request = prepared.with_max_output(cap);
@@ -1684,24 +1735,26 @@ impl<
         let request: ModelRequest =
             serde_json::from_value(d.input.clone()).map_err(|_| Error::Conflict)?;
         let lookup = PreparedModelRequest::for_lookup(request.clone())?;
-        let result = Box::pin(self.dispatch(
-            c,
-            d,
-            "model",
-            |ctx| async move {
-                let prepared =
-                    Box::pin(self.model.prepare_request(&current, request.clone())).await?;
-                if prepared.request() != &request {
-                    return Err(Error::Conflict);
-                }
-                self.model.invoke(&ctx, prepared).await
-            },
-            |ctx| async move { self.model.lookup(&ctx, lookup).await },
-        ))
+        let result = bx(|| {
+            self.dispatch(
+                c,
+                d,
+                "model",
+                |ctx| async move {
+                    let prepared =
+                        bx(|| self.model.prepare_request(&current, request.clone())).await?;
+                    if prepared.request() != &request {
+                        return Err(Error::Conflict);
+                    }
+                    bx(|| self.model.invoke(&ctx, prepared)).await
+                },
+                |ctx| async move { bx(|| self.model.lookup(&ctx, lookup)).await },
+            )
+        })
         .await?;
         let reply: ModelReply = serde_json::from_value(completed(result)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
-        Box::pin(self.store.check(c, self.clock.now(), true)).await?;
+        bx(|| self.store.check(c, self.clock.now(), true)).await?;
         if !reply.complete || reply.metadata["stop_reason"] == "max_tokens" {
             return Err(Error::Invalid("PARTIAL_SUMMARY".into()));
         }

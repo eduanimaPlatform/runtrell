@@ -175,6 +175,9 @@ impl BudgetAuthority for TestPg {
     }
 }
 impl OperationStore for TestPg {
+    async fn resume_held(&self, run: &RunHandle, now: u64) -> Result<bool> {
+        self.0.resume_held(run, now).await
+    }
     async fn settle_recovered(
         &self,
         run: &RunHandle,

@@ -98,3 +98,11 @@ fn lost_reply_keeps_lookup_recovery() {
         settlement_contracts::lost_reply_keeps_lookup_recovery(store, restarted).await;
     });
 }
+
+#[test]
+fn settle_never_resumes() {
+    support::block_on(async {
+        let (store, restarted) = two_stores().await;
+        settlement_contracts::settle_never_resumes(store, restarted).await;
+    });
+}

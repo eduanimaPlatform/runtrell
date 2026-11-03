@@ -53,3 +53,11 @@ fn lost_reply_keeps_lookup_recovery() {
         store,
     ));
 }
+#[test]
+fn settle_never_resumes() {
+    let store = Arc::new(MemoryStore::default());
+    block_on(settlement_contracts::settle_never_resumes(
+        store.clone(),
+        store,
+    ));
+}

@@ -24,7 +24,7 @@ Policyは毎回現在の認可を検査する。SecretProviderは限定context�
 
 ## 使用量が精算できない操作（operator action）
 
-完全な結果を保存済みだが usage を精算できない操作は、予約と unknown を保持する。再照会しても同じ保存結果が返るため、lookup 窓（`recovery_until`、Unix ms）が尽きた操作（窓が無い操作は即時）が1つでもあり、直前の lookup で同じ証拠を確認できたとき、Run は `Waiting(OPERATOR_ACTION_WAIT)` に入り、以後 driver は lookup・provider 呼出し・書込みをせず待つ。結果が欠落/不完全な操作（`complete: false` の model 応答、input/output 合計の無い model 結果＝応答喪失）はこの対象外で、従来どおり再開時に lookup して回収または `OutcomeUnknown` に至る。回数上限は無く、状態は証拠に従う。owner は `OperationStore::settle_recovered` で元の操作を一度だけ冪等に精算する（旧値・価格根拠・新値を `Operation.recovery` に保存、再送0）。精算できない証拠は operator 対応のまま残る。詳細は [budget](budget.md#price-lines-and-owner-settlement-recovery)、OpenAI Images の usage は [providers](providers.md#openai-images-usage)。
+完全な結果を保存済みだが usage を精算できない操作は、予約と unknown を保持する。再照会しても同じ保存結果が返るため、lookup 窓（`recovery_until`、Unix ms）が尽きた操作（窓が無い操作は即時）が1つでもあり、直前の lookup で同じ証拠を確認できたとき、Run は `Waiting(OPERATOR_ACTION_WAIT)` に入り、以後 driver は lookup・provider 呼出し・書込みをせず待つ。結果が欠落/不完全な操作（`complete: false` の model 応答、input/output 合計の無い model 結果＝応答喪失）はこの対象外で、従来どおり再開時に lookup して回収または `OutcomeUnknown` に至る。回数上限は無く、状態は証拠に従う。owner は `OperationStore::settle_recovered` で元の操作を一度だけ冪等に精算する（旧値・価格根拠・新値を `Operation.recovery` に保存、再送0）。精算できない証拠は operator 対応のまま残る。精算（`settle_recovered`）は実行を再開しない: Run は operator hold（`Waiting(OPERATOR_ACTION_WAIT)`、owner 解除）に留まり、旧 claim の worker は次の fence で `OwnershipLost`、新規 claim/dispatch/mark_sent/checkpoint は `Closed`。再開は別の owner 操作 `OperationStore::resume_held` だけ。詳細は [budget](budget.md#price-lines-and-owner-settlement-recovery)、OpenAI Images の usage は [providers](providers.md#openai-images-usage)。
 
 ## 時刻と期間の単位
 
@@ -685,6 +685,15 @@ pub trait OperationStore: Send + Sync {
         recovery: SettlementRecovery,
         now: u64,
     ) -> impl std::future::Future<Output = Result<SettlementRecord>> + Send;
+    /// Explicit owner action that lifts the operator hold set by `settle_recovered` (or by the
+    /// operator-action wait). Settling never resumes a Run; only this does. Refused with
+    /// `Conflict` while an operation still awaits the operator. Returns whether a hold was lifted
+    /// (`false`: nothing to do, idempotent). The Run becomes `Queued`; a worker must claim it.
+    fn resume_held(
+        &self,
+        run: &RunHandle,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
     fn record(
         &self,

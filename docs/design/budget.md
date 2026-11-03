@@ -123,6 +123,8 @@ reservation. Tool results are the saved receipt itself, so a saved tool result i
 open the Run keeps its ordinary `external reconciliation` wait, because the adapter may still
 supply corrected measurements. There is no retry count: the state follows the evidence.
 
+**Settling never resumes execution.** `settle_recovered` also leaves the Run under an operator hold: for a non-terminal Run it sets `Waiting(OPERATOR_ACTION_WAIT)` and clears the owner, so an old claim holder's next fence fails (`OwnershipLost`). While the hold stands, `claim` keeps the state, every new-work fence (`check(.., true)`, `begin`, `mark_sent`, `checkpoint`) returns `Closed`, `wait` cannot overwrite it, and `drive` returns the record without a lookup or send. Only the separate owner action `OperationStore::resume_held(run, now)` lifts it (refused with `Conflict` while an operation still awaits the operator; idempotent, returns whether a hold was lifted); the Run becomes `Queued` and a worker must claim it. A terminal Run is left as it is.
+
 `OperationStore::settle_recovered(run, operation, SettlementRecovery, now)` is the owner path
 out. The request carries a fixed `basis` string, the stored usage refined by a documented rule
 and the price basis. The store accepts it only if the operation is Applied/Failed, unsettled and

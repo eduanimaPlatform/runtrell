@@ -61,6 +61,10 @@ fn fence(s: &Ledger, c: &Claim, now: u64, new_work: bool) -> Result<RunRecord> {
         if r.cancel.is_some() || matches!(r.state, RunState::Terminal(_)) {
             return Err(Error::Closed);
         }
+        // Operator hold: settling an operation never resumes execution by itself.
+        if matches!(&r.state, RunState::Waiting(w) if w == OPERATOR_ACTION_WAIT) {
+            return Err(Error::Closed);
+        }
         if r.spec.deadline.is_some_and(|d| now >= d) {
             return Err(Error::Deadline);
         }
@@ -415,7 +419,9 @@ impl RunStore for PgStore {
                 lease_until: now.checked_add(lease).ok_or(Error::Conflict)?,
             };
             r.owner = Some(c.clone());
-            if !matches!(r.state, RunState::Terminal(_)) {
+            if !matches!(r.state, RunState::Terminal(_))
+                && !matches!(&r.state, RunState::Waiting(w) if w == OPERATOR_ACTION_WAIT)
+            {
                 r.state = RunState::Running;
             }
             r.revision += 1;
@@ -510,6 +516,9 @@ impl RunStore for PgStore {
                 return Err(Error::Closed);
             }
             let r = get_mut(s, &c.run)?;
+            if matches!(&r.state, RunState::Waiting(w) if w == OPERATOR_ACTION_WAIT) {
+                return Ok(());
+            }
             r.state = RunState::Waiting(reason.into());
             r.revision += 1;
             s.slots
@@ -967,6 +976,25 @@ impl OperationStore for PgStore {
         }
         status
     }
+    async fn resume_held(&self, run: &RunHandle, _now: u64) -> Result<bool> {
+        self.tx(Scope::Run(run, Mode::Ops), |s| {
+            let held = get(s, run)?.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into());
+            if !held {
+                return Ok(false);
+            }
+            if s.operations
+                .values()
+                .any(|o| o.run == *run && o.awaits_operator())
+            {
+                return Err(Error::Conflict);
+            }
+            let r = get_mut(s, run)?;
+            r.state = RunState::Queued;
+            r.revision += 1;
+            Ok(true)
+        })
+        .await
+    }
     async fn settle_recovered(
         &self,
         run: &RunHandle,
@@ -1001,6 +1029,15 @@ impl OperationStore for PgStore {
             op.usage_observations.clear();
             op.recovery = Some(Box::new(record.clone()));
             s.slots.remove(id);
+            // Settling is accounting only. Park the Run under the operator hold and drop the
+            // owner so an old worker's next fence fails; resuming is a separate owner action.
+            let run_record = get_mut(s, run)?;
+            if !matches!(run_record.state, RunState::Terminal(_)) {
+                run_record.state = RunState::Waiting(OPERATOR_ACTION_WAIT.into());
+                run_record.owner = None;
+                run_record.revision += 1;
+                s.slots.remove(&format!("active:{}:{}", run.tenant, run.id));
+            }
             refresh_settlement(s, run);
             Ok(record)
         })

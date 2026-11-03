@@ -73,6 +73,22 @@ impl Amount {
         self.tokens > limit.tokens || self.micro_usd > limit.micro_usd
     }
 }
+/// Safe fixed reason code, pointer-sized so `Usage` (copied through every async frame) stays small.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+#[allow(clippy::box_collection)] // deliberate: a thin pointer keeps `Usage` small
+pub struct UnknownReason(Box<String>);
+impl From<&str> for UnknownReason {
+    fn from(value: &str) -> Self {
+        Self(Box::new(value.to_owned()))
+    }
+}
+impl std::ops::Deref for UnknownReason {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Total input tokens, including cached and image input.
@@ -94,7 +110,7 @@ pub struct Usage {
     /// or the cost is unknown for a response that otherwise arrived. Adapters set it
     /// only when they deliberately keep a value unknown; it never turns unknown into 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unknown_reason: Option<String>,
+    pub unknown_reason: Option<UnknownReason>,
 }
 impl Usage {
     pub fn measured(input: u64, output: u64, cost: u64) -> Self {
@@ -1310,6 +1326,15 @@ pub trait OperationStore: Send + Sync {
         recovery: SettlementRecovery,
         now: u64,
     ) -> impl std::future::Future<Output = Result<SettlementRecord>> + Send;
+    /// Explicit owner action that lifts the operator hold set by `settle_recovered` (or by the
+    /// operator-action wait). Settling never resumes a Run; only this does. Refused with
+    /// `Conflict` while an operation still awaits the operator. Returns whether a hold was lifted
+    /// (`false`: nothing to do, idempotent). The Run becomes `Queued`; a worker must claim it.
+    fn resume_held(
+        &self,
+        run: &RunHandle,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
     fn record(
         &self,

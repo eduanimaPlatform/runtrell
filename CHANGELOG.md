@@ -15,6 +15,9 @@
   `SettlementRecovery` and records old/new usage and price basis in `Operation.recovery`; the
   Postgres schema gains `attempts.recovery` (added by `initialize` to an existing runtime;
   `connect` requires it). `Usage` gains `unknown_reason`.
+  `settle_recovered` never resumes the Run: it leaves an operator hold (state `Waiting(OPERATOR_ACTION_WAIT)`,
+  owner cleared) that only the new `OperationStore::resume_held` lifts; hosts implementing
+  `OperationStore` must add `resume_held`.
   A provider result that is missing or incomplete (a model reply with `complete: false`, or no
   input/output totals) is not parked: the reopened Run still looks it up once and either recovers
   the reply or ends `OutcomeUnknown`. A Run parks only after a lookup returned the same evidence.

@@ -331,6 +331,13 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
         baseline.checked_add(record.amount).unwrap()
     );
 
+    // Settling left the Run parked; resuming is a separate owner action.
+    assert_eq!(
+        restarted.get(&f.handle).await.unwrap().state,
+        RunState::Waiting(OPERATOR_ACTION_WAIT.into())
+    );
+    assert_eq!(restarted.resume_held(&f.handle, now).await, Ok(true));
+    assert_eq!(restarted.resume_held(&f.handle, now).await, Ok(false));
     // The Run continues from the saved result: no image is generated again.
     now += 60_001; // the last restarted worker's lease has expired
     f.clock.set(now);
@@ -633,4 +640,122 @@ pub async fn lost_reply_keeps_lookup_recovery<S: ControlStore + 'static>(
             assert!(!op.settled && op.unknown_usage && !op.awaits_operator());
         }
     }
+}
+
+/// Settling an operation is accounting only. Count every send of the whole Run (model
+/// requests and provider sends) and prove none follows the settlement until the owner
+/// explicitly resumes: old claim holder, restarted worker, concurrent settle and ticks.
+pub async fn settle_never_resumes<S: ControlStore + 'static>(store: Arc<S>, restarted: Arc<S>) {
+    let f = fixture(store.clone(), "settle-no-resume").await;
+    f.clock.set(1_000);
+    // Worker A holds a long lease and parks the Run.
+    let a = store
+        .claim(&f.handle, "worker-a", 1_000, 10 * DAY)
+        .await
+        .unwrap();
+    let parked = f.runtime(store.clone()).drive(&a).await.unwrap();
+    assert_eq!(parked.state, RunState::Waiting(OPERATOR_ACTION_WAIT.into()));
+    let sends = |f: &Fixture| {
+        (
+            f.provider.sends.load(Ordering::SeqCst),
+            f.model.requests.lock().unwrap().len(),
+        )
+    };
+    let before = sends(&f);
+    assert_eq!(before, (1, 1));
+    let op = f.op(&*store).await;
+
+    // Resume is refused while the operation still awaits the operator.
+    assert_eq!(
+        store.resume_held(&f.handle, 1_000).await,
+        Err(Error::Conflict)
+    );
+
+    // Settle while worker A still holds a valid lease, racing ticks of A, a restarted worker
+    // and repeated settles. Every outcome is allowed except an additional send.
+    let tasks: Vec<_> = (0..6)
+        .map(|i| {
+            let target = if i % 2 == 0 {
+                store.clone()
+            } else {
+                restarted.clone()
+            };
+            let (handle, id) = (f.handle.clone(), op.id.clone());
+            tokio::spawn(async move {
+                target
+                    .settle_recovered(&handle, &id, recovery(), 2_000)
+                    .await
+            })
+        })
+        .collect();
+    let ticks: Vec<_> = (0..6)
+        .map(|i| {
+            let (rt, claim) = (f.runtime(restarted.clone()), (i, a.clone()));
+            let (store, restarted, handle) = (store.clone(), restarted.clone(), f.handle.clone());
+            tokio::spawn(async move {
+                if claim.0 % 2 == 0 {
+                    // Old worker with the lease it already holds.
+                    let _ = f_drive(&rt, &claim.1).await;
+                } else {
+                    // New worker, once the lease could have been dropped.
+                    if let Ok(c) = restarted
+                        .claim(&handle, &format!("w{i}"), 3_000, 60_000)
+                        .await
+                    {
+                        let _ = f_drive(&rt, &c).await;
+                    }
+                    let _ = store;
+                }
+            })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap().unwrap();
+    }
+    for t in ticks {
+        t.await.unwrap();
+    }
+    assert_eq!(
+        sends(&f),
+        before,
+        "settle or concurrent ticks caused a send"
+    );
+    let held = restarted.get(&f.handle).await.unwrap();
+    assert_eq!(held.state, RunState::Waiting(OPERATOR_ACTION_WAIT.into()));
+    let done = f.op(&*restarted).await;
+    assert!(done.settled && done.recovery.is_some());
+
+    // Old claim holder: its fence fails after the settle; it cannot send.
+    f.clock.set(5_000);
+    let old = f.runtime(store.clone()).drive(&a).await;
+    assert!(matches!(old, Err(Error::OwnershipLost)), "{old:?}");
+    // Restarts, any number of ticks: still parked, still no send.
+    for i in 0..3u64 {
+        let now = 100_000 + i * DAY;
+        f.clock.set(now);
+        let c = restarted
+            .claim(&f.handle, &format!("restart-{i}"), now, 60_000)
+            .await
+            .unwrap();
+        let r = f.runtime(restarted.clone()).drive(&c).await.unwrap();
+        assert_eq!(r.state, RunState::Waiting(OPERATOR_ACTION_WAIT.into()));
+        // Even a worker that bypasses the driver is refused new work by the store.
+        assert_eq!(restarted.check(&c, now, true).await, Err(Error::Closed));
+        assert_eq!(sends(&f), before);
+    }
+
+    // The explicit, separate owner action resumes; only then does the Run send again.
+    assert_eq!(restarted.resume_held(&f.handle, 20_000).await, Ok(true));
+    f.clock.set(200_000 + 3 * DAY);
+    let now = 200_000 + 3 * DAY;
+    let c = restarted
+        .claim(&f.handle, "resumed", now, 60_000)
+        .await
+        .unwrap();
+    let r = f.runtime(restarted.clone()).drive(&c).await.unwrap();
+    assert_eq!(r.state, RunState::Terminal(Terminal::Succeeded));
+    assert_eq!(sends(&f), (1, 2), "exactly the next model call, no image");
+}
+async fn f_drive<S: ControlStore + 'static>(rt: &Rt<S>, c: &Claim) -> Result<RunRecord> {
+    rt.drive(c).await
 }
