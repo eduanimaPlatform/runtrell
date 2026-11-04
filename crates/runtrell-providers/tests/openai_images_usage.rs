@@ -171,22 +171,30 @@ fn models_outside_the_documented_family_keep_cached_unknown_with_a_distinct_reas
 #[test]
 fn family_matcher_is_exact() {
     use images_usage::cached_input_never_applies as zero;
-    for yes in [
-        "gpt-image-2",
-        "gpt-image-2.5-sunburst",
-        "gpt-image-2.5-flare",
-        "gpt-image-2-2026-01-01",
-        "gpt-image-2.6",
-    ] {
+    for yes in images_usage::GPT_IMAGE_2_FAMILY {
         assert!(zero(yes), "{yes}");
     }
+    // Not in the documented list: older models, an unreleased future model, near-misses,
+    // the Responses image tool and non-image models. None is inferred from a prefix.
     for no in [
         "gpt-image-1",
+        "gpt-image-1.5",
+        "gpt-image-1-mini",
+        "chatgpt-image-latest",
+        "gpt-image-2.6",
+        "gpt-image-3",
+        "gpt-image-2.5",
+        "gpt-image-2.5-sunburst-2099-01-01",
+        "gpt-image-2-mini",
         "gpt-image-20",
         "gpt-image-2x",
         "gpt-image-2.",
-        "gpt-image-2.x",
         "image-gpt-image-2",
+        "GPT-IMAGE-2",
+        "image_generation",
+        "gpt-6-astra",
+        "gpt-5.5",
+        "dall-e-3",
         "",
     ] {
         assert!(!zero(no), "{no}");
@@ -201,17 +209,17 @@ fn model_alias_unknown_model_and_missing_price() {
     assert_eq!(normalize(&sunburst(), &body).micro_usd, Some(1_870));
     // A snapshot name is priced only when the host declared it an alias; the usage is
     // then recorded under the priced model so settlement's price/model check holds.
-    body["model"] = json!("gpt-image-2.5-sunburst-2026-10-01");
+    body["model"] = json!("gpt-image-2.5-sunburst-2026-09-08");
     let unknown = normalize(&sunburst(), &body);
     assert_eq!(unknown.micro_usd, None);
-    assert_eq!(unknown.model, "gpt-image-2.5-sunburst-2026-10-01");
+    assert_eq!(unknown.model, "gpt-image-2.5-sunburst-2026-09-08");
     assert_eq!(
         unknown.unknown_reason.as_deref(),
         Some(images_usage::REASON_MODEL_UNPRICED)
     );
     let mut aliased = sunburst();
     aliased.capabilities.images.response_model_aliases =
-        vec!["gpt-image-2.5-sunburst-2026-10-01".into()];
+        vec!["gpt-image-2.5-sunburst-2026-09-08".into()];
     let u = normalize(&aliased, &body);
     assert_eq!((u.model.as_str(), u.micro_usd), (SUNBURST, Some(1_870)));
     // An undeclared different model is never priced with the configured model's rates.
@@ -431,4 +439,39 @@ fn reasoning_is_not_invented_a_price_that_depends_on_it_stays_unknown() {
         normalize(&sunburst(), &official_minimal()).micro_usd,
         Some(1_870)
     );
+}
+
+/// Hand-computable fixtures (GPT Image 2.5 Standard rates, USD per million tokens: text 5,
+/// cached text 1.25, image 8, cached image 2, image output 30; read 2026-11-04). Not live
+/// provider costs.
+#[test]
+fn hand_computed_fixtures_bill_image_input_at_the_image_rate() {
+    // 343 text in + 601 image out: ceil((343*5 + 601*30) / 1) micro-USD = 1_715 + 18_030.
+    let u = normalize(&sunburst(), &stored_response());
+    assert_eq!(u.micro_usd, Some(1_715 + 18_030));
+    assert_eq!(u.micro_usd, Some(19_745));
+    // 10 text + 40 image in, 50 image out: 10*5 + 40*8 + 50*30 = 50 + 320 + 1_500.
+    let edit = normalize(&sunburst(), &official_minimal());
+    assert_eq!(edit.micro_usd, Some(50 + 320 + 1_500));
+    // Had the 40 image tokens been billed as text the total would be 50*5 + 1_500 = 1_750.
+    assert_ne!(edit.micro_usd, Some(1_750));
+    // Cached text (1.25) and cached image (2) differ from each other and from the plain
+    // rates in the general calculator: 100 cached text only, 50 cached image only.
+    let p = price(SUNBURST);
+    let cached = Usage {
+        model: SUNBURST.into(),
+        input: Some(300),
+        output: Some(0),
+        cached: Some(150),
+        image_input: Some(100),
+        cached_image_input: Some(50),
+        reasoning: Some(0),
+        image_output: Some(0),
+        ..Usage::default()
+    };
+    // ordinary text 300-150-100+50 = 100 *5; cached text 150-50 = 100 *1.25;
+    // image only 100-50 = 50 *8; cached image 50 *2  => 500 + 125 + 400 + 100.
+    assert_eq!(p.cost(&cached), Ok(500 + 125 + 400 + 100));
+    // Direct Images API responses never carry these cache hits, so this stays a calculator
+    // fixture: the Images normalization above reports cached counters of exactly 0.
 }

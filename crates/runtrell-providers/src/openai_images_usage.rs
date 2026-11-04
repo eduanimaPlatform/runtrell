@@ -10,11 +10,17 @@
 //!   `input_tokens_details.{text_tokens,image_tokens}`. There is no cached counter and no
 //!   reasoning counter (and nothing says none is billed, so `reasoning` stays unknown). Live responses may add `output_tokens_details.{image_tokens,text_tokens}`
 //!   (the `ImageGenUsage` shape); it is accepted when consistent and never required.
-//! - Image generation guide, "Cached input pricing": for GPT Image 2 and GPT Image 2.5 cached
-//!   input pricing "doesn't apply to direct Images API requests, including /v1/images/edits".
+//! - Image generation guide (https://developers.openai.com/api/docs/guides/image-generation, read
+//!   2026-11-04), "Cached input pricing": for GPT Image 2 and GPT Image 2.5 cached input
+//!   pricing "doesn't apply to direct Images API requests, including /v1/images/edits".
 //!   Every input token on this endpoint is therefore billed at the ordinary rate, so the
-//!   cached counters are exactly 0 for those families. For any other model the page says
-//!   nothing and the cached counters stay unknown.
+//!   cached counters are exactly 0 for those models.
+//! - The model IDs of those families are the ones the OpenAI OpenAPI description lists for
+//!   `CreateImageRequest.model` (`main` at f69b0e1, 2026-11-03) and the guide/pricing pages
+//!   name: [`GPT_IMAGE_2_FAMILY`]. The list is exact; no prefix, suffix or future model is
+//!   inferred from it. Any other model (`gpt-image-1*`, `chatgpt-image-latest`, a model released
+//!   later, a Responses image tool) keeps its cached counters unknown until this list is
+//!   extended from a documented statement.
 //!
 //! A counter is filled only by one of those statements. Everything else stays `None`, with a
 //! distinct safe `Usage::unknown_reason`.
@@ -35,17 +41,21 @@ pub const REASON_NO_PRICE: &str = "IMAGE_USAGE_NO_PRICE";
 pub const REASON_OVERFLOW: &str = "IMAGE_USAGE_COST_OVERFLOW";
 pub const REASON_PRICE_COUNTER_UNKNOWN: &str = "IMAGE_USAGE_PRICE_COUNTER_UNKNOWN";
 
-/// GPT Image 2 family: `gpt-image-2`, `gpt-image-2.<n>...` and dated or named variants
-/// separated by `-` (for example `gpt-image-2.5-sunburst`). `gpt-image-20` is not included.
+/// Exact model IDs named by OpenAI for GPT Image 2 and GPT Image 2.5 on the direct Images API:
+/// `CreateImageRequest.model` in the OpenAPI description (2026-11-03) and the image-generation
+/// guide and pricing page (2026-11-04). Dated entries are the snapshots that description lists.
+pub const GPT_IMAGE_2_FAMILY: [&str; 6] = [
+    "gpt-image-2",
+    "gpt-image-2-2026-04-21",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-sunburst-2026-09-08",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-flare-2026-09-08",
+];
+
+/// True only for the exact IDs in [`GPT_IMAGE_2_FAMILY`].
 pub fn cached_input_never_applies(model: &str) -> bool {
-    let Some(rest) = model.strip_prefix("gpt-image-2") else {
-        return false;
-    };
-    rest.is_empty()
-        || rest.starts_with('-')
-        || rest
-            .strip_prefix('.')
-            .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+    GPT_IMAGE_2_FAMILY.contains(&model)
 }
 
 fn counter(usage: &Value, path: &str) -> Result<Option<u64>, ()> {
