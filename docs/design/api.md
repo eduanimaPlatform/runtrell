@@ -79,6 +79,8 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 `ExternalResult::{Applied,Failed}.physical_evidence`は接続先が報告した物理送信の観測列。各観測は順序番号と不透明bytes、列全体はComplete/Truncatedを持ち、最大256観測・合計65536 bytes、順序番号は狭義増加とする。切詰めはadapterが宣言し、Runtrellは黙って切り捨てず上限違反を拒否する。これは`Operation.usage_observations`（Runtrellの未精算論理結果の使用量履歴）とは別物。結果と一緒にMemory/Pgへ保存し、再照合・同値結果の重複精算防止に使う。証拠bytesをRuntrellが料金へ解釈することはなく、Usageの測定・完全性検査も引き続き必要となる。
 
+Provider adapterの失敗診断は公開`ProviderDiagnostic`を`ExternalResult::Failed.provider_diagnostic`または`ExternalResult::UnknownDiagnostic`に持たせ、Operationの既存result／unsettled_resultと共に保存する。`Operation::provider_diagnostic()`は未精算結果の証拠を優先する。phase、送信確実性、実HTTP statusと制限されたprovider識別子だけを公開し、message、header、URL、bodyは含めない。分類・再試行に使う既存`Failure.status`は本文中の数値codeを反映し得るため、実HTTP statusとは別に扱う。詳細は[providers](providers.md#contract)。
+
 公開async traitはSend futureを返す静的dispatch契約。RegisteredToolのerased futureもSendであり、所有したRuntime/claimをmulti-thread Tokioのtokio::spawnへ渡せる。ホストはsupervisor・blocking taskの完了までTokio runtimeを維持する。blocking taskのFuture取消は物理I/Oの取消・保存失敗を意味しない。
 
 最終候補のJSON構文エラーは`JSON_SYNTAX` diagnosticとして既存の自律修正経路へ返す。`schema::parse_json`は原因・hint、1起算の行/byte列、0起算のbyte offset、半開区間spanを返す（EOFのspanは末尾の空区間）。不正JSONには信頼できるinstance treeがないためpathはroot pointerとし、近傍の項目を推測しない。元の候補はJSON文字列Valueとしてreceiptのhashへ結び付け、protocol・候補・診断・修正回数・開始時刻をcheckpointへ保存する。構文エラーのときはSchema/business validatorとfinalizerを実行しない。正常なJSON文字列は通常のValueとして検証する。

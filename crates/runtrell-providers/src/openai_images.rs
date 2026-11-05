@@ -165,11 +165,12 @@ impl ImagePort for OpenAiImages {
             .send_at_with_usage(context, endpoint, body, &[], normalize)
             .await?
         {
-            HttpResult::Json(parsed) => parsed,
+            HttpResult::Json { value: parsed, .. } => parsed,
             HttpResult::Failure(ExternalResult::Failed {
                 code,
                 usage,
                 retry_after,
+                provider_diagnostic,
                 ..
             }) => {
                 return Ok(ImageResponse::Received {
@@ -177,7 +178,11 @@ impl ImagePort for OpenAiImages {
                     usage,
                     failure: Some(code),
                     retry_after,
+                    provider_diagnostic,
                 });
+            }
+            HttpResult::UnknownDiagnostic(diagnostic) => {
+                return Ok(ImageResponse::UnknownDiagnostic(diagnostic));
             }
             _ => return Ok(ImageResponse::Unknown),
         };
@@ -225,6 +230,7 @@ impl ImagePort for OpenAiImages {
             usage,
             failure,
             retry_after: None,
+            provider_diagnostic: None,
         })
     }
 }

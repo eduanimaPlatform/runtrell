@@ -1648,7 +1648,9 @@ fn completed(result: ExternalResult) -> Result<Value> {
             ..
         } => Err(Error::Pending("retry backoff".into())),
         ExternalResult::Failed { code, .. } => Err(Error::Invalid(code)),
-        ExternalResult::Accepted { .. } | ExternalResult::Unknown => {
+        ExternalResult::Accepted { .. }
+        | ExternalResult::Unknown
+        | ExternalResult::UnknownDiagnostic(_) => {
             Err(Error::Pending("external reconciliation".into()))
         }
     }

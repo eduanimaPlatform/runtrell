@@ -777,6 +777,64 @@ pub enum OperationState {
     Failed,
     Unknown,
 }
+/// Sanitized provider failure evidence. Values originate only from a bounded allowlist;
+/// hosts should not put raw provider messages, headers, URLs or response bodies here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFailurePhase {
+    PreSend,
+    Send,
+    ResponseRead,
+    ResponseDecode,
+    HttpError,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSendCertainty {
+    DefinitelyNotSent,
+    Sent,
+    Unknown,
+}
+/// One provider-supplied identifier. Invalid or oversized values are omitted,
+/// never truncated into a potentially misleading identifier.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SafeProviderField(String);
+impl TryFrom<String> for SafeProviderField {
+    type Error = &'static str;
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'[' | b']'))
+        {
+            return Err("unsafe provider diagnostic field");
+        }
+        Ok(Self(value))
+    }
+}
+impl From<SafeProviderField> for String {
+    fn from(value: SafeProviderField) -> Self {
+        value.0
+    }
+}
+impl std::ops::Deref for SafeProviderField {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDiagnostic {
+    pub phase: ProviderFailurePhase,
+    pub send_certainty: ProviderSendCertainty,
+    /// Actual transport status, distinct from any effective classification status.
+    pub http_status: Option<u16>,
+    pub provider_type: Option<SafeProviderField>,
+    pub provider_code: Option<SafeProviderField>,
+    pub provider_param: Option<SafeProviderField>,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ExternalResult {
     Applied {
@@ -799,10 +857,25 @@ pub enum ExternalResult {
         /// secrets, storage/permission errors or uncertain side effects.
         /// None is fatal. Automatic retry_after takes precedence when present.
         repair_hint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_diagnostic: Option<ProviderDiagnostic>,
     },
     Unknown,
+    /// Unknown result with transport evidence; reservation and recovery semantics
+    /// are identical to `Unknown`.
+    UnknownDiagnostic(ProviderDiagnostic),
 }
 impl ExternalResult {
+    pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
+        match self {
+            Self::Failed {
+                provider_diagnostic,
+                ..
+            } => provider_diagnostic.as_ref(),
+            Self::UnknownDiagnostic(diagnostic) => Some(diagnostic),
+            _ => None,
+        }
+    }
     pub fn validate_evidence(&self) -> Result<()> {
         match self {
             Self::Applied {
@@ -842,6 +915,18 @@ pub struct Operation {
     pub recovery: Option<Box<SettlementRecord>>,
 }
 impl Operation {
+    /// Read persisted evidence even if an outward result was reduced to `Unknown`
+    /// while usage settlement remains pending.
+    pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
+        self.unsettled_result
+            .as_ref()
+            .and_then(ExternalResult::provider_diagnostic)
+            .or_else(|| {
+                self.result
+                    .as_ref()
+                    .and_then(ExternalResult::provider_diagnostic)
+            })
+    }
     /// Only a settled, explicitly correctable tool failure whose protocol answer
     /// was checkpointed may cease blocking successful completion.
     pub fn model_repair_acknowledged(&self, run: &RunRecord) -> bool {

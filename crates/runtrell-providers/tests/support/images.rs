@@ -232,10 +232,12 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
     }
     let (url, task) = raw_server("HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n{}".into()).await;
     let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
-    assert_eq!(
-        tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap(),
-        ExternalResult::Unknown
-    );
+    let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
+    let diagnostic = result.provider_diagnostic().expect("read failure diagnostic");
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseRead);
+    assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
+    assert_eq!(diagnostic.http_status, Some(200));
+    assert!(matches!(result, ExternalResult::UnknownDiagnostic(_)));
     assert_eq!(task.await.unwrap().len(), 1);
 }
 #[tokio::test]

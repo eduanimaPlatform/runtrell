@@ -80,6 +80,7 @@ pub(super) async fn poll_backend<L: ExecutionLedger, B: ExecutionBackend, C: Clo
             code,
             usage,
             retry_after: None,
+            provider_diagnostic: None,
         }
     } else {
         ExternalResult::Applied {

@@ -32,9 +32,51 @@ struct State {
 }
 #[allow(clippy::large_enum_variant)] // Forward the original settlement receipt inline.
 pub(crate) enum HttpResult {
-    Json(Value),
+    Json { value: Value, status: u16 },
     Failure(ExternalResult),
-    Unknown,
+    UnknownDiagnostic(ProviderDiagnostic),
+}
+fn safe_field(value: &Value) -> Option<SafeProviderField> {
+    match value {
+        Value::String(s) => SafeProviderField::try_from(s.clone()).ok(),
+        Value::Number(n) => SafeProviderField::try_from(n.to_string()).ok(),
+        _ => None,
+    }
+}
+fn gemini_field(error: &Value) -> Option<SafeProviderField> {
+    error["details"].as_array()?.iter().find_map(|detail| {
+        (detail["@type"] == "type.googleapis.com/google.rpc.BadRequest")
+            .then(|| safe_field(&detail["fieldViolations"][0]["field"]))
+            .flatten()
+    })
+}
+fn diagnostic(
+    phase: ProviderFailurePhase,
+    send_certainty: ProviderSendCertainty,
+    http_status: Option<u16>,
+    parsed: &Value,
+    wire: Wire,
+) -> ProviderDiagnostic {
+    let error = &parsed["error"];
+    let structured = error.is_object();
+    ProviderDiagnostic {
+        phase,
+        send_certainty,
+        http_status,
+        provider_type: structured
+            .then(|| match wire {
+                Wire::GenerateContent => safe_field(&error["status"]),
+                _ => safe_field(&error["type"]),
+            })
+            .flatten(),
+        provider_code: structured.then(|| safe_field(&error["code"])).flatten(),
+        provider_param: structured
+            .then(|| match wire {
+                Wire::GenerateContent => gemini_field(error),
+                _ => safe_field(&error["param"]),
+            })
+            .flatten(),
+    }
 }
 fn invalid() -> Error {
     Error::Invalid("provider request or configuration".into())
@@ -335,16 +377,34 @@ impl Adapter {
                         ..Usage::measured(0, 0, 0)
                     },
                     retry_after: None,
+                    provider_diagnostic: Some(diagnostic(
+                        ProviderFailurePhase::PreSend,
+                        ProviderSendCertainty::DefinitelyNotSent,
+                        None,
+                        &Value::Null,
+                        self.wire,
+                    )),
                 });
             }
         };
         self.attach_documents(&mut body, &request, &resolved);
         match self.send(context, body, &resolved).await? {
-            HttpResult::Json(parsed) => Ok(self
-                .reply(&parsed, &request)
-                .unwrap_or(ExternalResult::Unknown)),
+            HttpResult::Json {
+                value: parsed,
+                status,
+            } => Ok(self.reply(&parsed, &request).unwrap_or_else(|_| {
+                ExternalResult::UnknownDiagnostic(diagnostic(
+                    ProviderFailurePhase::ResponseDecode,
+                    ProviderSendCertainty::Sent,
+                    Some(status),
+                    &Value::Null,
+                    self.wire,
+                ))
+            })),
             HttpResult::Failure(result) => Ok(result),
-            HttpResult::Unknown => Ok(ExternalResult::Unknown),
+            HttpResult::UnknownDiagnostic(diagnostic) => {
+                Ok(ExternalResult::UnknownDiagnostic(diagnostic))
+            }
         }
     }
     pub(crate) async fn send(
@@ -416,7 +476,13 @@ impl Adapter {
             .send()
             .await;
         let Ok(mut response) = response else {
-            return Ok(HttpResult::Unknown);
+            return Ok(HttpResult::UnknownDiagnostic(diagnostic(
+                ProviderFailurePhase::Send,
+                ProviderSendCertainty::Unknown,
+                None,
+                &Value::Null,
+                self.wire,
+            )));
         };
         let status = response.status().as_u16();
         let retry_header = response
@@ -436,13 +502,29 @@ impl Adapter {
                     bytes.extend_from_slice(&chunk)
                 }
                 Ok(None) => break,
-                _ => return Ok(HttpResult::Unknown),
+                _ => {
+                    return Ok(HttpResult::UnknownDiagnostic(diagnostic(
+                        ProviderFailurePhase::ResponseRead,
+                        ProviderSendCertainty::Sent,
+                        Some(status),
+                        &Value::Null,
+                        self.wire,
+                    )));
+                }
             }
         }
         let mut parsed: Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(_) if !(200..300).contains(&status) => Value::Null,
-            Err(_) => return Ok(HttpResult::Unknown),
+            Err(_) => {
+                return Ok(HttpResult::UnknownDiagnostic(diagnostic(
+                    ProviderFailurePhase::ResponseDecode,
+                    ProviderSendCertainty::Sent,
+                    Some(status),
+                    &Value::Null,
+                    self.wire,
+                )));
+            }
         };
         crate::documents::redact_echoes(&mut parsed, sensitive);
         if !(200..300).contains(&status) || !parsed["error"].is_null() {
@@ -463,9 +545,19 @@ impl Adapter {
                 code: serde_json::to_string(&failure).map_err(|_| invalid())?,
                 usage: normalize(&parsed),
                 retry_after: delay,
+                provider_diagnostic: Some(diagnostic(
+                    ProviderFailurePhase::HttpError,
+                    ProviderSendCertainty::Sent,
+                    Some(status),
+                    &parsed,
+                    self.wire,
+                )),
             }));
         }
-        Ok(HttpResult::Json(parsed))
+        Ok(HttpResult::Json {
+            value: parsed,
+            status,
+        })
     }
     fn reply(&self, v: &Value, request: &PreparedModelRequest) -> Result<ExternalResult> {
         let names = ToolNames::new(request, self.wire)?;

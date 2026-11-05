@@ -307,6 +307,7 @@ pub async fn settlement_and_finalization<S: ControlStore>(s: &S) {
         code: "busy".into(),
         usage: Usage::measured(0, 0, 3),
         retry_after: Some(1),
+        provider_diagnostic: None,
     };
     s.record(&c, &first.id, failed.clone(), 0).await.unwrap();
     s.record(&c, &first.id, failed.clone(), 0).await.unwrap();

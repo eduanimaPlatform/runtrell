@@ -860,8 +860,10 @@ pub enum ImageResponse {
         usage: Usage,
         failure: Option<String>,
         retry_after: Option<u64>,
+        provider_diagnostic: Option<ProviderDiagnostic>,
     },
     Unknown,
+    UnknownDiagnostic(ProviderDiagnostic),
 }
 pub trait ImagePort: Send + Sync {
     /// Model/endpoint/limits identity; credentials must never be included.
@@ -1111,14 +1113,18 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             .authorize(&run, self.name(), "image.save")?;
         let output_mime = request.output_mime();
         let response = self.provider.invoke(c, request).await?;
-        let ImageResponse::Received {
-            images,
-            usage,
-            failure,
-            retry_after,
-        } = response
-        else {
-            return Ok(ExternalResult::Unknown);
+        let (images, usage, failure, retry_after, provider_diagnostic) = match response {
+            ImageResponse::Received {
+                images,
+                usage,
+                failure,
+                retry_after,
+                provider_diagnostic,
+            } => (images, usage, failure, retry_after, provider_diagnostic),
+            ImageResponse::Unknown => return Ok(ExternalResult::Unknown),
+            ImageResponse::UnknownDiagnostic(diagnostic) => {
+                return Ok(ExternalResult::UnknownDiagnostic(diagnostic));
+            }
         };
         // Unknown usage is never normalized to free. Preserve known results too;
         // Runtime retains the reservation until the usage can be settled.
@@ -1186,6 +1192,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 code,
                 usage,
                 retry_after,
+                provider_diagnostic,
             }
         } else {
             ExternalResult::Applied {
@@ -1219,6 +1226,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             )
             .await;
         if stored.is_err() {
+            let diagnostic = result.provider_diagnostic().cloned();
             let usage = match result {
                 ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
                     usage
@@ -1231,6 +1239,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 code: "IMAGE_RECEIPT_SAVE_FAILED".into(),
                 usage,
                 retry_after: None,
+                provider_diagnostic: diagnostic,
             });
         }
         Ok(result)

@@ -7,6 +7,135 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
+/// The same contract runs against memory and a reopened PostgreSQL client.
+pub async fn provider_diagnostic_survives_reopen<S: ControlStore>(first: Arc<S>, resumed: Arc<S>) {
+    let account = first
+        .create_account("t", Amount::new(100, 100), None)
+        .await
+        .unwrap();
+    let run = first
+        .start(RunSpec::new(
+            "t",
+            "provider-diagnostic",
+            account.clone(),
+            "input",
+        ))
+        .await
+        .unwrap();
+    let claim = first.claim(&run, "first", 0, 100).await.unwrap();
+    let operation = first
+        .begin(
+            &claim,
+            DispatchRequest::new(
+                "diagnostic",
+                OperationKind::Model,
+                "provider",
+                json!({}),
+                Amount::new(10, 10),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
+    first.mark_sent(&claim, &operation.id, 0).await.unwrap();
+    let diagnostic = ProviderDiagnostic {
+        phase: ProviderFailurePhase::ResponseDecode,
+        send_certainty: ProviderSendCertainty::Sent,
+        http_status: Some(200),
+        provider_type: None,
+        provider_code: None,
+        provider_param: None,
+    };
+    first
+        .record(
+            &claim,
+            &operation.id,
+            ExternalResult::UnknownDiagnostic(diagnostic.clone()),
+            0,
+        )
+        .await
+        .unwrap();
+    // A later lookup that cannot recover the result must not erase transport evidence.
+    first
+        .record(&claim, &operation.id, ExternalResult::Unknown, 0)
+        .await
+        .unwrap();
+    let saved = resumed
+        .operation(&run, "diagnostic")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.provider_diagnostic(), Some(&diagnostic));
+    assert_eq!(saved.send_count, 1);
+    assert_eq!(saved.state, OperationState::Unknown);
+    assert_eq!(
+        resumed.account(&account).await.unwrap().reserved,
+        Amount::new(10, 10)
+    );
+    assert_eq!(resumed.account(&account).await.unwrap().unknown, 1);
+    let paid_account = first
+        .create_account("t", Amount::new(100, 100), None)
+        .await
+        .unwrap();
+    let paid_run = first
+        .start(RunSpec::new(
+            "t",
+            "provider-http-failed",
+            paid_account,
+            "input",
+        ))
+        .await
+        .unwrap();
+    let paid_claim = first.claim(&paid_run, "first", 0, 100).await.unwrap();
+    let paid_op = first
+        .begin(
+            &paid_claim,
+            DispatchRequest::new(
+                "http-failed",
+                OperationKind::Model,
+                "provider",
+                json!({}),
+                Amount::new(10, 10),
+            ),
+            0,
+        )
+        .await
+        .unwrap();
+    first.mark_sent(&paid_claim, &paid_op.id, 0).await.unwrap();
+    let http_diagnostic = ProviderDiagnostic {
+        phase: ProviderFailurePhase::HttpError,
+        send_certainty: ProviderSendCertainty::Sent,
+        http_status: Some(400),
+        provider_type: Some(
+            SafeProviderField::try_from("invalid_request_error".to_owned()).unwrap(),
+        ),
+        provider_code: None,
+        provider_param: None,
+    };
+    let failed = ExternalResult::Failed {
+        physical_evidence: None,
+        code: "INVALID_REQUEST".into(),
+        usage: Usage::default(),
+        retry_after: None,
+        repair_hint: None,
+        provider_diagnostic: Some(http_diagnostic.clone()),
+    };
+    assert_eq!(
+        first
+            .record(&paid_claim, &paid_op.id, failed.clone(), 0)
+            .await,
+        Err(Error::UsageUnknown)
+    );
+    let saved = resumed
+        .operation(&paid_run, "http-failed")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.unsettled_result, Some(failed));
+    assert_eq!(saved.provider_diagnostic(), Some(&http_diagnostic));
+    assert_eq!(saved.send_count, 1);
+}
+
 /// Complete fenced observations recover without lookup; incomplete and stale
 /// observations never authorize a guessed settlement. Use a fresh store client
 /// as `resumed` to exercise the durable boundary as well as the shared contract.
@@ -68,6 +197,7 @@ pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>)
                 code: "charged".into(),
                 usage: Usage::measured(2, 3, 7),
                 retry_after: Some(1),
+                provider_diagnostic: None,
             }
         } else {
             ExternalResult::Applied {
@@ -316,6 +446,7 @@ impl ModelPort for PreparedModel {
                 code: "provider-failed".into(),
                 usage: Usage::measured(0, 0, 2),
                 retry_after: Some(1),
+                provider_diagnostic: None,
             }))
         } else {
             Ok(Lookup::Unknown)
@@ -501,6 +632,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         code: "retry failed".into(),
         usage: Usage::measured(0, 0, 0),
         retry_after: None,
+        provider_diagnostic: None,
     };
     s.record(&c, &retry.id, retry_failure, 0).await.unwrap();
     let second = s
@@ -580,6 +712,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         code: "invalid".into(),
         usage: Usage::measured(0, 0, 0),
         retry_after: None,
+        provider_diagnostic: None,
     };
     assert!(s.observe_result(&c, &second.id, invalid, 0).await.is_err());
 }

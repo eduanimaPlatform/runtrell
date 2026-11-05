@@ -37,6 +37,7 @@ impl ModelPort for RetryModel {
                 code: "TRANSIENT".into(),
                 usage,
                 retry_after: Some(1_000),
+                provider_diagnostic: None,
             })
         } else {
             Ok(ExternalResult::Applied {

@@ -137,15 +137,38 @@ mismatch also leaves cost unreported. The runtime rejects mismatched priced mode
 identity; hosts must pin/configure the model whose usage they intend to settle.
 
 HTTP redirects and automatic retries are disabled; one invocation sends at most
-once. Connection/body/JSON failure after starting send is Unknown, never proof of
-absence. No lookup or idempotency guarantee is implemented: lookup always Unknown,
-recovery returns None, and the default attempt policy is one attempt. Explicit HTTP
-errors carry a sanitized classification, status and Retry-After; provider bodies,
-messages and credentials are not propagated. Recognizable spending/balance codes
+once. Connection/body/JSON failure after starting send remains an unknown result,
+never proof of absence. The result carries `ProviderDiagnostic` with a fixed phase
+(`pre_send`, `send`, `response_read`, `response_decode`, `http_error`), send certainty,
+and the actual HTTP status when received. `send` has unknown certainty even when a
+local peer observed bytes; `response_read`, `response_decode`, and `http_error` have
+`sent` certainty. Attachment resolution failure is `pre_send` with
+`definitely_not_sent`. This evidence does not imply known usage or permission to
+retry. No lookup or idempotency guarantee is implemented: lookup always Unknown,
+recovery returns None, and the default attempt policy is one attempt.
+
+The public `ExternalResult::provider_diagnostic()` and persisted
+`Operation::provider_diagnostic()` expose typed evidence. Failed image responses
+carry it through `ImageResponse` into the operation, including when usage is too
+incomplete to settle and the outward result becomes Unknown. The diagnostic's
+HTTP status is the actual response status; the existing serialized `Failure.status`
+remains the effective status used for classification and retry. The only copied
+provider identifiers are `error.type`, `error.code`, `error.param` for OpenAI and
+OpenRouter; Gemini uses `error.status`, `error.code`, and the first
+`google.rpc.BadRequest` field violation's `field`. Each identifier is omitted
+unless the entire value is 1–128 bytes and uses only ASCII letters, digits,
+underscore, period, hyphen, and square brackets; invalid
+values are not truncated. The Gemini field shape follows the
+[Google BadRequest schema](https://developers.google.com/data-manager/api/reference/rest/v1/BadRequest).
+Provider messages, headers, URLs, and bodies are never copied into diagnostics.
+
+Explicit HTTP errors retain sanitized classification, status and Retry-After.
+Recognizable spending/balance codes
 are separate from transient rate limits; ambiguous quota errors remain rate limits
 or unclassified. Retry-After delta seconds and HTTP dates are converted to the
 runtime delay in milliseconds (`ExternalResult::Failed.retry_after`; seconds are
-multiplied with overflow checked); raw headers are exposed only through the typed failure result.
+multiplied with overflow checked). `ProviderDiagnostic` contains no header values;
+the existing serialized `Failure.retry_after` retains the validated Retry-After value.
 
 Capabilities contain host-overridable model limits, schema/tool/parallel support,
 separate input/generation/reference-edit/mask-edit declarations and counter

@@ -178,6 +178,198 @@ fn request() -> ModelRequest {
 fn text(request: ModelRequest) -> PreparedModelRequest {
     PreparedModelRequest::text(request).unwrap()
 }
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn provider_http_error_exposes_safe_typed_diagnostic() {
+    let secret = "sk-SYNTHETIC-NEVER-EXPOSE";
+    let (url, server) = server(
+        400,
+        "",
+        json!({"error": {
+            "type": "invalid_request_error", "code": "invalid_parameter", "param": "svg.model",
+            "message": format!("bad request {secret}")
+        }}),
+    )
+    .await;
+    let model = OpenAi::new(config(url)).unwrap();
+    let result = model.invoke(&context(), text(request())).await.unwrap();
+    let diagnostic = result.provider_diagnostic().expect("provider diagnostic");
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::HttpError);
+    assert_eq!(diagnostic.http_status, Some(400));
+    assert_eq!(
+        diagnostic.provider_type.as_deref(),
+        Some("invalid_request_error")
+    );
+    assert_eq!(
+        diagnostic.provider_code.as_deref(),
+        Some("invalid_parameter")
+    );
+    assert_eq!(diagnostic.provider_param.as_deref(), Some("svg.model"));
+    assert!(!format!("{result:?}").contains(secret));
+    assert!(!serde_json::to_string(&result).unwrap().contains(secret));
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn provider_diagnostic_distinguishes_transport_and_effective_status() {
+    let (url, server) = server(
+        400,
+        "Retry-After: 7\r\n",
+        json!({
+            "error": {"code": 429, "type": "rate_limit_error", "param": "svg.model"}
+        }),
+    )
+    .await;
+    let result = OpenAi::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(diagnostic.http_status, Some(400));
+    assert_eq!(diagnostic.provider_code.as_deref(), Some("429"));
+    let ExternalResult::Failed {
+        code, retry_after, ..
+    } = result
+    else {
+        panic!("failure")
+    };
+    let failure: Failure = serde_json::from_str(&code).unwrap();
+    assert_eq!(failure.status, 429);
+    assert_eq!(failure.class, ErrorClass::RateLimit);
+    assert_eq!(retry_after, Some(7_000));
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn provider_diagnostic_rejects_hostile_fields_and_non_json_body() {
+    let secret = "sk-SYNTHETIC-NEVER-EXPOSE";
+    let (url, server) = server(
+        401,
+        "",
+        json!({"error": {
+            "type": "bad/secret", "code": "X".repeat(129), "param": "svg/model",
+            "message": secret,
+        }}),
+    )
+    .await;
+    let result = OpenAi::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(diagnostic.http_status, Some(401));
+    assert_eq!(diagnostic.provider_type, None);
+    assert_eq!(diagnostic.provider_code, None);
+    assert_eq!(diagnostic.provider_param, None);
+    assert!(!format!("{result:?}").contains(secret));
+    assert!(!serde_json::to_string(&result).unwrap().contains(secret));
+    assert_eq!(server.await.unwrap().len(), 1);
+    let raw = "<html>sk-SYNTHETIC-NEVER-EXPOSE</html>";
+    let (url, server) = raw_server(format!(
+        "HTTP/1.1 500 Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{raw}",
+        raw.len()
+    ))
+    .await;
+    let result = OpenAi::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(diagnostic.http_status, Some(500));
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::HttpError);
+    assert_eq!(
+        (
+            diagnostic.provider_type.clone(),
+            diagnostic.provider_code.clone(),
+            diagnostic.provider_param.clone()
+        ),
+        (None, None, None)
+    );
+    assert!(!serde_json::to_string(&result).unwrap().contains(secret));
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn provider_success_status_with_invalid_schema_is_response_decode_unknown() {
+    let (url, server) = server(200, "", json!({})).await;
+    let result = OpenAi::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result
+        .provider_diagnostic()
+        .expect("schema decode diagnostic");
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseDecode);
+    assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
+    assert_eq!(diagnostic.http_status, Some(200));
+    assert!(matches!(result, ExternalResult::UnknownDiagnostic(_)));
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+#[cfg(feature = "gemini")]
+#[tokio::test]
+async fn gemini_structured_error_allowlist() {
+    let (url, server) = server(429, "", json!({"error": {
+        "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "sk-SYNTHETIC-NEVER-EXPOSE",
+        "details": [{"@type":"type.googleapis.com/google.rpc.BadRequest",
+            "fieldViolations":[{"field":"generationConfig.maxOutputTokens", "description":"secret"}]}]
+    }})).await;
+    let result = Gemini::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(
+        diagnostic.provider_type.as_deref(),
+        Some("RESOURCE_EXHAUSTED")
+    );
+    assert_eq!(diagnostic.provider_code.as_deref(), Some("429"));
+    assert_eq!(
+        diagnostic.provider_param.as_deref(),
+        Some("generationConfig.maxOutputTokens")
+    );
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains("sk-SYNTHETIC")
+    );
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+#[cfg(feature = "openrouter")]
+#[tokio::test]
+async fn openrouter_structured_error_allowlist() {
+    let (url, server) = server(
+        429,
+        "",
+        json!({"error": {
+            "type":"rate_limit_error", "code":"rate_limit", "param":"model",
+            "message":"sk-SYNTHETIC-NEVER-EXPOSE", "metadata":{"secret":"hidden"}
+        }}),
+    )
+    .await;
+    let result = OpenRouter::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(
+        diagnostic.provider_type.as_deref(),
+        Some("rate_limit_error")
+    );
+    assert_eq!(diagnostic.provider_code.as_deref(), Some("rate_limit"));
+    assert_eq!(diagnostic.provider_param.as_deref(), Some("model"));
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains("sk-SYNTHETIC")
+    );
+    assert_eq!(server.await.unwrap().len(), 1);
+}
 async fn wire_contract<T: ModelPort + std::fmt::Debug>(
     make: fn(Config) -> Result<T>,
     kind: &str,
@@ -359,6 +551,10 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
         let (url, task) = server(status, "Retry-After: 7\r\n", body).await;
         let model = make(config(url)).unwrap();
         let result = model.invoke(&context(), text(request())).await.unwrap();
+        let diagnostic = result.provider_diagnostic().expect("HTTP diagnostic");
+        assert_eq!(diagnostic.phase, ProviderFailurePhase::HttpError);
+        assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
+        assert_eq!(diagnostic.http_status, Some(status));
         assert!(!format!("{result:?}").contains("TEST-KEY-DO-NOT-PRINT"));
         let ExternalResult::Failed {
             code,
@@ -406,17 +602,34 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
         target_task.await.unwrap().is_empty(),
         "redirect was followed"
     );
-    for raw in [
-        String::new(),
-        "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: close\r\n\r\n{".into(),
-        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope".into(),
+    for (raw, phase, certainty, status) in [
+        (
+            String::new(),
+            ProviderFailurePhase::Send,
+            ProviderSendCertainty::Unknown,
+            None,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: close\r\n\r\n{".into(),
+            ProviderFailurePhase::ResponseRead,
+            ProviderSendCertainty::Sent,
+            Some(200),
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope".into(),
+            ProviderFailurePhase::ResponseDecode,
+            ProviderSendCertainty::Sent,
+            Some(200),
+        ),
     ] {
         let (url, task) = raw_server(raw).await;
         let model = make(config(url)).unwrap();
-        assert_eq!(
-            model.invoke(&context(), text(request())).await.unwrap(),
-            ExternalResult::Unknown
-        );
+        let result = model.invoke(&context(), text(request())).await.unwrap();
+        let diagnostic = result.provider_diagnostic().expect("unknown diagnostic");
+        assert_eq!(diagnostic.send_certainty, certainty);
+        assert_eq!(diagnostic.phase, phase);
+        assert_eq!(diagnostic.http_status, status);
+        assert!(matches!(result, ExternalResult::UnknownDiagnostic(_)));
         assert_eq!(task.await.unwrap().len(), 1, "disconnect retry");
     }
 }
@@ -603,14 +816,17 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
     );
     cfg.max_request_bytes = 65536;
     cfg.max_response_bytes = 1;
-    assert_eq!(
-        make(cfg.clone())
-            .unwrap()
-            .invoke(&context(), text(request()))
-            .await
-            .unwrap(),
-        ExternalResult::Unknown
-    );
+    let result = make(cfg.clone())
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let diagnostic = result
+        .provider_diagnostic()
+        .expect("oversized body diagnostic");
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseRead);
+    assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
+    assert_eq!(diagnostic.http_status, Some(200));
     for endpoint in [
         "https://user:password@example.test/a",
         "https://example.test/a?key=hidden",

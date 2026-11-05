@@ -64,6 +64,7 @@ impl ModelPort for RestartModel {
                 code: "PROVIDER_REJECTED".into(),
                 usage,
                 retry_after: None,
+                provider_diagnostic: None,
             })
         } else {
             Ok(ExternalResult::Applied {

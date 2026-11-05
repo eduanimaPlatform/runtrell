@@ -121,6 +121,7 @@ async fn attempt_identity_retry_fencing_and_constraints() {
         code: "retry".into(),
         usage: Usage::measured(1, 1, 2),
         retry_after: Some(1),
+        provider_diagnostic: None,
     };
     s.record(&c, &op.id, failed.clone(), 0).await.unwrap();
     s.record(&c, &op.id, failed, 0).await.unwrap();
@@ -417,6 +418,15 @@ async fn saved_paid_result_recovers_without_lookup_or_resend() {
 async fn saved_observations_recover_once_without_provider_lookup() {
     let (_, schema, s) = open().await;
     runtrell_testkit::recovery_contracts::saved_observations(s, reopen(&schema).await).await;
+}
+#[tokio::test]
+async fn provider_diagnostic_survives_postgres_reopen() {
+    let (_, schema, store) = open().await;
+    runtrell_testkit::recovery_contracts::provider_diagnostic_survives_reopen(
+        store,
+        reopen(&schema).await,
+    )
+    .await;
 }
 
 #[tokio::test]

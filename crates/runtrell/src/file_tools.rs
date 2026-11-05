@@ -280,6 +280,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
                 code: "INPUT_LIMIT".into(),
                 usage: Usage::measured(0, 0, 0),
                 retry_after: None,
+                provider_diagnostic: None,
             });
         }
         Ok(match self.execute(input).await {
@@ -297,6 +298,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
                     .map_or_else(|| e.to_string(), |(code, _)| code.into()),
                 usage: Usage::measured(0, 0, 0),
                 retry_after: None,
+                provider_diagnostic: None,
             },
         })
     }

@@ -98,12 +98,16 @@ impl ImagePort for GeminiImages {
         request: PreparedImageRequest,
     ) -> Result<ImageResponse> {
         let body = self.body(&request)?;
-        let parsed = match self.0.send(context, body, &[]).await? {
-            HttpResult::Json(parsed) => parsed,
+        let (parsed, status) = match self.0.send(context, body, &[]).await? {
+            HttpResult::Json {
+                value: parsed,
+                status,
+            } => (parsed, status),
             HttpResult::Failure(ExternalResult::Failed {
                 code,
                 usage,
                 retry_after,
+                provider_diagnostic,
                 ..
             }) => {
                 return Ok(ImageResponse::Received {
@@ -111,13 +115,26 @@ impl ImagePort for GeminiImages {
                     usage,
                     failure: Some(code),
                     retry_after,
+                    provider_diagnostic,
                 });
+            }
+            HttpResult::UnknownDiagnostic(diagnostic) => {
+                return Ok(ImageResponse::UnknownDiagnostic(diagnostic));
             }
             _ => return Ok(ImageResponse::Unknown),
         };
         let mut usage = match self.0.usage(&parsed) {
             Ok(u) => u,
-            Err(_) => return Ok(ImageResponse::Unknown),
+            Err(_) => {
+                return Ok(ImageResponse::UnknownDiagnostic(ProviderDiagnostic {
+                    phase: ProviderFailurePhase::ResponseDecode,
+                    send_certainty: ProviderSendCertainty::Sent,
+                    http_status: Some(status),
+                    provider_type: None,
+                    provider_code: None,
+                    provider_param: None,
+                }));
+            }
         };
         let mut images = vec![];
         let mut failure = None;
@@ -169,6 +186,7 @@ impl ImagePort for GeminiImages {
             usage,
             failure,
             retry_after: None,
+            provider_diagnostic: None,
         })
     }
 }

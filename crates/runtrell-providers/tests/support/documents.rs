@@ -428,9 +428,17 @@ async fn document_mismatch_capabilities_and_bounds_never_send() {
         };
         c.attachment_resolver = Some(resolver.clone());
         let model = Gemini::new(c.clone()).unwrap();
+        let rejected = model.invoke(&context(), text(declared())).await.unwrap();
         assert!(
-            matches!(model.invoke(&context(), text(declared())).await.unwrap(), ExternalResult::Failed { ref code, ref usage, .. } if code == "ATTACHMENT_NOT_SENT" && usage == &Usage { model: "host-model".into(), ..Usage::measured(0,0,0) })
+            matches!(&rejected, ExternalResult::Failed { code, usage, .. } if code == "ATTACHMENT_NOT_SENT" && usage == &Usage { model: "host-model".into(), ..Usage::measured(0,0,0) })
         );
+        let diagnostic = rejected.provider_diagnostic().expect("pre-send diagnostic");
+        assert_eq!(diagnostic.phase, ProviderFailurePhase::PreSend);
+        assert_eq!(
+            diagnostic.send_certainty,
+            ProviderSendCertainty::DefinitelyNotSent
+        );
+        assert_eq!(diagnostic.http_status, None);
         assert_eq!(
             model.lookup(&context(), text(declared())).await.unwrap(),
             Lookup::Unknown

@@ -29,6 +29,7 @@ impl Tool for ClassifiedFailure {
             retry_after: (self.mode == "retry").then_some(1),
             repair_hint: matches!(self.mode, "retry" | "output_limit" | "deadline")
                 .then(|| "Safe correction".into()),
+            provider_diagnostic: None,
         })
     }
     async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {

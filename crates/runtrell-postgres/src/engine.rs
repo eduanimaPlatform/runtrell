@@ -907,13 +907,17 @@ impl OperationStore for PgStore {
                     ExternalResult::Applied { .. } => OperationState::Applied,
                     ExternalResult::Accepted { .. } => OperationState::Accepted,
                     ExternalResult::Failed { .. } => OperationState::Failed,
-                    ExternalResult::Unknown => OperationState::Unknown,
+                    ExternalResult::Unknown | ExternalResult::UnknownDiagnostic(_) => {
+                        OperationState::Unknown
+                    }
                 };
-                let unknown = matches!(result, ExternalResult::Unknown)
-                    || (amount.is_none()
-                        && !(matches!(result, ExternalResult::Accepted { .. })
-                            && old.request.reserve == Amount::default()
-                            && old.request.quantities.is_empty()));
+                let unknown = matches!(
+                    result,
+                    ExternalResult::Unknown | ExternalResult::UnknownDiagnostic(_)
+                ) || (amount.is_none()
+                    && !(matches!(result, ExternalResult::Accepted { .. })
+                        && old.request.reserve == Amount::default()
+                        && old.request.quantities.is_empty()));
                 for id in ancestors(s, &r.spec.account)? {
                     let a = s.accounts.get_mut(&id).unwrap();
                     if old.unknown_usage {

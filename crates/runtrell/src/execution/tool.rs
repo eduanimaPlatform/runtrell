@@ -405,6 +405,7 @@ impl<
                     code: error.to_string(),
                     usage: Usage::measured(0, 0, 0),
                     retry_after: None,
+                    provider_diagnostic: None,
                 });
             }
         };

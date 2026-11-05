@@ -79,6 +79,7 @@ impl ImagePort for FakeImages {
             usage: self.usage.clone(),
             failure: None,
             retry_after: None,
+            provider_diagnostic: None,
         })
     }
 }
