@@ -27,6 +27,7 @@ pub(crate) enum Scope<'a> {
     Attempt(&'a RunHandle, &'a str, bool),
     Begin(&'a RunHandle, &'a DispatchRequest),
     Logical(&'a RunHandle, &'a str),
+    Owner(&'a RunHandle, &'a str),
 }
 #[derive(Clone, Copy)]
 enum Selection<'a> {
@@ -276,7 +277,16 @@ impl PgStore {
         parent_state.sessions.extend(child_state.sessions);
         Ok(parent_state)
     }
-    async fn load(&self, conn: &mut PgConnection, scope: Scope<'_>, write: bool) -> Result<Ledger> {
+    pub(crate) async fn load(
+        &self,
+        conn: &mut PgConnection,
+        scope: Scope<'_>,
+        write: bool,
+    ) -> Result<Ledger> {
+        if let Scope::Owner(run, command_key) = &scope {
+            // Keep this owner-only future out of ordinary driver/store stack frames.
+            return Box::pin(self.load_owner(conn, run, command_key, write)).await;
+        }
         if let Scope::Child(h, operation_key, spec) = &scope {
             // Keep child-admission state off every ordinary driver/store future's stack.
             return Box::pin(self.load_child(conn, h, operation_key, spec, write)).await;
@@ -301,7 +311,11 @@ impl PgStore {
             scope => (scope, Selection::All, None),
         };
         match scope {
-            Scope::Attempt(..) | Scope::Begin(..) | Scope::Logical(..) | Scope::Child(..) => {
+            Scope::Attempt(..)
+            | Scope::Begin(..)
+            | Scope::Logical(..)
+            | Scope::Child(..)
+            | Scope::Owner(..) => {
                 unreachable!("normalized scope")
             }
 
@@ -558,6 +572,9 @@ impl PgStore {
         Ok(())
     }
     async fn save(&self, conn: &mut PgConnection, before: &Ledger, s: &Ledger) -> Result<()> {
+        if !s.owner_receipts.is_empty() {
+            Box::pin(self.save_owner(conn, before, s)).await?;
+        }
         for (k, r) in &s.runs {
             if before.runs.get(k) != Some(r) {
                 let mut value = json!(r);

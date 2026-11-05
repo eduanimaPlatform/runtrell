@@ -1,5 +1,38 @@
 # PostgreSQL adapter（schema 4）
 
+## Owner commands
+
+`initialize` applies `0001.sql` then the additive `0002_owner_receipts.sql` in its
+schema-initialization transaction. Existing `0001.sql` bytes are unchanged. An owner
+must initialize this extension before deploying the new adapter; read-only
+`connect` requires `owner_receipts` and never installs it.
+
+`owner_receipts(key PRIMARY KEY, receipt JSONB)` stores immutable causal evidence,
+independent of subsequent Run state. The adapter only INSERTs/SELECTs these rows;
+an UPDATE/DELETE trigger rejects rewriting even identical values. Runtime owner
+roles need SELECT and INSERT on this table, in addition to the Run, attempts,
+accounts, session and slot privileges their transitions already require. Inspection
+needs SELECT only; hosts must authorize tenant access. Do not grant receipt
+UPDATE/DELETE/TRUNCATE to runtime roles. Schema administration remains a trusted
+host responsibility, including retention (no receipt GC API is provided).
+
+Both owner operations serialize by schema + command key using a transaction advisory
+lock before reading the receipt, including an absent key. An existing receipt is
+checked and returned without consulting or locking the current Run or accounts.
+For a new key, the established session → Run → sorted ancestor account lock order
+is retained, and outstanding operations and relevant slots are loaded under the
+Run lock. Resume evaluates cancellation/revision/hold/claim/deadline/operations and
+budget checks after acquiring those locks, then saves the effect and receipt in
+that transaction. Other Runs/keys do not share a global owner lock.
+
+`resume_held_in` and `settle_recovered_in` use the same transition as the standalone
+methods. They release a savepoint on success, leaving outer COMMIT/ROLLBACK to the
+host, so a host audit INSERT may commit with the runtime effect/receipt. Errors roll
+back that savepoint. Standalone methods use READ COMMITTED; hosts using stronger
+isolation must handle serialization errors/retry their outer transaction. Receipt
+lookup after a crash does not imply the outer transaction committed until the
+receipt is visible from an independent connection.
+
 Storage failure events are emitted at the PostgreSQL adapter boundary. Each event records a static operation identifier, a five-character SQLSTATE when available, an allowlisted failure class, and a generated correlation ID for that diagnostic event. The public `Error::Storage` result carries no diagnostic payload; hosts must attach a safe request/run correlation field on the active tracing span when they need to group events across a request. The adapter does not log SQL text, bound values, database message or DETAIL, error Display/Debug output, connection strings, or input data.
 
 The ERROR event target is `runtrell_postgres::storage`, with the fixed message `storage failure` and fields `operation`, `sqlstate` (empty when unavailable), `class`, and `correlation_id` (UUID). Classes are limited to `constraint`, `data_exception`, `transaction`, `connection`, `database`, `pool`, `configuration`, `decode`, `serialization`, and `conversion`.

@@ -6,6 +6,45 @@ use crate::image_contracts::{FakeImages, resolver};
 use crate::*;
 use runtrell::{data::*, images::*};
 
+// Construct store futures in a separate frame, as the driver's bx helper does.
+fn bx<'a, T, F: std::future::Future<Output = T> + Send + 'a>(
+    make: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>> {
+    Box::pin(make())
+}
+async fn settle<S: OperationStore>(
+    store: &S,
+    run: &RunHandle,
+    id: &str,
+    recovery: SettlementRecovery,
+    now: u64,
+) -> Result<SettlementRecord> {
+    let command = OwnerCommand {
+        key: format!("settle:{id}"),
+        request_digest: digest(&json!(recovery)),
+    };
+    let receipt = bx(|| store.settle_recovered(run, id, recovery, command, now)).await?;
+    let OwnerResult::Settled(record) = receipt.result else {
+        panic!("settlement receipt expected")
+    };
+    Ok(*record)
+}
+async fn resume<S: ControlStore>(store: &S, run: &RunHandle, now: u64) -> Result<OwnerReceipt> {
+    let revision = bx(|| store.get(run)).await?.revision;
+    bx(|| {
+        store.resume_held(
+            run,
+            revision,
+            OwnerCommand {
+                key: format!("resume:{}:{revision}", run.id),
+                request_digest: digest(&json!([run, revision])),
+            },
+            now,
+        )
+    })
+    .await
+}
+
 pub const MODEL: &str = "gpt-image-2.5-sunburst";
 /// GPT Image 2.5 Standard rates, integer micro-USD per million tokens.
 pub fn rates() -> Price {
@@ -218,9 +257,7 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
         bad_basis,
     ] {
         assert!(matches!(
-            restarted
-                .settle_recovered(&f.handle, &waiting.id, bad, now)
-                .await,
+            settle(&*restarted, &f.handle, &waiting.id, bad, now).await,
             Err(Error::Invalid(_))
         ));
     }
@@ -230,9 +267,7 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
         ..recovery()
     };
     assert_eq!(
-        restarted
-            .settle_recovered(&f.handle, &waiting.id, still_unknown, now)
-            .await,
+        settle(&*restarted, &f.handle, &waiting.id, still_unknown, now).await,
         Err(Error::UsageUnknown)
     );
     // Another Run's handle cannot reach this operation.
@@ -241,15 +276,11 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
         id: "someone-else".into(),
     };
     assert_eq!(
-        restarted
-            .settle_recovered(&foreign, &waiting.id, recovery(), now)
-            .await,
+        settle(&*restarted, &foreign, &waiting.id, recovery(), now).await,
         Err(Error::NotFound)
     );
     assert_eq!(
-        restarted
-            .settle_recovered(&f.handle, "no-such-operation", recovery(), now)
-            .await,
+        settle(&*restarted, &f.handle, "no-such-operation", recovery(), now).await,
         Err(Error::NotFound)
     );
     let untouched = f.op(&*restarted).await;
@@ -268,11 +299,9 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
                 restarted.clone()
             };
             let (handle, id) = (f.handle.clone(), waiting.id.clone());
-            tokio::spawn(async move {
-                target
-                    .settle_recovered(&handle, &id, recovery(), settled_at)
-                    .await
-            })
+            tokio::spawn(
+                async move { settle(&*target, &handle, &id, recovery(), settled_at).await },
+            )
         })
         .collect();
     let mut records = vec![];
@@ -313,17 +342,13 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
 
     // Repeating the request, or a different basis, never charges or rewrites again.
     assert_eq!(
-        store
-            .settle_recovered(&f.handle, &waiting.id, recovery(), settled_at + 5)
-            .await,
+        settle(&*store, &f.handle, &waiting.id, recovery(), settled_at + 5).await,
         Ok(record.clone())
     );
     let mut different = recovery();
     different.basis = "another-basis".into();
     assert_eq!(
-        store
-            .settle_recovered(&f.handle, &waiting.id, different, settled_at + 5)
-            .await,
+        settle(&*store, &f.handle, &waiting.id, different, settled_at + 5).await,
         Err(Error::Conflict)
     );
     assert_eq!(
@@ -336,8 +361,14 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
         restarted.get(&f.handle).await.unwrap().state,
         RunState::Waiting(OPERATOR_ACTION_WAIT.into())
     );
-    assert_eq!(restarted.resume_held(&f.handle, now).await, Ok(true));
-    assert_eq!(restarted.resume_held(&f.handle, now).await, Ok(false));
+    assert!(matches!(
+        resume(&*restarted, &f.handle, now).await.unwrap().result,
+        OwnerResult::Resumed { .. }
+    ));
+    assert_eq!(
+        resume(&*restarted, &f.handle, now).await,
+        Err(Error::NotHeld)
+    );
     // The Run continues from the saved result: no image is generated again.
     now += 60_001; // the last restarted worker's lease has expired
     f.clock.set(now);
@@ -478,19 +509,19 @@ pub async fn wait_follows_the_lookup_window<S: ControlStore + 'static>(store: Ar
     let ExternalResult::Applied { usage, .. } = op.result.clone().unwrap() else {
         panic!()
     };
-    let record = store
-        .settle_recovered(
-            &run,
-            &op.id,
-            SettlementRecovery {
-                basis: "test-measured-elsewhere".into(),
-                usage,
-                price: FakeModel::default().limits().price.unwrap(),
-            },
-            start + DAY,
-        )
-        .await
-        .unwrap();
+    let record = settle(
+        &*store,
+        &run,
+        &op.id,
+        SettlementRecovery {
+            basis: "test-measured-elsewhere".into(),
+            usage,
+            price: FakeModel::default().limits().price.unwrap(),
+        },
+        start + DAY,
+    )
+    .await
+    .unwrap();
     assert_eq!(record.amount, Amount::new(4, 4));
     let account = store.account(&account).await.unwrap();
     assert_eq!((account.unknown, account.used), (0, Amount::new(4, 4)));
@@ -667,8 +698,8 @@ pub async fn settle_never_resumes<S: ControlStore + 'static>(store: Arc<S>, rest
 
     // Resume is refused while the operation still awaits the operator.
     assert_eq!(
-        store.resume_held(&f.handle, 1_000).await,
-        Err(Error::Conflict)
+        resume(&*store, &f.handle, 1_000).await,
+        Err(Error::OwnershipLost)
     );
 
     // Settle while worker A still holds a valid lease, racing ticks of A, a restarted worker
@@ -681,11 +712,7 @@ pub async fn settle_never_resumes<S: ControlStore + 'static>(store: Arc<S>, rest
                 restarted.clone()
             };
             let (handle, id) = (f.handle.clone(), op.id.clone());
-            tokio::spawn(async move {
-                target
-                    .settle_recovered(&handle, &id, recovery(), 2_000)
-                    .await
-            })
+            tokio::spawn(async move { settle(&*target, &handle, &id, recovery(), 2_000).await })
         })
         .collect();
     let ticks: Vec<_> = (0..6)
@@ -745,7 +772,12 @@ pub async fn settle_never_resumes<S: ControlStore + 'static>(store: Arc<S>, rest
     }
 
     // The explicit, separate owner action resumes; only then does the Run send again.
-    assert_eq!(restarted.resume_held(&f.handle, 20_000).await, Ok(true));
+    // All maintenance claims above must have expired before an owner can resume.
+    assert!(
+        resume(&*restarted, &f.handle, 200_000 + 3 * DAY)
+            .await
+            .is_ok()
+    );
     f.clock.set(200_000 + 3 * DAY);
     let now = 200_000 + 3 * DAY;
     let c = restarted

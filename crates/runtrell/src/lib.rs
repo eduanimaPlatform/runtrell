@@ -4,6 +4,8 @@
 //! Host-independent execution contracts. In-memory adapters are not durable storage.
 mod api;
 pub use api::*;
+mod owner;
+pub use owner::*;
 mod driver;
 pub mod memory;
 pub use driver::Runtime;

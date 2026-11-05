@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — owner commands (breaking)
+
+- `OperationStore::resume_held` now takes an expected Run revision, `OwnerCommand`
+  (host key and request digest), and Unix-millisecond `now`; it returns an immutable
+  `OwnerReceipt`. Cancellation/terminal state, a stale revision, missing hold, live
+  claim, reached deadline, unresolved operator work, and ancestor account admission
+  or fully reserved capacity refuse atomically without changing the Run.
+- `settle_recovered` also requires `OwnerCommand` and returns `OwnerReceipt` with
+  `OwnerResult::Settled`; settlement still never resumes a Run. Implementations of
+  `OperationStore` must update both methods and add read-only `owner_receipt(key)`.
+  Same key/digest/typed request returns the original receipt despite later Run
+  transitions; a changed digest or request conflicts. A new key cannot attribute an
+  already settled operation to itself.
+- Memory and Postgres persist the receipt together with its effect. Postgres adds
+  `0002_owner_receipts.sql` without modifying `0001.sql`; initialize before using
+  the new adapter (`connect` refuses a missing receipt table). Receipt UPDATE and
+  DELETE are rejected. `PgStore::{resume_held_in,settle_recovered_in}` let hosts
+  commit their own audit in the same transaction, using the same transitions.
+
 ## Unreleased
 
 - OpenAI Images usage and unsettled-operation recovery. `OpenAiImages` now normalizes the

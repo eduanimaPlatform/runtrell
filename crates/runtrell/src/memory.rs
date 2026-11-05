@@ -17,6 +17,7 @@ struct Ledger {
     runs: BTreeMap<String, RunRecord>,
     accounts: BTreeMap<String, Account>,
     operations: BTreeMap<String, Operation>,
+    owner_receipts: BTreeMap<String, OwnerReceipt>,
     sessions: BTreeMap<String, (u64, u64)>,
     #[serde(skip)]
     slots: BTreeMap<String, SlotRequest>,
@@ -1125,22 +1126,49 @@ impl OperationStore for MemoryStore {
             })
         })?
     }
-    async fn resume_held(&self, run: &RunHandle, _now: u64) -> Result<bool> {
+    async fn owner_receipt(&self, key: &str) -> Result<Option<OwnerReceipt>> {
+        self.read(|s| Ok(s.owner_receipts.get(key).cloned()))
+    }
+    async fn resume_held(
+        &self,
+        run: &RunHandle,
+        expected_revision: u64,
+        command: OwnerCommand,
+        now: u64,
+    ) -> Result<OwnerReceipt> {
+        command.validate()?;
         self.tx(|s| {
-            let held = get(s, run)?.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into());
-            if !held {
-                return Ok(false);
+            let request = OwnerRequest::Resume { expected_revision };
+            if let Some(receipt) = s.owner_receipts.get(&command.key) {
+                receipt.check_request(&command, run, &request)?;
+                return Ok(receipt.clone());
             }
+            get(s, run)?.check_resume_held(expected_revision, now)?;
             if s.operations
                 .values()
                 .any(|o| o.run == *run && o.awaits_operator())
             {
                 return Err(Error::Conflict);
             }
+            for id in ancestors(s, &get(s, run)?.spec.account)? {
+                s.accounts[&id].resume_admission()?;
+            }
             let r = get_mut(s, run)?;
             r.state = RunState::Queued;
-            r.revision += 1;
-            Ok(true)
+            r.owner = None;
+            r.revision = r.revision.checked_add(1).ok_or(Error::Conflict)?;
+            let receipt = OwnerReceipt {
+                command,
+                run: run.clone(),
+                request,
+                result: OwnerResult::Resumed {
+                    revision: r.revision,
+                },
+                at: now,
+            };
+            s.owner_receipts
+                .insert(receipt.command.key.clone(), receipt.clone());
+            Ok(receipt)
         })
     }
     async fn settle_recovered(
@@ -1148,16 +1176,27 @@ impl OperationStore for MemoryStore {
         run: &RunHandle,
         id: &str,
         recovery: SettlementRecovery,
+        command: OwnerCommand,
         now: u64,
-    ) -> Result<SettlementRecord> {
+    ) -> Result<OwnerReceipt> {
+        command.validate()?;
         self.tx(|s| {
+            let request = OwnerRequest::Settle {
+                operation: id.into(),
+                recovery: Box::new(recovery.clone()),
+            };
+            if let Some(receipt) = s.owner_receipts.get(&command.key) {
+                receipt.check_request(&command, run, &request)?;
+                return Ok(receipt.clone());
+            }
             let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
             if old.run != *run {
                 return Err(Error::NotFound);
             }
             let account = get(s, run)?.spec.account.clone();
             let Some((result, record)) = old.plan_recovery(&recovery, now)? else {
-                return old.recovery.map(|r| *r).ok_or(Error::Conflict);
+                // A different command must not claim another command's historical effect.
+                return Err(Error::Conflict);
             };
             for id in ancestors(s, &account)? {
                 let a = s.accounts.get_mut(&id).unwrap();
@@ -1187,7 +1226,16 @@ impl OperationStore for MemoryStore {
                 s.slots.remove(&format!("active:{}:{}", run.tenant, run.id));
             }
             refresh_settlement(s, run);
-            Ok(record)
+            let receipt = OwnerReceipt {
+                command,
+                run: run.clone(),
+                request,
+                result: OwnerResult::Settled(Box::new(record)),
+                at: now,
+            };
+            s.owner_receipts
+                .insert(receipt.command.key.clone(), receipt.clone());
+            Ok(receipt)
         })
     }
 }

@@ -175,17 +175,31 @@ impl BudgetAuthority for TestPg {
     }
 }
 impl OperationStore for TestPg {
-    async fn resume_held(&self, run: &RunHandle, now: u64) -> Result<bool> {
-        self.0.resume_held(run, now).await
+    async fn owner_receipt(&self, key: &str) -> Result<Option<OwnerReceipt>> {
+        self.0.owner_receipt(key).await
+    }
+    async fn resume_held(
+        &self,
+        run: &RunHandle,
+        expected_revision: u64,
+        command: OwnerCommand,
+        now: u64,
+    ) -> Result<OwnerReceipt> {
+        self.0
+            .resume_held(run, expected_revision, command, now)
+            .await
     }
     async fn settle_recovered(
         &self,
         run: &RunHandle,
         id: &str,
         recovery: SettlementRecovery,
+        command: OwnerCommand,
         now: u64,
-    ) -> Result<SettlementRecord> {
-        self.0.settle_recovered(run, id, recovery, now).await
+    ) -> Result<OwnerReceipt> {
+        self.0
+            .settle_recovered(run, id, recovery, command, now)
+            .await
     }
     async fn observe_result(
         &self,

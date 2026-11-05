@@ -15,6 +15,7 @@ use std::{
 mod engine;
 mod execution;
 mod observation;
+mod owner;
 mod persistence;
 pub use observation::storage_error;
 use observation::storage_error as storage;
@@ -32,6 +33,7 @@ struct Ledger {
     requests: BTreeMap<String, RunSpec>,
     accounts: BTreeMap<String, Account>,
     operations: BTreeMap<String, Operation>,
+    owner_receipts: BTreeMap<String, OwnerReceipt>,
     sessions: BTreeMap<String, (u64, u64)>,
     slots: BTreeMap<String, SlotRequest>,
     queue: VecDeque<QueueEntry>,
@@ -61,7 +63,8 @@ pub struct LateResult {
 }
 
 /// Tables the schema-4 migration creates; `connect` requires every one.
-const SCHEMA_TABLES: [&str; 13] = [
+const SCHEMA_TABLES: [&str; 14] = [
+    "owner_receipts",
     "schema_config",
     "runs",
     "sessions",
@@ -126,6 +129,14 @@ impl PgStore {
         sqlx::Executor::execute(
             &mut *tx,
             include_str!("../migrations/0001.sql")
+                .replace("{{schema}}", &store.schema)
+                .as_str(),
+        )
+        .await
+        .map_err(|e| storage("PgStore::initialize", e))?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            include_str!("../migrations/0002_owner_receipts.sql")
                 .replace("{{schema}}", &store.schema)
                 .as_str(),
         )

@@ -41,7 +41,7 @@ pub(crate) fn get<'a>(s: &'a Ledger, h: &RunHandle) -> Result<&'a RunRecord> {
         .filter(|r| r.handle == *h)
         .ok_or(Error::NotFound)
 }
-fn get_mut<'a>(s: &'a mut Ledger, h: &RunHandle) -> Result<&'a mut RunRecord> {
+pub(crate) fn get_mut<'a>(s: &'a mut Ledger, h: &RunHandle) -> Result<&'a mut RunRecord> {
     s.runs
         .get_mut(&key(h))
         .filter(|r| r.handle == *h)
@@ -119,7 +119,7 @@ fn acquire(s: &mut Ledger, req: SlotRequest) -> Result<()> {
     s.slots.insert(req.key.clone(), req);
     Ok(())
 }
-fn refresh_settlement(s: &mut Ledger, h: &RunHandle) {
+pub(crate) fn refresh_settlement(s: &mut Ledger, h: &RunHandle) {
     let pending = s.operations.values().any(|o| o.run == *h && !o.settled);
     let unknown = s
         .operations
@@ -976,72 +976,53 @@ impl OperationStore for PgStore {
         }
         status
     }
-    async fn resume_held(&self, run: &RunHandle, _now: u64) -> Result<bool> {
-        self.tx(Scope::Run(run, Mode::Ops), |s| {
-            let held = get(s, run)?.state == RunState::Waiting(OPERATOR_ACTION_WAIT.into());
-            if !held {
-                return Ok(false);
-            }
-            if s.operations
-                .values()
-                .any(|o| o.run == *run && o.awaits_operator())
-            {
-                return Err(Error::Conflict);
-            }
-            let r = get_mut(s, run)?;
-            r.state = RunState::Queued;
-            r.revision += 1;
-            Ok(true)
-        })
+    async fn owner_receipt(&self, key: &str) -> Result<Option<OwnerReceipt>> {
+        let value: Option<Value> = sqlx::query_scalar(&format!(
+            "SELECT receipt FROM {}.owner_receipts WHERE key=$1",
+            self.schema
+        ))
+        .bind(key)
+        .fetch_optional(&self.pool)
         .await
+        .map_err(|e| storage("PgStore::owner_receipt", e))?;
+        value.map(decode).transpose()
+    }
+    async fn resume_held(
+        &self,
+        run: &RunHandle,
+        expected_revision: u64,
+        command: OwnerCommand,
+        now: u64,
+    ) -> Result<OwnerReceipt> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::resume_held", e))?;
+        let receipt = self
+            .resume_held_in(&mut tx, run, expected_revision, command, now)
+            .await?;
+        self.commit(tx).await?;
+        Ok(receipt)
     }
     async fn settle_recovered(
         &self,
         run: &RunHandle,
         id: &str,
         recovery: SettlementRecovery,
+        command: OwnerCommand,
         now: u64,
-    ) -> Result<SettlementRecord> {
-        self.tx(Scope::Attempt(run, id, true), |s| {
-            let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
-            if old.run != *run {
-                return Err(Error::NotFound);
-            }
-            let account = get(s, run)?.spec.account.clone();
-            let Some((result, record)) = old.plan_recovery(&recovery, now)? else {
-                return old.recovery.map(|r| *r).ok_or(Error::Conflict);
-            };
-            for id in ancestors(s, &account)? {
-                let a = s.accounts.get_mut(&id).unwrap();
-                a.unknown = a.unknown.checked_sub(1).ok_or(Error::Conflict)?;
-                a.reserved = a.reserved.subtract(old.request.reserve);
-                a.used = a.used.checked_add(record.amount)?;
-                a.settle_quantities(&old.request, &record.settled)?;
-                if a.reached() {
-                    a.exhausted = true;
-                }
-            }
-            let op = s.operations.get_mut(id).unwrap();
-            op.result = Some(result);
-            op.settled = true;
-            op.unknown_usage = false;
-            op.unsettled_result = None;
-            op.usage_observations.clear();
-            op.recovery = Some(Box::new(record.clone()));
-            s.slots.remove(id);
-            // Settling is accounting only. Park the Run under the operator hold and drop the
-            // owner so an old worker's next fence fails; resuming is a separate owner action.
-            let run_record = get_mut(s, run)?;
-            if !matches!(run_record.state, RunState::Terminal(_)) {
-                run_record.state = RunState::Waiting(OPERATOR_ACTION_WAIT.into());
-                run_record.owner = None;
-                run_record.revision += 1;
-                s.slots.remove(&format!("active:{}:{}", run.tenant, run.id));
-            }
-            refresh_settlement(s, run);
-            Ok(record)
-        })
-        .await
+    ) -> Result<OwnerReceipt> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::settle_recovered", e))?;
+        let receipt = self
+            .settle_recovered_in(&mut tx, run, id, recovery, command, now)
+            .await?;
+        self.commit(tx).await?;
+        Ok(receipt)
     }
 }
 impl Scheduler for PgStore {

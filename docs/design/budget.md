@@ -123,9 +123,18 @@ reservation. Tool results are the saved receipt itself, so a saved tool result i
 open the Run keeps its ordinary `external reconciliation` wait, because the adapter may still
 supply corrected measurements. There is no retry count: the state follows the evidence.
 
-**Settling never resumes execution.** `settle_recovered` also leaves the Run under an operator hold: for a non-terminal Run it sets `Waiting(OPERATOR_ACTION_WAIT)` and clears the owner, so an old claim holder's next fence fails (`OwnershipLost`). While the hold stands, `claim` keeps the state, every new-work fence (`check(.., true)`, `begin`, `mark_sent`, `checkpoint`) returns `Closed`, `wait` cannot overwrite it, and `drive` returns the record without a lookup or send. Only the separate owner action `OperationStore::resume_held(run, now)` lifts it (refused with `Conflict` while an operation still awaits the operator; idempotent, returns whether a hold was lifted); the Run becomes `Queued` and a worker must claim it. A terminal Run is left as it is.
+**Settling never resumes execution.** `settle_recovered` also leaves the Run under an operator hold: for a non-terminal Run it sets `Waiting(OPERATOR_ACTION_WAIT)` and clears the owner, so an old claim holder's next fence fails (`OwnershipLost`). While the hold stands, `claim` keeps the state, every new-work fence (`check(.., true)`, `begin`, `mark_sent`, `checkpoint`) returns `Closed`, `wait` cannot overwrite it, and `drive` returns the record without a lookup or send. Only the separate owner action `OperationStore::resume_held(run, expected_revision, command, now)` lifts it; the Run becomes `Queued` and a worker must claim it. A terminal Run is left as it is. The transactional checks and immutable retry contract are defined in [api.md](api.md#owner-command-receipts).
 
-`OperationStore::settle_recovered(run, operation, SettlementRecovery, now)` is the owner path
+A fresh resume checks every ancestor account under its accounting lock. Unknown
+usage obeys `continue_with_unknown`; exhaustion or reached used limits refuse it.
+Fully reserved token, cost or host quantity capacity also refuses it with
+`BudgetAtLimit`: resume cannot disregard commitments made by another Run on the
+same account chain. Reservations/unknown marks are never released to make resume
+pass. Remaining capacity is not a quote or a promise that the next call can reserve;
+`begin` still checks the actual next request atomically. Operations whose saved
+complete result awaits the operator independently refuse resume with `Conflict`.
+
+`OperationStore::settle_recovered(run, operation, SettlementRecovery, command, now)` is the owner path
 out. The request carries a fixed `basis` string, the stored usage refined by a documented rule
 and the price basis. The store accepts it only if the operation is Applied/Failed, unsettled and
 unknown, the new usage only fills counters that were `None` (model and quantities equal,
@@ -135,6 +144,8 @@ operator). It then settles the original operation in one transaction: releases t
 and unknown mark, charges the corrected amount to every ancestor account, replaces the saved
 result's usage, and stores `Operation.recovery` with the old usage, price basis, new usage,
 amount and Unix-millisecond time. It makes no provider call and takes no Run claim, so callers
-authorize the operator first. An identical repeat returns the stored record without charging
-again; a different basis or price returns `Conflict`. `runtrell-providers` supplies the
+authorize the operator first. Its result is an `OwnerReceipt` containing the settlement
+record. An identical command repeat returns the original receipt without charging
+again; a different digest, request, basis or price returns `Conflict`. A fresh key cannot
+claim an already recovered operation. `runtrell-providers` supplies the
 documented rule for OpenAI Images (`recovery_for_stored_openai_images_usage`).

@@ -166,6 +166,48 @@ call is a new operation. Capacity, authority, integrity and storage errors do
 not become repairable merely because another argument error is repairable.
 See [workspace.md](workspace.md#file-tool-input-bounds) for byte semantics.
 
+## Owner command receipts
+
+`resume_held(run, expected_revision, command, now)` and
+`settle_recovered(run, operation, recovery, command, now)` return `OwnerReceipt`.
+The generic public types are defined in [owner.rs](../../crates/runtrell/src/owner.rs).
+`OwnerCommand { key, request_digest }` is supplied by the authorized host: both
+strings must contain 1–256 ASCII graphic bytes. Keys are unique across one store
+(one Postgres schema); a host must namespace them across tenants and persist its
+canonical request/digest before making the call. The runtime records the typed
+request too and refuses retargeting a key even if its digest is reused.
+
+On first success, the state/accounting change and receipt commit together. The
+receipt binds command, Run, typed request (including operation/recovery or expected
+revision), result (`Resumed { revision }` or `Settled(SettlementRecord)`), and the
+first successful caller's Unix-millisecond time. A retry with the same key, digest
+and typed request returns that exact historical receipt before checking current
+Run state; changing only `now` does not create a new effect. A changed digest,
+Run or request returns `Conflict`. A fresh settlement key for an already recovered
+operation also returns `Conflict`, rather than attributing the old effect to a
+different command. Refusals create no receipt.
+
+For a fresh resume the store checks, under the same transaction/Run lock: cancel or
+terminal (`Closed`), expected revision (`Conflict`), hold (`NotHeld`), live claim
+(`OwnershipLost`), deadline at or before `now` (`Deadline`), any operation still
+awaiting the operator (`Conflict`), and all ancestor budget accounts (unknown policy,
+exhaustion, used plus reserved token/cost/quantity capacity). Refusals preserve the
+hold and all other state. Success clears the expired owner and queues the Run at
+the next revision; a worker must acquire a new claim. Business authorization,
+configuration identity and other host policy checks remain the host's responsibility.
+
+`owner_receipt(key)` is a read-only lookup independent of current Run state. Hosts
+can reconcile their own audit after a crash, including after progress, cancellation
+or another hold, without inferring causality from the current revision. The API
+does not grant authorization based on possession of a command key.
+
+Postgres additionally exposes `resume_held_in(&mut tx, ...)` and
+`settle_recovered_in(&mut tx, ...)` with the same remaining arguments and code path.
+The caller owns COMMIT; an error rolls the call back to its savepoint. Host audit
+and runtime receipt/effect can share that transaction. See [Postgres](postgres.md)
+for migration, locking and privileges, and [budget](budget.md#price-lines-and-owner-settlement-recovery)
+for accounting checks.
+
 <!-- generated-contracts -->
 ## Rust契約定義
 
@@ -673,7 +715,9 @@ pub trait OperationStore: Send + Sync {
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
     /// Owner recovery for an operation whose saved Applied/Failed result is complete but
-    /// whose usage never settled. Idempotent for an identical request; makes no provider
+    /// whose usage never settled. Idempotent for the same command key, digest and
+    /// typed request; returns its immutable receipt. A new key cannot claim an
+    /// already recovered effect. Makes no provider
     /// call and takes no Run claim. Releases the reservation and unknown mark only by
     /// settling the corrected amount, and keeps the old usage, price basis and new usage
     /// in `Operation.recovery`. Stored evidence that still cannot be settled returns
@@ -683,17 +727,30 @@ pub trait OperationStore: Send + Sync {
         run: &RunHandle,
         id: &str,
         recovery: SettlementRecovery,
+        command: OwnerCommand,
         now: u64,
-    ) -> impl std::future::Future<Output = Result<SettlementRecord>> + Send;
+    ) -> impl std::future::Future<Output = Result<OwnerReceipt>> + Send;
     /// Explicit owner action that lifts the operator hold set by `settle_recovered` (or by the
     /// operator-action wait). Settling never resumes a Run; only this does. Refused with
-    /// `Conflict` while an operation still awaits the operator. Returns whether a hold was lifted
-    /// (`false`: nothing to do, idempotent). The Run becomes `Queued`; a worker must claim it.
+    /// `Conflict` for a stale revision or an operation still awaiting the operator,
+    /// `Closed` for cancellation/terminal state, `NotHeld` without a hold,
+    /// `OwnershipLost` for a live claim, `Deadline` at/after the deadline, or the
+    /// account admission error. All checks and the immutable receipt are atomic.
+    /// The Run becomes `Queued`, its expired owner is cleared, and a worker must claim it.
+    /// A repeated command returns its original receipt before checking current state.
     fn resume_held(
         &self,
         run: &RunHandle,
+        expected_revision: u64,
+        command: OwnerCommand,
         now: u64,
-    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+    ) -> impl std::future::Future<Output = Result<OwnerReceipt>> + Send;
+    /// Read-only historical lookup, independent of the Run's current state.
+    /// Keys are scoped to the store (Postgres schema); hosts authorize access.
+    fn owner_receipt(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Option<OwnerReceipt>>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
     fn record(
         &self,

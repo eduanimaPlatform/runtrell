@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    AccountPolicy, PreparedModelRequest, ReservationPolicy, SchedulingPolicy, SettlementRecord,
-    SettlementRecovery,
+    AccountPolicy, OwnerCommand, OwnerReceipt, PreparedModelRequest, ReservationPolicy,
+    SchedulingPolicy, SettlementRecord, SettlementRecovery,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +13,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("conflicting digest or revision")]
     Conflict,
+    #[error("run is not under an operator hold")]
+    NotHeld,
     #[error("owner generation or lease lost")]
     OwnershipLost,
     #[error("run closed")]
@@ -1314,7 +1316,9 @@ pub trait OperationStore: Send + Sync {
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
     /// Owner recovery for an operation whose saved Applied/Failed result is complete but
-    /// whose usage never settled. Idempotent for an identical request; makes no provider
+    /// whose usage never settled. Idempotent for the same command key, digest and
+    /// typed request; returns its immutable receipt. A new key cannot claim an
+    /// already recovered effect. Makes no provider
     /// call and takes no Run claim. Releases the reservation and unknown mark only by
     /// settling the corrected amount, and keeps the old usage, price basis and new usage
     /// in `Operation.recovery`. Stored evidence that still cannot be settled returns
@@ -1324,17 +1328,30 @@ pub trait OperationStore: Send + Sync {
         run: &RunHandle,
         id: &str,
         recovery: SettlementRecovery,
+        command: OwnerCommand,
         now: u64,
-    ) -> impl std::future::Future<Output = Result<SettlementRecord>> + Send;
+    ) -> impl std::future::Future<Output = Result<OwnerReceipt>> + Send;
     /// Explicit owner action that lifts the operator hold set by `settle_recovered` (or by the
     /// operator-action wait). Settling never resumes a Run; only this does. Refused with
-    /// `Conflict` while an operation still awaits the operator. Returns whether a hold was lifted
-    /// (`false`: nothing to do, idempotent). The Run becomes `Queued`; a worker must claim it.
+    /// `Conflict` for a stale revision or an operation still awaiting the operator,
+    /// `Closed` for cancellation/terminal state, `NotHeld` without a hold,
+    /// `OwnershipLost` for a live claim, `Deadline` at/after the deadline, or the
+    /// account admission error. All checks and the immutable receipt are atomic.
+    /// The Run becomes `Queued`, its expired owner is cleared, and a worker must claim it.
+    /// A repeated command returns its original receipt before checking current state.
     fn resume_held(
         &self,
         run: &RunHandle,
+        expected_revision: u64,
+        command: OwnerCommand,
         now: u64,
-    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+    ) -> impl std::future::Future<Output = Result<OwnerReceipt>> + Send;
+    /// Read-only historical lookup, independent of the Run's current state.
+    /// Keys are scoped to the store (Postgres schema); hosts authorize access.
+    fn owner_receipt(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Option<OwnerReceipt>>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
     fn record(
         &self,
