@@ -23,7 +23,7 @@ flockが残り得る。Readyの競合は非同期に待ち直し、元のwall枠
 冪等に成功する。Acquiring/Unknownは開始成功としない。ロック取得後はrecordを再読し、
 同じoperationを二重起動しない。単体試験は複製fdとfake supervisorで競合を固定する。
 実Linuxの並行試験は同一Runの重複start・開始直後の遷移・Run別成果物の一回だけの生成を
-確認する（Hosted未実行）。停止待ちの上限は変更しない。
+確認する。停止待ちの上限は変更しない。
 
 ## 目的と受入境界
 
@@ -121,7 +121,7 @@ helper は親 PID の前後照合と parent-death SIGKILL を設定する。cgro
 
 管理 Worker は通常の owner/lease fence と管理権限を取得したうえで、`ExecutionLedger.pending()` と `inventory()` の owner/operation/runtime を照合し、`reconcile(&pending_record)` で固定 request 全体も一致させる。元の ToolContext の owner/operation で `stop` を繰り返し、`cgroup.kill` と `cgroup.events populated 0` の確認後だけ CPU/PID の receipt を得る。tmpfsは停止後もpageを保持するので、この時点ではMemoryを解放しない。PID 単体を識別子にしない。復旧時の終了理由・stdout/stderr は再現できないため `RECOVERED_STOP_RESULT_UNKNOWN` とし、元 mount が一致する場合だけ bounded な file copy を保存する。これは正常終了の receipt ではない。
 
-`destroy` は停止確認後に Reclaiming を耐久保存し、通常の unmount（lazy detach 不使用）・mount IDが消えたこと・scratch directory 削除・cgroup 削除の確認後に Memory/Disk/Volume を解放する。途中停止後も再試行できる。Destroyed の管理記録は tombstone として保持し、同 operation の acquire は元 reference を返す。記録の削除／retention は、その operation を二度と再受付しない host 側方針と合わせて別途実施する。
+`destroy` は停止確認後に Reclaiming を耐久保存し、通常の unmount（lazy detach 不使用）・mount IDが消えたこと・scratch directory 削除・cgroup 削除の確認後に Memory/Disk/Volume を解放する。途中停止後も再試行できる。Destroyed の管理記録は tombstone として保持し、同 operation の acquire は元 reference を返す。別Runのforkが操作lockのFDをexec前まで保持していても、検証済みのDestroyed記録があれば再度のdestroyはConfirmedを返す。lock競合だけでは削除完了とせず、未完了記録はPending、破損・識別不一致はエラーとする。記録の削除／retention は、その operation を二度と再受付しない host 側方針と合わせて別途実施する。
 
 記録の破損、別 runtime 版、request 不一致、cgroup inode／mount ID 不一致、対応記録のない directory/group は Unknown として隔離する。自動で削除・別 Run に再割当しない。`inventory().execution == None` は隔離対象。事前intent・専用管理領域の所有契約・取得途中の段階を満たさない名前の一致だけでは採用しない。ホスト再起動、管理 FS 喪失、mount namespace 変更は通常の backend process 再起動と異なり、存在／削除の receipt を再構築できない場合がある。ローカル record は ExecutionLedger の原子予約・owner fence・費用精算を置き換えない。ローカル実行の外部課金は0であり、host/cloud 利用料の課金 adapter を実装したという意味ではない。
 

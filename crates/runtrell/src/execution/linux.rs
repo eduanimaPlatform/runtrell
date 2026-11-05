@@ -1044,7 +1044,17 @@ impl ExecutionBackend for LinuxBackend {
                 return Ok(Progress::Unknown);
             }
             let Some(_lock) = backend.lock(&id)? else {
-                return Ok(Progress::Pending);
+                // A different Run's fork can retain this flock until exec, even
+                // after our writer closed it. Destroyed is a durable tombstone:
+                // acquire never recreates its resources. Validate that receipt
+                // without requiring the lock again; never infer it from contention.
+                return Ok(
+                    if backend.load(&id)?.observation.state == ExecutionState::Destroyed {
+                        Progress::Confirmed
+                    } else {
+                        Progress::Pending
+                    },
+                );
             };
             let mut r = backend.load(&id)?;
             if r.observation.state == ExecutionState::Destroyed {
@@ -1246,6 +1256,83 @@ mod tests {
         };
         b.save(&id, &row).unwrap();
         row
+    }
+    #[tokio::test]
+    async fn destroy_receipt_survives_inherited_operation_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        let mut row = ready_record(&b, &c);
+        // Recovery after kernel resources were removed, before the receipt was saved.
+        row.observation.state = ExecutionState::Reclaiming;
+        row.observation.released_resources = [Resource::Cpu, Resource::Pid].into();
+        row.observation.result = Some(json!({"stdout": [111, 107]}));
+        b.save(&id, &row).unwrap();
+        assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+        let receipt = fs::read(b.dir(&id).join("record.json")).unwrap();
+        let observation = b.lookup(&c).await.unwrap().unwrap();
+        assert_eq!(observation.state, ExecutionState::Destroyed);
+        assert_eq!(
+            observation.released_resources,
+            [
+                Resource::Cpu,
+                Resource::Pid,
+                Resource::Memory,
+                Resource::Disk,
+                Resource::Volume
+            ]
+            .into()
+        );
+        // Model a concurrent Run's fork retaining the same open file description
+        // after the destroy writer closes its own descriptor (before child exec).
+        let writer_lock = b.lock(&id).unwrap().unwrap();
+        let inherited_lock = writer_lock.try_clone().unwrap();
+        drop(writer_lock);
+        drop(b);
+        let b = fixture(root.path(), groups.path());
+        assert!(b.lock(&id).unwrap().is_none());
+        for _ in 0..2 {
+            assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+            assert_eq!(b.lookup(&c).await.unwrap().unwrap(), observation);
+            assert_eq!(fs::read(b.dir(&id).join("record.json")).unwrap(), receipt);
+        }
+        drop(inherited_lock);
+        assert_eq!(b.destroy(&c).await.unwrap(), Progress::Confirmed);
+    }
+    #[tokio::test]
+    async fn destroy_contention_requires_valid_terminal_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let groups = tempfile::tempdir().unwrap();
+        let b = fixture(root.path(), groups.path());
+        let c = crash_context();
+        let id = LinuxBackend::id(&c);
+        let mut row = ready_record(&b, &c);
+        let _writer = b.lock(&id).unwrap().unwrap();
+        for state in [
+            ExecutionState::Acquiring,
+            ExecutionState::Ready,
+            ExecutionState::Running,
+            ExecutionState::Collecting,
+            ExecutionState::Stopped,
+            ExecutionState::Reclaiming,
+            ExecutionState::Unknown,
+        ] {
+            row.observation.state = state;
+            b.save(&id, &row).unwrap();
+            assert_eq!(b.destroy(&c).await.unwrap(), Progress::Pending);
+            assert_eq!(b.lookup(&c).await.unwrap().unwrap(), row.observation);
+        }
+        row.observation.state = ExecutionState::Destroyed;
+        row.observation.execution.runtime_version = "foreign-version".into();
+        b.save(&id, &row).unwrap();
+        assert!(matches!(b.destroy(&c).await, Err(Error::Conflict)));
+        fs::write(b.dir(&id).join("record.json"), b"malformed").unwrap();
+        assert!(matches!(b.destroy(&c).await, Err(Error::Storage)));
+        let mut absent = c.clone();
+        absent.operation = "absent".into();
+        assert_eq!(b.destroy(&absent).await.unwrap(), Progress::Unknown);
     }
     #[tokio::test]
     async fn start_never_acknowledges_ready_while_operation_lock_is_held() {
