@@ -228,7 +228,16 @@ in `openai_images_usage::GPT_IMAGE_2_FAMILY` (2 and 2.5, including documented sn
 This rule does not cover 2.6 Sunburst/Flare. Their missing cache counters stay unknown
 (`None`), never zero-filled. `Price::cost` keeps
 its refusal semantics and the price is the host's, with all four input rates independent (see
-[budget](budget.md)).
+[budget](budget.md)). The [guide's cached-input statement](https://developers.openai.com/api/docs/guides/image-generation#cached-input-pricing)
+was checked 2026-11-05: it names 2 and 2.5, but gives no such exclusion for 2.6.
+For 2.6 with an unreported cache count, `Usage.price_evidence` can retain a
+known output component and the host-priced `SvgUsage` can retain the author
+component, while `Usage.micro_usd` and aggregate settlement remain unknown.
+The host reads this evidence through saved `Operation` usage and the owner
+recovery audit; it is informational, not a partial charge.
+If a response omits one total, valid counters on the other axis can still
+produce that axis's evidence. Contradictory reported parts produce no price
+evidence; the complete amount remains unknown in either case.
 An explicitly nonzero cache count on the exact 2/2.5 list contradicts that rule:
 its reported counters are retained but cost remains unknown (`IMAGE_USAGE_INCONSISTENT`).
 

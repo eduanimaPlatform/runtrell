@@ -93,6 +93,117 @@ pub fn recovery() -> SettlementRecovery {
 /// ceil((343 * 5 + 601 * 30) micro-USD).
 pub const EXPECTED_MICRO_USD: u64 = 19_745;
 
+/// The 2.6 response shape with unreported cache persists partial evidence and
+/// can only charge after an owner verifies the missing counters.
+pub async fn partial_price_evidence_recovery<S: ControlStore + 'static>(
+    store: Arc<S>,
+    restarted: Arc<S>,
+) {
+    let mut f = fixture(store.clone(), "partial-price-evidence").await;
+    let price = Price {
+        model: "gpt-image-2.6-flare".into(),
+        input: 5_000_000,
+        cached: 1_250_000,
+        output: 30_000_000,
+        reasoning: 30_000_000,
+        image_input: 8_000_000,
+        image_output: 30_000_000,
+        cached_image_input: 2_000_000,
+    };
+    let mut usage = Usage {
+        model: price.model.clone(),
+        input: Some(111),
+        output: Some(824),
+        image_input: Some(0),
+        image_output: Some(824),
+        svg_usage: Some(Box::new(SvgUsage {
+            model: Some("gpt-6-luna".into()),
+            input: Some(1583),
+            output: Some(2304),
+            reasoning: Some(1779),
+            total: Some(3887),
+            reported: json!({"model":"gpt-6-luna","input_tokens":1583,
+                "output_tokens":2304,"reasoning_tokens":1779,"total_tokens":3887}),
+            micro_usd: Some(1311),
+            price: Some(SvgAuthorPrice {
+                model: "gpt-6-luna".into(),
+                input: 100_000,
+                output: 500_000,
+                reasoning_in_output: true,
+            }),
+            ..SvgUsage::default()
+        })),
+        ..Usage::default()
+    };
+    usage.price_evidence = Some(Box::new(price.cost_breakdown(&usage).unwrap()));
+    f.provider.usage = usage.clone();
+    let claim = store
+        .claim(&f.handle, "worker", 1_000, 60_000)
+        .await
+        .unwrap();
+    let first = f.runtime(store.clone()).drive(&claim).await.unwrap();
+    assert_eq!(first.state, RunState::Waiting(OPERATOR_ACTION_WAIT.into()));
+    let waiting = f.op(&*restarted).await;
+    let ExternalResult::Applied { usage: saved, .. } = waiting.result.as_ref().unwrap() else {
+        panic!("expected saved result")
+    };
+    assert_eq!(saved, &usage);
+    assert_eq!(
+        saved.price_evidence.as_ref().unwrap().output_micro_usd,
+        Some(24_720)
+    );
+    assert_eq!(saved.price_evidence.as_ref().unwrap().input_micro_usd, None);
+    let held = restarted.account(&f.account).await.unwrap();
+    let baseline = held.used;
+    assert_eq!(held.unknown, 1);
+    assert_eq!(held.reserved, Amount::new(1_000, 50_000));
+    let mut refined = usage.clone();
+    refined.cached = Some(0);
+    refined.cached_image_input = Some(0);
+    let recovery = SettlementRecovery {
+        basis: "verified-explicit-cache-zero".into(),
+        usage: refined,
+        price,
+    };
+    let mut rewrites_known_output = recovery.clone();
+    rewrites_known_output.price.output = 29_000_000;
+    rewrites_known_output.price.image_output = 29_000_000;
+    rewrites_known_output.price.reasoning = 29_000_000;
+    assert!(matches!(
+        settle(
+            &*restarted,
+            &f.handle,
+            &waiting.id,
+            rewrites_known_output,
+            1_999
+        )
+        .await,
+        Err(Error::Invalid(_))
+    ));
+    let still_held = restarted.account(&f.account).await.unwrap();
+    assert_eq!(
+        (still_held.used, still_held.unknown, still_held.reserved),
+        (baseline, 1, Amount::new(1_000, 50_000))
+    );
+    let record = settle(&*restarted, &f.handle, &waiting.id, recovery.clone(), 2_000)
+        .await
+        .unwrap();
+    assert_eq!(record.previous, usage);
+    assert_eq!(record.amount, Amount::new(4_822, 26_586));
+    assert_eq!(
+        settle(&*store, &f.handle, &waiting.id, recovery, 2_001).await,
+        Ok(record)
+    );
+    let account = restarted.account(&f.account).await.unwrap();
+    assert_eq!(
+        account.used,
+        baseline.checked_add(Amount::new(4_822, 26_586)).unwrap()
+    );
+    assert_eq!(account.unknown, 0);
+    assert_eq!(account.reserved, Amount::default());
+    assert_eq!(f.provider.sends.load(Ordering::SeqCst), 1);
+}
+
 type Rt<S> = Runtime<
     S,
     ImageModel<FakeModel, DataStore, FakePolicy, S>,

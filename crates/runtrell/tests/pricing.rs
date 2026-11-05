@@ -25,6 +25,59 @@ fn usage() -> Usage {
         ..Usage::default()
     }
 }
+
+#[test]
+fn price_breakdown_is_independent_informational_and_validated() {
+    let p = Price {
+        model: "sample".into(),
+        input: 1,
+        cached: 1,
+        image_input: 1,
+        cached_image_input: 1,
+        output: 1,
+        reasoning: 1,
+        image_output: 1,
+    };
+    let u = Usage {
+        model: "sample".into(),
+        input: Some(1),
+        output: Some(1),
+        ..Usage::default()
+    };
+    let evidence = p.cost_breakdown(&u).unwrap();
+    assert_eq!(
+        (evidence.input_micro_usd, evidence.output_micro_usd),
+        (Some(1), Some(1))
+    );
+    assert_eq!(p.cost(&u), Ok(1)); // component ceilings are not additive charges
+    let mut missing = u.clone();
+    missing.input = None;
+    assert_eq!(p.cost_breakdown(&missing).unwrap().input_micro_usd, None);
+    assert_eq!(
+        p.cost_breakdown(&missing).unwrap().output_micro_usd,
+        Some(1)
+    );
+    missing = u.clone();
+    missing.output = None;
+    assert_eq!(p.cost_breakdown(&missing).unwrap().input_micro_usd, Some(1));
+    assert_eq!(p.cost_breakdown(&missing).unwrap().output_micro_usd, None);
+    missing = u.clone();
+    missing.image_input = Some(2);
+    assert!(matches!(p.cost_breakdown(&missing), Err(Error::Invalid(_))));
+    missing = u.clone();
+    missing.model = "other".into();
+    assert!(matches!(p.cost_breakdown(&missing), Err(Error::Invalid(_))));
+    let mut distinct = p.clone();
+    distinct.reasoning = 2;
+    distinct.image_output = 3;
+    let mut overlap = u;
+    overlap.output = Some(2);
+    overlap.reasoning = Some(1);
+    overlap.image_output = Some(1);
+    let evidence = distinct.cost_breakdown(&overlap).unwrap();
+    assert_eq!(evidence.input_micro_usd, Some(1));
+    assert_eq!(evidence.output_micro_usd, None);
+}
 #[test]
 fn intersection_cost_163_and_total_do_not_double_count_subsets() {
     assert_eq!(price().cost(&usage()), Ok(163));

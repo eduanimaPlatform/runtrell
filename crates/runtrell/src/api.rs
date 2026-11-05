@@ -111,11 +111,23 @@ pub struct Usage {
     /// Separate SVG author bill. Image counters and `micro_usd` above exclude it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svg_usage: Option<Box<SvgUsage>>,
+    /// Informational primary model price components; never used by `amount` or settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_evidence: Option<Box<PriceEvidence>>,
     /// Safe, fixed reason code (uppercase ASCII, no payload text) saying why a counter
     /// or the cost is unknown for a response that otherwise arrived. Adapters set it
     /// only when they deliberately keep a value unknown; it never turns unknown into 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_reason: Option<UnknownReason>,
+}
+/// Independently computable primary model bill components. Each is rounded up
+/// separately and must not be summed to infer the complete bill, which rounds once.
+/// `None` means the component could not be proved from the reported counters.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriceEvidence {
+    pub price: Price,
+    pub input_micro_usd: Option<u64>,
+    pub output_micro_usd: Option<u64>,
 }
 impl Usage {
     pub fn measured(input: u64, output: u64, cost: u64) -> Self {
@@ -291,6 +303,38 @@ pub struct Price {
     pub cached_image_input: u64,
 }
 impl Price {
+    /// Computes each side independently using the same partition rules as `cost`.
+    /// A missing or ambiguous counter affects only its own side. This is audit
+    /// evidence, not a charge or a replacement for the complete `cost` result.
+    pub fn cost_breakdown(&self, usage: &Usage) -> Result<PriceEvidence> {
+        if self.model != usage.model {
+            return Err(Error::Invalid("price model mismatch".into()));
+        }
+        if let (Some(i), Some(o)) = (usage.input, usage.output) {
+            usage.validate_subsets(i, o)?;
+        } else {
+            if let Some(i) = usage.input {
+                usage.validate_subsets(i, usage.output.unwrap_or(u64::MAX))?;
+            }
+            if let Some(o) = usage.output {
+                usage.validate_subsets(usage.input.unwrap_or(u64::MAX), o)?;
+            }
+        }
+        let mut input = usage.clone();
+        input.output = Some(0);
+        input.reasoning = Some(0);
+        input.image_output = Some(0);
+        let mut output = usage.clone();
+        output.input = Some(0);
+        output.cached = Some(0);
+        output.image_input = Some(0);
+        output.cached_image_input = Some(0);
+        Ok(PriceEvidence {
+            price: self.clone(),
+            input_micro_usd: usage.input.and_then(|_| self.cost(&input).ok()),
+            output_micro_usd: usage.output.and_then(|_| self.cost(&output).ok()),
+        })
+    }
     /// Conservative reservation for an input upper bound and output allowance.
     /// Host-supplied category rates are integer micro-USD per million tokens.
     /// Rounds up once for this bill; overflow rejects the reservation.

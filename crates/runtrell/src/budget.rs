@@ -372,6 +372,7 @@ impl Operation {
         if let Some(done) = self.recovery.as_deref() {
             let mut requested = recovery.usage.clone();
             requested.micro_usd = done.settled.micro_usd;
+            requested.price_evidence = Some(Box::new(recovery.price.cost_breakdown(&requested)?));
             return if done.basis == recovery.basis
                 && done.price == recovery.price
                 && requested == done.settled
@@ -431,6 +432,19 @@ impl Operation {
         }
         let mut settled = new.clone();
         settled.micro_usd = Some(cost);
+        let evidence = recovery.price.cost_breakdown(&settled)?;
+        if stored.price_evidence.as_ref().is_some_and(|old| {
+            old.input_micro_usd
+                .is_some_and(|value| evidence.input_micro_usd != Some(value))
+                || old
+                    .output_micro_usd
+                    .is_some_and(|value| evidence.output_micro_usd != Some(value))
+        }) {
+            return Err(Error::Invalid(
+                "recovery must preserve known price evidence".into(),
+            ));
+        }
+        settled.price_evidence = Some(Box::new(evidence));
         if !self
             .request
             .quantities

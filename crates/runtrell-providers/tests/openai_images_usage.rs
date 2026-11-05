@@ -259,6 +259,188 @@ fn img26_exact_2_and_25_cache_contradiction_stays_unknown() {
 
 const SUNBURST: &str = "gpt-image-2.5-sunburst";
 
+#[test]
+fn img26_unknown_cache_keeps_known_output_and_author_evidence() {
+    let mut cfg = config("gpt-image-2.6-flare", Some(price("gpt-image-2.6-flare")));
+    cfg.capabilities.images.svg_author_prices = vec![runtrell::SvgAuthorPrice {
+        model: "gpt-6-luna".into(),
+        input: 100_000,
+        output: 500_000,
+        reasoning_in_output: true,
+    }];
+    let response = json!({"usage":{"total_tokens":935,"input_tokens":111,"output_tokens":824,
+        "input_tokens_details":{"text_tokens":111,"image_tokens":0,"cached_tokens":null,
+            "cached_tokens_details":{"image_tokens":null}},
+        "output_tokens_details":{"image_tokens":824,"text_tokens":0}},
+        "svg_usage":{"model":"gpt-6-luna","input_tokens":1583,"output_tokens":2304,
+            "reasoning_tokens":1779,"total_tokens":3887}});
+    let u = images_usage::normalize_with_svg(&cfg, &response, true);
+    assert_eq!((u.cached, u.cached_image_input), (None, None));
+    assert_eq!(u.price_evidence.as_ref().unwrap().input_micro_usd, None);
+    assert_eq!(
+        u.price_evidence.as_ref().unwrap().output_micro_usd,
+        Some(24_720)
+    );
+    assert_eq!(u.svg_usage.as_ref().unwrap().micro_usd, Some(1_311));
+    assert_eq!(u.micro_usd, None);
+    assert_eq!(u.amount(), Err(Error::UsageUnknown));
+    let stored: Usage = serde_json::from_value(serde_json::to_value(&u).unwrap()).unwrap();
+    assert_eq!(stored, u);
+
+    let mut refined = u.clone();
+    refined.cached = Some(0);
+    refined.cached_image_input = Some(0);
+    refined.unknown_reason = None;
+    refined.price_evidence = None; // owner derives evidence from the verified price
+    let op = Operation {
+        id: "img26".into(),
+        run: cfg.run.clone(),
+        request: runtrell::DispatchRequest::new(
+            "img26",
+            runtrell::OperationKind::Tool,
+            "svg.generate",
+            json!({}),
+            runtrell::Amount::new(5000, 50000),
+        ),
+        state: runtrell::OperationState::Applied,
+        result: Some(runtrell::ExternalResult::Applied {
+            physical_evidence: None,
+            output: json!({}),
+            usage: u.clone(),
+            external_id: None,
+        }),
+        settled: false,
+        unknown_usage: true,
+        send_generation: Some(1),
+        send_count: 1,
+        replay_proof_generation: None,
+        created_at: 0,
+        finished_at: Some(1),
+        usage_observations: vec![],
+        unsettled_result: None,
+        recovery: None,
+    };
+    let recovery = SettlementRecovery {
+        basis: "verified-explicit-cache-zero".into(),
+        usage: refined,
+        price: price("gpt-image-2.6-flare"),
+    };
+    let (_, record) = op.plan_recovery(&recovery, 2).unwrap().unwrap();
+    assert_eq!(record.previous, u);
+    assert_eq!(record.amount, runtrell::Amount::new(4822, 26_586));
+    assert_eq!(
+        record
+            .settled
+            .price_evidence
+            .as_ref()
+            .unwrap()
+            .output_micro_usd,
+        Some(24_720)
+    );
+}
+
+#[test]
+fn incomplete_images_usage_retains_only_consistent_known_price_components() {
+    let cfg = config("gpt-image-2.6-flare", Some(price("gpt-image-2.6-flare")));
+    let mut response = json!({"usage":{"input_tokens":111,"output_tokens":824,
+        "input_tokens_details":{"text_tokens":111,"image_tokens":0,
+            "cached_tokens":0,"cached_tokens_details":{"image_tokens":0}},
+        "output_tokens_details":{"image_tokens":824,"text_tokens":0}}});
+    response["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("input_tokens");
+    let missing_input = normalize(&cfg, &response);
+    assert_eq!(
+        missing_input.unknown_reason.as_deref(),
+        Some(images_usage::REASON_INCOMPLETE)
+    );
+    assert_eq!(missing_input.micro_usd, None);
+    assert_eq!(
+        missing_input
+            .price_evidence
+            .as_ref()
+            .unwrap()
+            .input_micro_usd,
+        None
+    );
+    assert_eq!(
+        missing_input
+            .price_evidence
+            .as_ref()
+            .unwrap()
+            .output_micro_usd,
+        Some(24_720)
+    );
+    response["usage"]["output_tokens_details"]["text_tokens"] = json!(1);
+    let inconsistent_output = normalize(&cfg, &response);
+    assert_eq!(
+        inconsistent_output.unknown_reason.as_deref(),
+        Some(images_usage::REASON_INCONSISTENT)
+    );
+    assert!(inconsistent_output.price_evidence.is_none());
+
+    response["usage"]["input_tokens"] = json!(111);
+    response["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("output_tokens");
+    response["usage"]["output_tokens_details"]["text_tokens"] = json!(0);
+    let missing_output = normalize(&cfg, &response);
+    assert_eq!(
+        missing_output.unknown_reason.as_deref(),
+        Some(images_usage::REASON_INCOMPLETE)
+    );
+    assert_eq!(missing_output.micro_usd, None);
+    assert_eq!(
+        missing_output
+            .price_evidence
+            .as_ref()
+            .unwrap()
+            .input_micro_usd,
+        Some(555)
+    );
+    assert_eq!(
+        missing_output
+            .price_evidence
+            .as_ref()
+            .unwrap()
+            .output_micro_usd,
+        None
+    );
+    response["usage"]["input_tokens_details"]["image_tokens"] = json!(1);
+    let inconsistent_input = normalize(&cfg, &response);
+    assert_eq!(
+        inconsistent_input.unknown_reason.as_deref(),
+        Some(images_usage::REASON_INCONSISTENT)
+    );
+    assert!(inconsistent_input.price_evidence.is_none());
+    response["usage"]["output_tokens"] = json!(824);
+    response["usage"]["input_tokens_details"]["text_tokens"] = json!(200);
+    response["usage"]["input_tokens_details"]
+        .as_object_mut()
+        .unwrap()
+        .remove("image_tokens");
+    let oversized_text = normalize(&cfg, &response);
+    assert_eq!(
+        oversized_text.unknown_reason.as_deref(),
+        Some(images_usage::REASON_INCONSISTENT)
+    );
+    assert!(oversized_text.price_evidence.is_none());
+
+    response["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("input_tokens");
+    response["usage"]["total_tokens"] = json!(100);
+    let total_below_output = normalize(&cfg, &response);
+    assert_eq!(
+        total_below_output.unknown_reason.as_deref(),
+        Some(images_usage::REASON_INCONSISTENT)
+    );
+    assert!(total_below_output.price_evidence.is_none());
+}
+
 /// GPT Image 2.5 Standard rates (USD per million tokens): text 5 / cached 1.25,
 /// image 8 / cached 2, image output 30; integer micro-USD per million tokens.
 fn price(model: &str) -> Price {

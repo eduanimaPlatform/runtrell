@@ -11,6 +11,42 @@ fn img26_config(url: String) -> Config {
 const SVG_SOURCE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"999999\" height=\"999999\"><text>図 &amp; α</text></svg>\n";
 
 #[tokio::test]
+async fn img26_svg_wire_retains_partial_price_evidence() {
+    let mut body = image_response();
+    body["data"][0]["b64_json"] = json!(STANDARD.encode(SVG_SOURCE));
+    body["usage"] = json!({"total_tokens":935,"input_tokens":111,"output_tokens":824,
+        "input_tokens_details":{"text_tokens":111,"image_tokens":0,"cached_tokens":null,
+            "cached_tokens_details":{"image_tokens":null}},
+        "output_tokens_details":{"image_tokens":824,"text_tokens":0}});
+    body["svg_usage"] = json!({"model":"gpt-6-luna","input_tokens":1583,
+        "output_tokens":2304,"reasoning_tokens":1779,"total_tokens":3887});
+    let (url, http) = server(200, "", body).await;
+    let mut cfg = img26_config(url);
+    cfg.capabilities.limits.model = "gpt-image-2.6-flare".into();
+    cfg.capabilities.limits.price = Some(Price {
+        model: "gpt-image-2.6-flare".into(), input: 5_000_000, cached: 1_250_000,
+        output: 30_000_000, reasoning: 30_000_000, image_input: 8_000_000,
+        image_output: 30_000_000, cached_image_input: 2_000_000,
+    });
+    cfg.capabilities.images.svg_author_prices = vec![SvgAuthorPrice {
+        model: "gpt-6-luna".into(), input: 100_000, output: 500_000,
+        reasoning_in_output: true,
+    }];
+    let limits = cfg.image_limits.clone();
+    let (mut tool, ctx) = fixture(cfg, ImageAction::SvgGenerate).await;
+    tool.resolver.limits = limits;
+    let input = json!({"prompt":"draw svg","output_format":"svg"});
+    let result = tool.invoke(&ctx, input.clone()).await.unwrap();
+    let ExternalResult::Applied { usage, .. } = &result else { panic!("expected saved result") };
+    assert_eq!(usage.price_evidence.as_ref().unwrap().output_micro_usd, Some(24_720));
+    assert_eq!(usage.price_evidence.as_ref().unwrap().input_micro_usd, None);
+    assert_eq!(usage.svg_usage.as_ref().unwrap().micro_usd, Some(1_311));
+    assert_eq!(usage.amount(), Err(Error::UsageUnknown));
+    assert_eq!(tool.lookup(&ctx, input).await.unwrap(), Lookup::Found(result));
+    assert_eq!(http.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn img26_svg_wire_exact_bytes_digest_and_receipt_replay() {
     for options in [
         json!({}),

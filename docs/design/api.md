@@ -345,11 +345,20 @@ pub struct Usage {
     /// Separate SVG author bill. Image counters and `micro_usd` above exclude it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svg_usage: Option<Box<SvgUsage>>,
+    /// Informational primary model price components; never used for settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_evidence: Option<Box<PriceEvidence>>,
     /// Safe, fixed reason code (uppercase ASCII, no payload text) saying why a counter
     /// or the cost is unknown for a response that otherwise arrived. Adapters set it
     /// only when they deliberately keep a value unknown; it never turns unknown into 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_reason: Option<UnknownReason>,
+}
+
+pub struct PriceEvidence {
+    pub price: Price,
+    pub input_micro_usd: Option<u64>,
+    pub output_micro_usd: Option<u64>,
 }
 
 pub struct SvgUsage {

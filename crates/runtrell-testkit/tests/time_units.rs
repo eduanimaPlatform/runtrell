@@ -40,6 +40,14 @@ fn image_usage_operator_recovery() {
     ));
 }
 #[test]
+fn partial_price_evidence_recovery() {
+    let store = Arc::new(MemoryStore::default());
+    block_on(settlement_contracts::partial_price_evidence_recovery(
+        store.clone(),
+        store,
+    ));
+}
+#[test]
 fn wait_follows_the_lookup_window() {
     block_on(settlement_contracts::wait_follows_the_lookup_window(
         Arc::new(MemoryStore::default()),

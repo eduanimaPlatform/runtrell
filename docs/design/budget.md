@@ -35,7 +35,13 @@ integer micro-USD per million tokens. The billing unit is one billed attempt
 (ordinary input, cached-only, image-only, cached image, ordinary output,
 reasoning, image output), accumulated in u128 and rounded up exactly once for
 the attempt, then checked into u64. Categories are never rounded separately
-(test `categories_are_summed_before_one_round_up_per_billed_attempt`). Missing
+(test `categories_are_summed_before_one_round_up_per_billed_attempt`).
+`Price::cost_breakdown` exposes independently provable input/output values in
+`Usage.price_evidence`, with the applied `Price` snapshot. Each component is
+rounded for display and audit; adding them may differ from `Price::cost`, which
+rounds once for the complete bill. A missing counter makes only its affected
+component unknown. This evidence is serialized with operation usage and never
+charges an account or releases a reservation. Missing
 subsets are only dispensable when their rates are equal. Unknown price or
 required usage prevents settlement and preserves the reservation. Fixed-price
 jobs use measured zero tokens and an explicit cost; measured zero cost identifies
@@ -147,7 +153,9 @@ and the price basis. The store accepts it only if the operation is Applied/Faile
 unknown, the new usage only fills counters that were `None` (model and quantities equal,
 `micro_usd` still `None`), `price.model` equals the usage and pinned price model, and
 `Price::cost` can compute the primary bill; otherwise nothing changes (`UsageUnknown` stays for the
-operator). It then settles the original operation in one transaction: releases the reservation
+operator). It recomputes `price_evidence` from the recovery price, preserving any
+previously known component amount; the original evidence remains in the audit.
+It then settles the original operation in one transaction: releases the reservation
 and unknown mark, charges the corrected amount to every ancestor account, replaces the saved
 result's usage, and stores `Operation.recovery` with the old usage, price basis, new usage,
 amount and Unix-millisecond time. It makes no provider call and takes no Run claim, so callers

@@ -197,19 +197,23 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
     // Spec: output_tokens are the image tokens of the output image; details, when present,
     // are authoritative and checked below.
     u.image_output = out_image.or_else(|| output.map(|o| o.saturating_sub(out_text.unwrap_or(0))));
-    let (Some(input), Some(output), Some(in_text), Some(in_image)) =
-        (input, output, in_text, in_image)
-    else {
-        u.unknown_reason = Some(REASON_INCOMPLETE.into());
-        return u;
-    };
-    let consistent = in_text.checked_add(in_image) == Some(input)
-        && total.is_none_or(|t| input.checked_add(output) == Some(t))
-        && match (out_image, out_text) {
-            (Some(i), Some(t)) => i.checked_add(t) == Some(output),
-            (Some(i), None) => i <= output,
-            (None, Some(t)) => t <= output,
-            (None, None) => true,
+    let consistent = match (input, in_text, in_image) {
+        (Some(i), Some(t), Some(image)) => t.checked_add(image) == Some(i),
+        _ => true,
+    } && match (total, input, output) {
+        (Some(t), Some(i), Some(o)) => i.checked_add(o) == Some(t),
+        _ => true,
+    } && in_text.zip(input).is_none_or(|(part, i)| part <= i)
+        && in_image.zip(input).is_none_or(|(part, i)| part <= i)
+        && input.zip(total).is_none_or(|(i, t)| i <= t)
+        && output.zip(total).is_none_or(|(o, t)| o <= t)
+        && u.validate_subsets(input.unwrap_or(u64::MAX), output.unwrap_or(u64::MAX))
+            .is_ok()
+        && match (output, out_image, out_text) {
+            (Some(o), Some(i), Some(t)) => i.checked_add(t) == Some(o),
+            (Some(o), Some(i), None) => i <= o,
+            (Some(o), None, Some(t)) => t <= o,
+            _ => true,
         };
     if !consistent {
         // Nothing here can be trusted: report no counter at all.
@@ -221,6 +225,11 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
         u.unknown_reason = Some(REASON_INCONSISTENT.into());
         return u;
     }
+    let (Some(_), Some(_), Some(_), Some(_)) = (input, output, in_text, in_image) else {
+        attach_price_evidence(config, &mut u, billed_as_requested);
+        u.unknown_reason = Some(REASON_INCOMPLETE.into());
+        return u;
+    };
     // Not filled: `reasoning`. The schema has no such category but also does not say none is
     // billed, so it stays unknown unless the host's price makes it irrelevant (reasoning rate
     // equal to the output rate).
@@ -245,6 +254,7 @@ fn price(config: &Config, u: &mut Usage, billed_as_requested: bool) {
         u.unknown_reason = Some(REASON_MODEL_UNPRICED.into());
         return;
     }
+    attach_price_evidence(config, u, billed_as_requested);
     match price.cost(u) {
         Ok(cost) => u.micro_usd = Some(cost),
         Err(Error::UsageUnknown) => {
@@ -259,6 +269,20 @@ fn price(config: &Config, u: &mut Usage, billed_as_requested: bool) {
         }
         Err(Error::ReservationDenied) => u.unknown_reason = Some(REASON_OVERFLOW.into()),
         Err(_) => u.unknown_reason = Some(REASON_INCONSISTENT.into()),
+    }
+}
+
+fn attach_price_evidence(config: &Config, u: &mut Usage, billed_as_requested: bool) {
+    if billed_as_requested
+        && let Some(price) = config
+            .capabilities
+            .limits
+            .price
+            .as_ref()
+            .filter(|p| p.model == u.model)
+        && let Ok(evidence) = price.cost_breakdown(u)
+    {
+        u.price_evidence = Some(Box::new(evidence));
     }
 }
 

@@ -43,6 +43,13 @@ fn image_usage_operator_recovery() {
     });
 }
 #[test]
+fn partial_price_evidence_recovery() {
+    support::block_on(async {
+        let (store, restarted) = two_stores().await;
+        settlement_contracts::partial_price_evidence_recovery(store, restarted).await;
+    });
+}
+#[test]
 fn wait_follows_the_lookup_window() {
     support::block_on(async {
         let (store, _) = two_stores().await;

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — partial price evidence (breaking)
+
+- Add `Price::cost_breakdown` and optional `Usage.price_evidence` with a pinned
+  price and independently known input/output micro-USD components. Components
+  round independently for audit and are not additive billing amounts. OpenAI
+  Images records them even when missing cache data keeps the full bill unknown;
+  SVG author cost remains in `SvgUsage`. Owner recovery recomputes components,
+  preserves known evidence, and still settles the complete attempt only once.
+  Rust callers constructing `Usage` must initialize `price_evidence` or use
+  `..Usage::default()`; no consumer revision or stored operation is changed here.
+
 ## Unreleased — owner commands (breaking)
 
 - `OperationStore::resume_held` now takes an expected Run revision, `OwnerCommand`
