@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{ops::Deref, sync::Arc};
 mod formats;
+mod svg;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageReference {
@@ -63,6 +64,8 @@ impl ImageReference {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageLimits {
     pub max_image_bytes: usize,
+    /// UTF-8 SVG source bytes, independent of raster dimensions and byte limits.
+    pub max_svg_bytes: usize,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     pub max_images: usize,
@@ -75,6 +78,7 @@ impl Default for ImageLimits {
     fn default() -> Self {
         Self {
             max_image_bytes: 8 * 1024 * 1024,
+            max_svg_bytes: 8 * 1024 * 1024,
             max_request_bytes: 48 * 1024 * 1024,
             max_response_bytes: 48 * 1024 * 1024,
             max_images: 4,
@@ -101,33 +105,60 @@ impl ImageLimits {
         Ok((width, height))
     }
     pub fn decode(&self, mime: &str, data_base64: &str) -> Result<Vec<u8>> {
-        if data_base64.len() > self.max_image_bytes.div_ceil(3).saturating_mul(4) {
+        let cap = if mime == "image/svg+xml" {
+            self.max_svg_bytes
+        } else {
+            self.max_image_bytes
+        };
+        if data_base64.len() > cap.div_ceil(3).saturating_mul(4) {
             return Err(invalid("IMAGE_BYTES_LIMIT"));
         }
         let bytes = STANDARD
             .decode(data_base64)
             .map_err(|_| invalid("IMAGE_BASE64"))?;
-        self.inspect(mime, &bytes)?;
+        self.inspect_payload(mime, &bytes)?;
         Ok(bytes)
+    }
+    /// Transport validation only. SVG sanitization and publication acceptance belong to the host.
+    pub fn inspect_payload(&self, mime: &str, bytes: &[u8]) -> Result<()> {
+        if mime != "image/svg+xml" {
+            return self.inspect(mime, bytes).map(|_| ());
+        }
+        if !self.allowed_mime.iter().any(|m| m == mime) {
+            return Err(invalid("IMAGE_MIME_UNSUPPORTED"));
+        }
+        if bytes.len() > self.max_svg_bytes {
+            return Err(invalid("IMAGE_BYTES_LIMIT"));
+        }
+        let xml = std::str::from_utf8(bytes).map_err(|_| invalid("SVG_UTF8"))?;
+        svg::inspect(xml)
     }
     pub fn validate(&self) -> Result<()> {
         let wire = self
             .max_image_bytes
+            .max(if self.allowed_mime.iter().any(|m| m == "image/svg+xml") {
+                self.max_svg_bytes
+            } else {
+                0
+            })
             .div_ceil(3)
             .checked_mul(4)
             .and_then(|n| n.checked_mul(self.max_images))
             .and_then(|n| n.checked_add(65536))
             .ok_or_else(|| invalid("IMAGE_LIMIT_CONFIGURATION"))?;
         if self.max_image_bytes == 0
+            || self.max_svg_bytes == 0
             || self.max_images == 0
             || self.max_width == 0
             || self.max_height == 0
             || self.max_pixels == 0
             || self.allowed_mime.is_empty()
-            || self
-                .allowed_mime
-                .iter()
-                .any(|m| !matches!(m.as_str(), "image/png" | "image/jpeg" | "image/webp"))
+            || self.allowed_mime.iter().any(|m| {
+                !matches!(
+                    m.as_str(),
+                    "image/png" | "image/jpeg" | "image/webp" | "image/svg+xml"
+                )
+            })
             || self.max_request_bytes < wire
             || self.max_response_bytes < wire
         {
@@ -374,10 +405,15 @@ impl<S: StandardToolStore, P: Policy> ImageResolver<S, P> {
         }
         let mut images = vec![];
         for reference in references {
+            let cap = if reference.mime() == "image/svg+xml" {
+                self.limits.max_svg_bytes
+            } else {
+                self.limits.max_image_bytes
+            };
             let bytes = self
-                .read_reference(run, reference, "image.resolve", self.limits.max_image_bytes)
+                .read_reference(run, reference, "image.resolve", cap)
                 .await?;
-            self.limits.inspect(reference.mime(), &bytes)?;
+            self.limits.inspect_payload(reference.mime(), &bytes)?;
             images.push(ResolvedImage {
                 reference: reference.clone(),
                 mime_type: reference.mime().into(),
@@ -555,10 +591,22 @@ pub enum ImageAction {
     Generate,
     Edit,
     MaskEdit,
+    SvgGenerate,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ImageRequest {
+pub struct RasterGenerate {
+    pub prompt: String,
+    pub size: Option<String>,
+    #[serde(default)]
+    pub output_format: ImageOutputFormat,
+    pub quality: Option<ImageQuality>,
+    pub complexity: Option<ImageComplexity>,
+    pub background: Option<ImageBackground>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RasterEdit {
     pub prompt: String,
     pub size: Option<String>,
     #[serde(default)]
@@ -566,6 +614,178 @@ pub struct ImageRequest {
     #[serde(default)]
     pub references: Vec<ImageReference>,
     pub mask: Option<ImageReference>,
+    pub quality: Option<ImageQuality>,
+    pub complexity: Option<ImageComplexity>,
+    pub background: Option<ImageBackground>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SvgGenerate {
+    pub prompt: String,
+    pub size: Option<String>,
+    #[serde(default)]
+    pub output_format: SvgOutputFormat,
+    pub quality: Option<ImageQuality>,
+    pub complexity: Option<ImageComplexity>,
+    pub background: Option<ImageBackground>,
+    pub svg: Option<SvgAuthorOptions>,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SvgOutputFormat {
+    #[default]
+    Svg,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SvgAuthorOptions {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<SvgReasoning>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SvgReasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<SvgReasoningEffort>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SvgReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageQuality {
+    Auto,
+    Low,
+    Medium,
+    High,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageComplexity {
+    Low,
+    Medium,
+    High,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageBackground {
+    Auto,
+    Opaque,
+    Transparent,
+}
+
+// Common prepared data is private; each public input schema is closed independently.
+#[derive(Clone, Debug)]
+struct ImageRequest {
+    prompt: String,
+    size: Option<String>,
+    output_format: Option<ImageOutputFormat>,
+    references: Vec<ImageReference>,
+    mask: Option<ImageReference>,
+    quality: Option<ImageQuality>,
+    complexity: Option<ImageComplexity>,
+    background: Option<ImageBackground>,
+    svg: Option<SvgAuthorOptions>,
+}
+impl ImageRequest {
+    fn parse(action: ImageAction, input: Value) -> Result<Self> {
+        let bad = |_: serde_json::Error| {
+            invalid("IMAGE_REQUEST: use fields and values in the selected action schema")
+        };
+        Ok(match action {
+            ImageAction::Generate => {
+                let r: RasterGenerate = serde_json::from_value(input).map_err(bad)?;
+                Self {
+                    prompt: r.prompt,
+                    size: r.size,
+                    output_format: Some(r.output_format),
+                    references: vec![],
+                    mask: None,
+                    quality: r.quality,
+                    complexity: r.complexity,
+                    background: r.background,
+                    svg: None,
+                }
+            }
+            ImageAction::Edit | ImageAction::MaskEdit => {
+                let r: RasterEdit = serde_json::from_value(input).map_err(bad)?;
+                Self {
+                    prompt: r.prompt,
+                    size: r.size,
+                    output_format: Some(r.output_format),
+                    references: r.references,
+                    mask: r.mask,
+                    quality: r.quality,
+                    complexity: r.complexity,
+                    background: r.background,
+                    svg: None,
+                }
+            }
+            ImageAction::SvgGenerate => {
+                let r: SvgGenerate = serde_json::from_value(input).map_err(bad)?;
+                Self {
+                    prompt: r.prompt,
+                    size: r.size,
+                    output_format: None,
+                    references: vec![],
+                    mask: None,
+                    quality: r.quality,
+                    complexity: r.complexity,
+                    background: r.background,
+                    svg: r.svg,
+                }
+            }
+        })
+    }
+}
+fn input_schema(action: ImageAction) -> Value {
+    let mut properties = json!({
+        "prompt":{"type":"string","minLength":1,"maxLength":65536},
+        "size":{"type":["string","null"],"maxLength":128},
+        "quality":{"enum":[null,"auto","low","medium","high"]},
+        "complexity":{"enum":[null,"low","medium","high"]},
+        "background":{"enum":[null,"auto","opaque","transparent"]},
+        "output_format":{"enum":["png","jpeg","webp"],"default":"png"}
+    });
+    let mut required = vec!["prompt"];
+    match action {
+        ImageAction::Generate => (),
+        ImageAction::Edit | ImageAction::MaskEdit => {
+            properties["references"] =
+                json!({"type":"array","minItems":1,"items":{"type":"object"}});
+            required.push("references");
+            properties["mask"] = json!({"type":["object","null"]});
+        }
+        ImageAction::SvgGenerate => {
+            properties["output_format"] = json!({"enum":["svg"],"default":"svg"});
+            properties["svg"] = json!({"type":["object","null"],"properties":{
+                "model":{"type":"string","minLength":1,"maxLength":256},
+                "reasoning":{"type":["object","null"],"properties":{"effort":{"enum":[null,"none","minimal","low","medium","high","xhigh","max"]}},"additionalProperties":false}
+            },"required":["model"],"additionalProperties":false});
+        }
+    }
+    json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
+}
+
+fn output_references(output: &Value) -> Result<Vec<ImageReference>> {
+    let mut refs: Vec<ImageReference> =
+        serde_json::from_value(output["image_inputs"].clone()).map_err(|_| Error::Storage)?;
+    if let Some(svg) = output.get("svg_outputs") {
+        refs.extend(
+            serde_json::from_value::<Vec<ImageReference>>(svg.clone())
+                .map_err(|_| Error::Storage)?,
+        );
+    }
+    Ok(refs)
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -607,8 +827,24 @@ impl PreparedImageRequest {
     pub fn size(&self) -> Option<&str> {
         self.request.size.as_deref().filter(|s| !s.is_empty())
     }
-    pub fn output_format(&self) -> ImageOutputFormat {
+    pub fn output_format(&self) -> Option<ImageOutputFormat> {
         self.request.output_format
+    }
+    pub fn output_mime(&self) -> &'static str {
+        self.output_format()
+            .map_or("image/svg+xml", ImageOutputFormat::mime_type)
+    }
+    pub fn quality(&self) -> Option<ImageQuality> {
+        self.request.quality
+    }
+    pub fn complexity(&self) -> Option<ImageComplexity> {
+        self.request.complexity
+    }
+    pub fn background(&self) -> Option<ImageBackground> {
+        self.request.background
+    }
+    pub fn svg(&self) -> Option<&SvgAuthorOptions> {
+        self.request.svg.as_ref()
     }
 }
 #[derive(Clone, Debug)]
@@ -667,6 +903,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
     fn name(&self) -> &str {
         match self.config.action {
             ImageAction::Generate => "image.generate",
+            ImageAction::SvgGenerate => "svg.generate",
             _ => "image.edit",
         }
     }
@@ -697,20 +934,25 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
         Ok(run)
     }
     async fn prepare(&self, run: &RunRecord, input: &Value) -> Result<PreparedImageRequest> {
-        let request: ImageRequest =
-            serde_json::from_value(input.clone()).map_err(|_| invalid("IMAGE_REQUEST"))?;
+        let request = ImageRequest::parse(self.config.action, input.clone())?;
         if request.prompt.is_empty() || request.prompt.len() > 65536 || self.config.timeout == 0 {
             return Err(invalid("IMAGE_REQUEST"));
         }
         if request.size.as_ref().is_some_and(|s| s.len() > 128)
-            || !self
-                .resolver
-                .limits
-                .allowed_mime
-                .iter()
-                .any(|m| m == request.output_format.mime_type())
+            || !self.resolver.limits.allowed_mime.iter().any(|m| {
+                m == request
+                    .output_format
+                    .map_or("image/svg+xml", ImageOutputFormat::mime_type)
+            })
         {
             return Err(invalid("IMAGE_OUTPUT_OPTIONS"));
+        }
+        if request.background == Some(ImageBackground::Transparent)
+            && request.output_format == Some(ImageOutputFormat::Jpeg)
+        {
+            return Err(invalid(
+                "IMAGE_BACKGROUND: transparent requires png or webp",
+            ));
         }
         if let Some(size) = request
             .size
@@ -718,10 +960,13 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
             .filter(|s| !s.is_empty() && *s != "auto")
         {
             let (width, height) = size.split_once('x').ok_or_else(|| invalid("IMAGE_SIZE"))?;
-            self.resolver.limits.dimensions(
-                width.parse().map_err(|_| invalid("IMAGE_SIZE"))?,
-                height.parse().map_err(|_| invalid("IMAGE_SIZE"))?,
-            )?;
+            let width: u32 = width.parse().map_err(|_| invalid("IMAGE_SIZE"))?;
+            let height: u32 = height.parse().map_err(|_| invalid("IMAGE_SIZE"))?;
+            if self.config.action != ImageAction::SvgGenerate {
+                self.resolver.limits.dimensions(width, height)?;
+            } else if width == 0 || height == 0 {
+                return Err(invalid("IMAGE_SIZE"));
+            }
         }
         match self.config.action {
             ImageAction::Generate if !request.references.is_empty() || request.mask.is_some() => {
@@ -739,6 +984,14 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
             > self.resolver.limits.max_images
         {
             return Err(invalid("IMAGE_COUNT_LIMIT"));
+        }
+        if request
+            .references
+            .iter()
+            .chain(request.mask.iter())
+            .any(|r| r.mime() == "image/svg+xml")
+        {
+            return Err(invalid("SVG_EDIT_INPUT_UNSUPPORTED: use raster references"));
         }
         let images = self.resolver.resolve(run, &request.references).await?;
         let mask = self
@@ -781,8 +1034,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
             return Err(Error::Conflict);
         }
         if let ExternalResult::Applied { output, .. } = &receipt.result {
-            let refs: Vec<ImageReference> = serde_json::from_value(output["image_inputs"].clone())
-                .map_err(|_| Error::Storage)?;
+            let refs = output_references(output)?;
             for r in &refs {
                 self.resolver.authorize(&run, r, "image.retrieve")?;
             }
@@ -795,8 +1047,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
     for ImageTool<I, S, P, R, C>
 {
     async fn authorize_result(&self, run: &RunRecord, output: &Value) -> Result<()> {
-        let refs: Vec<ImageReference> =
-            serde_json::from_value(output["image_inputs"].clone()).map_err(|_| Error::Storage)?;
+        let refs = output_references(output)?;
         for reference in &refs {
             self.resolver.authorize(run, reference, "image.retrieve")?;
         }
@@ -818,7 +1069,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             account: "images".into(),
             permission: self.name().into(),
             capability: "image-generation-editing".into(),
-            input_schema: json!({"type":"object","properties":{"prompt":{"type":"string","minLength":1},"references":{"type":"array","items":{"type":"object"}},"mask":{"type":["object","null"]},"size":{"type":["string","null"],"maxLength":128},"output_format":{"enum":["png","jpeg","webp"],"default":"png"}},"required":["prompt"],"additionalProperties":false}),
+            input_schema: input_schema(self.config.action),
             output_schema: json!({"type":"object"}),
             side_effect: true,
             timeout: self.config.timeout,
@@ -858,6 +1109,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         self.resolver
             .policy
             .authorize(&run, self.name(), "image.save")?;
+        let output_mime = request.output_mime();
         let response = self.provider.invoke(c, request).await?;
         let ImageResponse::Received {
             images,
@@ -878,6 +1130,10 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         }
         if failure.is_none() {
             for (i, image) in images.into_iter().enumerate() {
+                if image.mime_type != output_mime {
+                    failure = Some("IMAGE_OUTPUT_MIME_MISMATCH".into());
+                    break;
+                }
                 let bytes = match self
                     .resolver
                     .limits
@@ -934,7 +1190,11 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         } else {
             ExternalResult::Applied {
                 physical_evidence: None,
-                output: json!({"image_inputs":references}),
+                output: if self.config.action == ImageAction::SvgGenerate {
+                    json!({"image_inputs":[],"svg_outputs":references})
+                } else {
+                    json!({"image_inputs":references})
+                },
                 usage,
                 external_id: None,
             }

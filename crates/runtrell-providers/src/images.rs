@@ -33,13 +33,19 @@ impl GeminiImages {
     }
     fn body(&self, request: &PreparedImageRequest) -> Result<Value> {
         let config = &self.0.config;
-        if request.size().is_some() || request.output_format() != ImageOutputFormat::Png {
+        if request.size().is_some()
+            || request.output_format() != Some(ImageOutputFormat::Png)
+            || request.quality().is_some()
+            || request.complexity().is_some()
+            || request.background().is_some()
+        {
             return Err(Error::Unsupported("image_output_options".into()));
         }
         let supported = match request.action() {
             ImageAction::Generate => config.capabilities.images.generation,
             ImageAction::Edit => config.capabilities.images.reference_edit,
             ImageAction::MaskEdit => false,
+            ImageAction::SvgGenerate => false,
         };
         if !supported {
             return Err(Error::Unsupported(format!("{:?}", request.action())));

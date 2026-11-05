@@ -363,6 +363,22 @@ impl Adapter {
         body: Value,
         sensitive: &[runtrell::attachments::ResolvedAttachment],
     ) -> Result<HttpResult> {
+        self.send_at_with_usage(context, endpoint, body, sensitive, |parsed| {
+            self.usage(parsed).unwrap_or_else(|_| Usage {
+                model: self.config.capabilities.limits.model.clone(),
+                ..Usage::default()
+            })
+        })
+        .await
+    }
+    pub(crate) async fn send_at_with_usage<F: Fn(&Value) -> Usage + Send>(
+        &self,
+        context: &ToolContext,
+        endpoint: &str,
+        body: Value,
+        sensitive: &[runtrell::attachments::ResolvedAttachment],
+        normalize: F,
+    ) -> Result<HttpResult> {
         if context.claim.run != self.config.run {
             return Err(Error::PermissionDenied);
         }
@@ -445,10 +461,7 @@ impl Adapter {
                 repair_hint: None,
                 physical_evidence: None,
                 code: serde_json::to_string(&failure).map_err(|_| invalid())?,
-                usage: self.usage(&parsed).unwrap_or_else(|_| Usage {
-                    model: self.config.capabilities.limits.model.clone(),
-                    ..Usage::default()
-                }),
+                usage: normalize(&parsed),
                 retry_after: delay,
             }));
         }

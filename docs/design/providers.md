@@ -196,14 +196,18 @@ section "Cached input pricing".
 `output_tokens_details` is not in `ImagesUsage` but real responses carry it; it is accepted only
 when consistent with `output_tokens`.
 
-**Cached counters.** The schema has no cached counter. The guide states that for GPT Image 2 and
+**Cached counters.** Reported `input_tokens_details.cached_tokens` and
+`input_tokens_details.cached_tokens_details.image_tokens` are preserved. The guide states that for GPT Image 2 and
 GPT Image 2.5 cached input pricing "doesn't apply to direct Images API requests, including
 /v1/images/edits", so every input token on this endpoint is billed at the ordinary rate and
-`cached` and `cached_image_input` are exactly 0 for model names `gpt-image-2`,
-`gpt-image-2.<n>…` and `gpt-image-2…-<suffix>`. For any other model the page says nothing, so the
-counters stay unknown (`None`) and the cost is refused, never zero-filled. `Price::cost` keeps
+missing `cached` and `cached_image_input` are exactly 0 only for the six exact IDs
+in `openai_images_usage::GPT_IMAGE_2_FAMILY` (2 and 2.5, including documented snapshots).
+This rule does not cover 2.6 Sunburst/Flare. Their missing cache counters stay unknown
+(`None`), never zero-filled. `Price::cost` keeps
 its refusal semantics and the price is the host's, with all four input rates independent (see
 [budget](budget.md)).
+An explicitly nonzero cache count on the exact 2/2.5 list contradicts that rule:
+its reported counters are retained but cost remains unknown (`IMAGE_USAGE_INCONSISTENT`).
 
 An image that arrived with unsettleable usage is kept; the adapter returns the counters it can
 prove and `Usage.unknown_reason`:
@@ -224,3 +228,15 @@ The response carries no model field in the published schema, so an absent model 
 requested model. `ImageCapabilities.response_model_aliases` lists exact response model names the
 host declares to bill as the requested model; usage is then recorded under the priced model.
 Any other reported model is not priced.
+
+SVG author usage is a separate `Usage.svg_usage` component; complete raw JSON is
+retained even if malformed or the returned model is unknown. Its counters and
+price never enter image counters or image-model `Price::cost`. Exact author rates
+come from the host's `ImageCapabilities.svg_author_prices`, including verified
+reasoning/output inclusion semantics. Missing/malformed/inconsistent/unpriced
+author usage prevents aggregate settlement; it is never a free component.
+The component stores its applied rate snapshot; `Usage::amount` adds image and
+author costs once, while `total_tokens` and `reasoning_tokens` are not extra lines.
+The 2.6 Standard test catalog records 5 / 1.25 / 8 / 2 / 30 USD/M tokens
+(text / cached text / image / cached image / output), E1/E5 accessed 2026-11-05.
+It supplies no fabricated author-model rate or live billing claim.

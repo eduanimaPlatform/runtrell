@@ -393,9 +393,14 @@ impl Operation {
         };
         let new = &recovery.usage;
         let keeps = |old: Option<u64>, new: Option<u64>| old.is_none() || old == new;
-        if stored.micro_usd.is_some()
+        if stored.amount().is_ok()
             || stored.model != new.model
             || stored.quantities != new.quantities
+            || match (&stored.svg_usage, &new.svg_usage) {
+                (None, None) => false,
+                (Some(old), Some(new)) => !new.refines(old),
+                _ => true,
+            }
             || !keeps(stored.input, new.input)
             || !keeps(stored.output, new.output)
             || !keeps(stored.cached, new.cached)
@@ -419,6 +424,11 @@ impl Operation {
             return Err(Error::Invalid("recovery price/model mismatch".into()));
         }
         let cost = recovery.price.cost(new)?;
+        if stored.micro_usd.is_some_and(|known| known != cost) {
+            return Err(Error::Invalid(
+                "recovery must preserve known image cost".into(),
+            ));
+        }
         let mut settled = new.clone();
         settled.micro_usd = Some(cost);
         if !self
@@ -429,7 +439,7 @@ impl Operation {
         {
             return Err(Error::UsageUnknown);
         }
-        let amount = Amount::new(settled.total()?, cost);
+        let amount = settled.amount()?;
         match &mut result {
             ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
                 *usage = settled.clone();

@@ -47,6 +47,7 @@ impl OpenAiImages {
             ImageAction::Generate => config.capabilities.images.generation,
             ImageAction::Edit => config.capabilities.images.reference_edit,
             ImageAction::MaskEdit => false,
+            ImageAction::SvgGenerate => config.capabilities.images.svg_generation,
         };
         if !supported || request.mask().is_some() {
             return Err(Error::Unsupported(format!("{:?}", request.action())));
@@ -58,11 +59,47 @@ impl OpenAiImages {
             .image_limits
             .allowed_mime
             .iter()
-            .any(|m| m == request.output_format().mime_type())
+            .any(|m| m == request.output_mime())
         {
             return Err(Error::Unsupported("image_output_format".into()));
         }
-        let mut body = json!({"model":config.capabilities.limits.model,"prompt":request.prompt(),"n":1,"output_format":request.output_format()});
+        if request.svg().is_some() && !config.capabilities.images.svg_model_selection {
+            return Err(Error::Unsupported(
+                "svg: enable model-selection access or omit the svg object".into(),
+            ));
+        }
+        if request
+            .svg()
+            .map(|s| &s.model)
+            .is_some_and(|m| m.is_empty() || m.len() > 256)
+        {
+            return Err(Error::Invalid("SVG_MODEL".into()));
+        }
+        let model = config.capabilities.limits.model.as_str();
+        if (request.quality().is_some()
+            || request.complexity().is_some()
+            || request.background().is_some())
+            && !matches!(model, "gpt-image-2.6-sunburst" | "gpt-image-2.6-flare")
+        {
+            return Err(Error::Unsupported(
+                "image options require configured Images 2.6 model".into(),
+            ));
+        }
+        let format = request.output_format().map_or(json!("svg"), |f| json!(f));
+        let mut body =
+            json!({"model":model,"prompt":request.prompt(),"n":1,"output_format":format});
+        if let Some(quality) = request.quality() {
+            body["quality"] = json!(quality);
+        }
+        if let Some(complexity) = request.complexity() {
+            body["complexity"] = json!(complexity);
+        }
+        if let Some(background) = request.background() {
+            body["background"] = json!(background);
+        }
+        if let Some(svg) = request.svg() {
+            body["svg"] = json!(svg);
+        }
         if let Some(size) = request.size() {
             body["size"] = json!(size);
         }
@@ -116,7 +153,18 @@ impl ImagePort for OpenAiImages {
         } else {
             &self.edits_endpoint
         };
-        let parsed = match self.adapter.send_at(context, endpoint, body, &[]).await? {
+        let normalize = |response: &Value| {
+            crate::openai_images_usage::normalize_with_svg(
+                &self.adapter.config,
+                response,
+                request.action() == ImageAction::SvgGenerate,
+            )
+        };
+        let parsed = match self
+            .adapter
+            .send_at_with_usage(context, endpoint, body, &[], normalize)
+            .await?
+        {
             HttpResult::Json(parsed) => parsed,
             HttpResult::Failure(ExternalResult::Failed {
                 code,
@@ -133,7 +181,7 @@ impl ImagePort for OpenAiImages {
             }
             _ => return Ok(ImageResponse::Unknown),
         };
-        let mut usage = crate::openai_images_usage::normalize(&self.adapter.config, &parsed);
+        let mut usage = normalize(&parsed);
         let mut failure = None;
         let data = parsed["data"].as_array();
         let count = data.map_or(0, Vec::len);
@@ -143,7 +191,7 @@ impl ImagePort for OpenAiImages {
                 .filter(|s| !s.is_empty())
             {
                 Some(encoded) => vec![EncodedImage {
-                    mime_type: request.output_format().mime_type().into(),
+                    mime_type: request.output_mime().into(),
                     data_base64: encoded.into(),
                 }],
                 None => {

@@ -1,5 +1,74 @@
 // SPDX-License-Identifier: Apache-2.0
+use base64::{Engine, engine::general_purpose::STANDARD};
 use runtrell::images::*;
+
+#[test]
+fn svg_codec_is_utf8_xml_with_separate_byte_bound_and_no_pixel_bound() {
+    let xml = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"999999\" height=\"999999\"><text>図</text></svg>";
+    let mut limits = ImageLimits {
+        allowed_mime: vec!["image/svg+xml".into()],
+        max_image_bytes: 1,
+        max_pixels: 1,
+        max_width: 1,
+        max_height: 1,
+        max_svg_bytes: xml.len(),
+        ..Default::default()
+    };
+    limits.validate().unwrap();
+    assert_eq!(
+        limits
+            .decode("image/svg+xml", &STANDARD.encode(xml))
+            .unwrap(),
+        xml.as_bytes()
+    );
+    limits.max_svg_bytes -= 1;
+    assert!(
+        limits
+            .decode("image/svg+xml", &STANDARD.encode(xml))
+            .is_err()
+    );
+    limits.max_svg_bytes = 4096;
+    for invalid in [
+        b"not XML".as_slice(),
+        b"\xff",
+        b"<svg/>",
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><g></svg>",
+        b"<!DOCTYPE svg SYSTEM 'file:///ignored'><svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"/><svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    ] {
+        assert!(
+            limits
+                .decode("image/svg+xml", &STANDARD.encode(invalid))
+                .is_err()
+        );
+    }
+    assert!(limits.decode("image/svg+xml", "???").is_err());
+}
+
+#[test]
+fn closed_action_types_reject_cross_action_and_unsupported_fields() {
+    use serde_json::json;
+    assert!(
+        serde_json::from_value::<RasterGenerate>(json!({"prompt":"x","references":[]})).is_err()
+    );
+    assert!(
+        serde_json::from_value::<RasterEdit>(
+            json!({"prompt":"x","references":[],"output_format":"svg"})
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_value::<SvgGenerate>(json!({"prompt":"x","stream":false})).is_err());
+    for quality in ["auto", "low", "medium", "high"] {
+        assert!(
+            serde_json::from_value::<SvgGenerate>(json!({"prompt":"x","quality":quality})).is_ok()
+        );
+    }
+    for quality in ["xhigh", "max"] {
+        assert!(
+            serde_json::from_value::<SvgGenerate>(json!({"prompt":"x","quality":quality})).is_err()
+        );
+    }
+}
 
 #[test]
 fn image_bounds_and_base64_transport_agree() {
@@ -35,17 +104,18 @@ fn invalid_png_is_rejected_before_use() {
 
 #[test]
 fn output_options_and_opt_in_mime_are_explicit() {
-    let input: ImageRequest = serde_json::from_value(serde_json::json!({"prompt":"draw"})).unwrap();
+    let input: RasterGenerate =
+        serde_json::from_value(serde_json::json!({"prompt":"draw"})).unwrap();
     assert_eq!(input.output_format, ImageOutputFormat::Png);
     for format in ["png", "jpeg", "webp"] {
-        let input: ImageRequest = serde_json::from_value(
+        let input: RasterGenerate = serde_json::from_value(
             serde_json::json!({"prompt":"draw","output_format":format,"size":"1024x1024"}),
         )
         .unwrap();
         assert_eq!(input.output_format.mime_type(), format!("image/{format}"));
     }
     assert!(
-        serde_json::from_value::<ImageRequest>(
+        serde_json::from_value::<RasterGenerate>(
             serde_json::json!({"prompt":"draw","output_format":"gif"})
         )
         .is_err()

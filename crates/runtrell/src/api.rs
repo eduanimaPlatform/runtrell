@@ -108,6 +108,9 @@ pub struct Usage {
     pub quantities: BTreeMap<String, u64>,
     pub micro_usd: Option<u64>,
     pub model: String,
+    /// Separate SVG author bill. Image counters and `micro_usd` above exclude it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svg_usage: Option<Box<SvgUsage>>,
     /// Safe, fixed reason code (uppercase ASCII, no payload text) saying why a counter
     /// or the cost is unknown for a response that otherwise arrived. Adapters set it
     /// only when they deliberately keep a value unknown; it never turns unknown into 0.
@@ -141,9 +144,16 @@ impl Usage {
         Ok(())
     }
     pub fn amount(&self) -> Result<Amount> {
+        let image_cost = self.micro_usd.ok_or(Error::UsageUnknown)?;
+        let svg_cost = match &self.svg_usage {
+            None => 0,
+            Some(svg) => svg.cost()?,
+        };
         Ok(Amount::new(
             self.total()?,
-            self.micro_usd.ok_or(Error::UsageUnknown)?,
+            image_cost
+                .checked_add(svg_cost)
+                .ok_or(Error::UsageUnknown)?,
         ))
     }
     /// Input + output, counting subsets only once; independent of measured cost.
@@ -152,7 +162,110 @@ impl Usage {
         let i = self.input.ok_or(Error::UsageUnknown)?;
         let o = self.output.ok_or(Error::UsageUnknown)?;
         self.validate_subsets(i, o)?;
-        i.checked_add(o).ok_or(Error::UsageUnknown)
+        i.checked_add(o)
+            .and_then(|t| {
+                t.checked_add(
+                    self.svg_usage
+                        .as_ref()
+                        .map_or(Ok(0), |svg| svg.token_total())
+                        .ok()?,
+                )
+            })
+            .ok_or(Error::UsageUnknown)
+    }
+}
+
+/// Separately reported author counters, with the entire original JSON retained even
+/// when malformed or unpriced. `total` and `reasoning` are never additional charges.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SvgUsage {
+    pub model: Option<String>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub reasoning: Option<u64>,
+    pub total: Option<u64>,
+    pub reported: Value,
+    pub micro_usd: Option<u64>,
+    pub price: Option<SvgAuthorPrice>,
+    pub unknown_reason: Option<UnknownReason>,
+}
+impl SvgUsage {
+    pub fn cost(&self) -> Result<u64> {
+        let cost = self.price.as_ref().ok_or(Error::UsageUnknown)?.cost(self)?;
+        if self.micro_usd != Some(cost) {
+            return Err(Error::UsageUnknown);
+        }
+        Ok(cost)
+    }
+    pub(crate) fn refines(&self, old: &Self) -> bool {
+        self.reported == old.reported
+            && self.model == old.model
+            && self.input == old.input
+            && self.output == old.output
+            && self.reasoning == old.reasoning
+            && self.total == old.total
+            && old.micro_usd.is_none_or(|c| self.micro_usd == Some(c))
+            && old
+                .price
+                .as_ref()
+                .is_none_or(|p| self.price.as_ref() == Some(p))
+    }
+    pub fn token_total(&self) -> Result<u64> {
+        // Recovery may add a verified rate, but cannot reinterpret malformed or
+        // missing original counters as measured values.
+        if !self.reported.is_object()
+            || self.model.as_deref().is_none_or(str::is_empty)
+            || self.reported["model"].as_str() != self.model.as_deref()
+            || [
+                ("input_tokens", self.input),
+                ("output_tokens", self.output),
+                ("reasoning_tokens", self.reasoning),
+                ("total_tokens", self.total),
+            ]
+            .into_iter()
+            .any(|(key, normalized)| match self.reported.get(key) {
+                None | Some(Value::Null) => normalized.is_some(),
+                Some(value) => value.as_u64().is_none() || value.as_u64() != normalized,
+            })
+        {
+            return Err(Error::UsageUnknown);
+        }
+        let total = self
+            .input
+            .ok_or(Error::UsageUnknown)?
+            .checked_add(self.output.ok_or(Error::UsageUnknown)?)
+            .ok_or(Error::UsageUnknown)?;
+        if self.total.is_some_and(|t| t != total) {
+            return Err(Error::UsageUnknown);
+        }
+        Ok(total)
+    }
+}
+/// Host catalog assertion: rates verified for this exact author model and tier,
+/// in micro-USD per million tokens. Pricing requires verified inclusion semantics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SvgAuthorPrice {
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub reasoning_in_output: bool,
+}
+impl SvgAuthorPrice {
+    pub fn cost(&self, usage: &SvgUsage) -> Result<u64> {
+        if usage.model.as_deref() != Some(self.model.as_str()) || !self.reasoning_in_output {
+            return Err(Error::UsageUnknown);
+        }
+        usage.token_total()?;
+        let input = usage.input.ok_or(Error::UsageUnknown)?;
+        let output = usage.output.ok_or(Error::UsageUnknown)?;
+        if usage.reasoning.is_some_and(|r| r > output) {
+            return Err(Error::UsageUnknown);
+        }
+        let n = u128::from(input) * u128::from(self.input);
+        let n = n
+            .checked_add(u128::from(output) * u128::from(self.output))
+            .ok_or(Error::UsageUnknown)?;
+        u64::try_from(n.div_ceil(1_000_000)).map_err(|_| Error::UsageUnknown)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

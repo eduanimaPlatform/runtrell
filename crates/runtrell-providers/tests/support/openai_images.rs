@@ -3,6 +3,21 @@
 use crate::still_images::encoded_output;
 
 #[tokio::test]
+async fn img26_optional_raster_fields_reach_the_wire() {
+    let (url, http) = server(200, "", image_response()).await;
+    let mut cfg = image_config(url);
+    cfg.capabilities.limits.model = "gpt-image-2.6-sunburst".into();
+    cfg.capabilities.limits.price.as_mut().unwrap().model = cfg.capabilities.limits.model.clone();
+    let (tool, ctx) = fixture(cfg, ImageAction::Generate).await;
+    let input = json!({"prompt":"draw","quality":"low","complexity":"medium","background":"transparent"});
+    assert!(matches!(tool.invoke(&ctx, input).await.unwrap(), ExternalResult::Applied { .. }));
+    let sent = http.await.unwrap();
+    assert_eq!(sent.len(), 1);
+    let wire: Value = serde_json::from_str(sent[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(wire, json!({"model":"gpt-image-2.6-sunburst","prompt":"draw","n":1,"output_format":"png","quality":"low","complexity":"medium","background":"transparent"}));
+}
+
+#[tokio::test]
 async fn openai_generated_artifact_is_reinput_to_the_model_http_adapter() {
     let (endpoint, generation) = server(200, "", image_response()).await;
     let (tool, ctx) = fixture(image_config(endpoint), ImageAction::Generate).await;

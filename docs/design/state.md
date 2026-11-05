@@ -10,7 +10,7 @@
 | Operation | Intent → Sent → Applied / Accepted / Failed / Unknown | 安定ID、要求digest、request本体、descriptor版/account、予約、attempt、external ID、owner世代、result。Acceptedは反映済みではない |
 | Attempt | prepared → sent → settled / unknown / proven-not-sent | attempt番号、送信時刻、scope/retention、元request、予約ID。retryは元Run期限/口座を継承。結果不明は無条件retryしない |
 | Reservation | reserved → unknown / settled | 全account祖先、予約tokens/cost、実績区分、価格snapshot。unknownは保持し新しい課金/確定を止める |
-| Usage | unmeasured → measured | input/output/cached/reasoning、model、整数費用。cached/reasoningは内数、二重加算しない。重複精算は同値のみ許可 |
+| Usage | unmeasured → measured | input/output/cached/reasoning、model、整数費用。cached/reasoningは内数、二重加算しない。SVG authorは別のsvg_usageへ原JSON・model・counter・適用単価を保存し、不明な費用は予約を保持。重複精算は同値のみ許可 |
 | Checkpoint | schema検査 → revision CAS commit | 内部判断状態、公開履歴、operation index、目的/制約/根拠/未完了操作。古い圧縮結果は保存しない |
 | Cancellation | none → requested | 要求者/理由/時刻。新規業務I/Oを禁止、既存照合は継続 |
 | Stop | not_required / pending → confirmed / unknown | 外部job・実体世代・停止証拠。future dropでconfirmedにしない |

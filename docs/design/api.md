@@ -324,6 +324,51 @@ pub struct ModelReply {
     pub metadata: Value,
 }
 
+pub struct Usage {
+    /// Total input tokens, including cached and image input.
+    pub input: Option<u64>,
+    /// Total output tokens, including reasoning and image output.
+    pub output: Option<u64>,
+    /// All cached input tokens, image tokens included. `None` is unknown, never 0.
+    pub cached: Option<u64>,
+    pub reasoning: Option<u64>,
+    /// All image input tokens, cached ones included.
+    pub image_input: Option<u64>,
+    pub image_output: Option<u64>,
+    /// Input tokens that are both cached and image tokens (the intersection).
+    pub cached_image_input: Option<u64>,
+    pub quantities: BTreeMap<String, u64>,
+    pub micro_usd: Option<u64>,
+    pub model: String,
+    /// Separate SVG author bill. Image counters and `micro_usd` above exclude it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svg_usage: Option<Box<SvgUsage>>,
+    /// Safe, fixed reason code (uppercase ASCII, no payload text) saying why a counter
+    /// or the cost is unknown for a response that otherwise arrived. Adapters set it
+    /// only when they deliberately keep a value unknown; it never turns unknown into 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_reason: Option<UnknownReason>,
+}
+
+pub struct SvgUsage {
+    pub model: Option<String>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub reasoning: Option<u64>,
+    pub total: Option<u64>,
+    pub reported: Value,
+    pub micro_usd: Option<u64>,
+    pub price: Option<SvgAuthorPrice>,
+    pub unknown_reason: Option<UnknownReason>,
+}
+
+pub struct SvgAuthorPrice {
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub reasoning_in_output: bool,
+}
+
 pub struct ValidationReceipt {
     pub hash: String,
     pub basis_revision: u64,

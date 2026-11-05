@@ -44,7 +44,14 @@ provides the named quantity upper bounds pinned in the catalog and forwarded to
 the dispatch reservation by the driver.
 
 Usage.total validates measured subsets and returns input + output without requiring
-a price or measured cost. Subsets are never added again to the total. Price.estimate
+a price or measured cost. For SVG, it additionally counts the independent author's
+input + output once; the author's reported total/reasoning are not extra counters.
+Image fields and `Usage.micro_usd` exclude that author component. `Usage.amount`
+requires both component costs, then adds them with checked arithmetic. Image and
+author model bills each round once to micro-USD; no image category is rounded
+separately. Author rates and verified reasoning inclusion are pinned in
+`SvgUsage.price`; unknown or malformed author evidence holds the whole reservation.
+Subsets are never added again to the total. Price.estimate
 quotes an input upper bound plus an output allowance at the highest applicable
 input/output category rates, with the same single ceiling and overflow checks as
 actual billing. ModelLimits.estimate also validates the model/price identity and
@@ -139,7 +146,7 @@ out. The request carries a fixed `basis` string, the stored usage refined by a d
 and the price basis. The store accepts it only if the operation is Applied/Failed, unsettled and
 unknown, the new usage only fills counters that were `None` (model and quantities equal,
 `micro_usd` still `None`), `price.model` equals the usage and pinned price model, and
-`Price::cost` can compute the bill; otherwise nothing changes (`UsageUnknown` stays for the
+`Price::cost` can compute the primary bill; otherwise nothing changes (`UsageUnknown` stays for the
 operator). It then settles the original operation in one transaction: releases the reservation
 and unknown mark, charges the corrected amount to every ancestor account, replaces the saved
 result's usage, and stores `Operation.recovery` with the old usage, price basis, new usage,
@@ -149,3 +156,10 @@ record. An identical command repeat returns the original receipt without chargin
 again; a different digest, request, basis or price returns `Conflict`. A fresh key cannot
 claim an already recovered operation. `runtrell-providers` supplies the
 documented rule for OpenAI Images (`recovery_for_stored_openai_images_usage`).
+
+For a saved SVG result whose image bill is already known, owner recovery may add
+a verified author rate/cost while preserving the exact reported author JSON,
+model and counters. It cannot drop the component, reinterpret malformed fields,
+change an already known cost or settle only the image part. The owner request's
+primary `micro_usd` remains unset: recovery recomputes it and compares any
+previously known image amount before settling the combined `Usage.amount`.

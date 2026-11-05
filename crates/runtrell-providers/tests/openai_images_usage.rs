@@ -12,6 +12,251 @@ use runtrell_providers::{
 };
 use serde_json::{Value, json};
 
+#[test]
+fn img26_standard_catalog_and_reported_cache_are_not_inferred_zero() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/images26-standard.json")).unwrap();
+    assert_eq!(fixture["tier"], "standard");
+    assert_eq!(fixture["accessed"], "2026-11-05");
+    for entry in fixture["prices"].as_array().unwrap() {
+        let price: Price = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(
+            (
+                price.input,
+                price.cached,
+                price.image_input,
+                price.cached_image_input,
+                price.image_output
+            ),
+            (5_000_000, 1_250_000, 8_000_000, 2_000_000, 30_000_000)
+        );
+        let cfg = config(&price.model, Some(price.clone()));
+        let mut response = official_minimal();
+        let unknown = normalize(&cfg, &response);
+        assert_eq!(
+            (
+                unknown.cached,
+                unknown.cached_image_input,
+                unknown.micro_usd
+            ),
+            (None, None, None)
+        );
+        response["usage"]["input_tokens_details"]["cached_tokens"] = json!(12);
+        response["usage"]["input_tokens_details"]["cached_tokens_details"] =
+            json!({"image_tokens":8});
+        let reported = normalize(&cfg, &response);
+        assert_eq!(
+            (reported.cached, reported.cached_image_input),
+            (Some(12), Some(8))
+        );
+        // 6 text + 4 cached text + 32 image + 8 cached image + 50 output.
+        assert_eq!(reported.micro_usd, Some(1_807));
+    }
+}
+
+#[test]
+fn img26_svg_usage_preserves_raw_and_keeps_missing_malformed_and_unpriced_unknown() {
+    let cfg = sunburst();
+    for raw in [
+        Value::Null,
+        json!("malformed"),
+        json!({"model":12}),
+        json!({"model":"unlisted","input_tokens":"7","output_tokens":11}),
+        json!({"model":"unlisted","input_tokens":7,"output_tokens":11,"total_tokens":99}),
+        json!({"model":"unlisted","input_tokens":7,"output_tokens":11,"reasoning_tokens":3,"total_tokens":18,"extra":"verbatim"}),
+        json!({"model":"unlisted","input_tokens":7}),
+    ] {
+        let mut response = official_minimal();
+        response["svg_usage"] = raw.clone();
+        let usage = images_usage::normalize_with_svg(&cfg, &response, true);
+        let svg = usage.svg_usage.as_ref().unwrap();
+        assert_eq!(svg.reported, raw);
+        assert_eq!(svg.micro_usd, None);
+        assert!(svg.unknown_reason.is_some());
+        assert_eq!(usage.amount(), Err(Error::UsageUnknown));
+        assert_eq!(
+            (
+                usage.input,
+                usage.output,
+                usage.image_input,
+                usage.image_output
+            ),
+            (Some(50), Some(50), Some(40), Some(50))
+        );
+        let stored: Usage = serde_json::from_value(serde_json::to_value(&usage).unwrap()).unwrap();
+        assert_eq!(stored, usage);
+    }
+    let absent = images_usage::normalize_with_svg(&cfg, &official_minimal(), true);
+    assert_eq!(
+        absent.svg_usage.unwrap().unknown_reason.as_deref(),
+        Some("SVG_USAGE_ABSENT")
+    );
+    assert!(normalize(&cfg, &official_minimal()).svg_usage.is_none());
+}
+
+#[test]
+fn img26_svg_exact_author_price_is_separate_and_totals_are_not_double_counted() {
+    let mut cfg = sunburst();
+    cfg.capabilities.images.svg_author_prices = vec![runtrell::SvgAuthorPrice {
+        model: "author-v1".into(),
+        input: 2_000_000,
+        output: 8_000_000,
+        reasoning_in_output: true,
+    }];
+    let mut response = official_minimal();
+    response["svg_usage"] = json!({"model":"author-v1","input_tokens":7,"output_tokens":11,"reasoning_tokens":3,"total_tokens":18});
+    let usage = normalize(&cfg, &response);
+    assert_eq!(usage.svg_usage.as_ref().unwrap().micro_usd, Some(102));
+    assert_eq!(usage.total().unwrap(), 118); // image 100 + author 18, never +total/+reasoning.
+    assert_eq!(
+        usage.amount().unwrap().micro_usd,
+        usage.micro_usd.unwrap() + 102
+    );
+    let image_cost = cfg
+        .capabilities
+        .limits
+        .price
+        .as_ref()
+        .unwrap()
+        .cost(&usage)
+        .unwrap();
+    assert_eq!(Some(image_cost), usage.micro_usd);
+    let mut dispatch = runtrell::DispatchRequest::new(
+        "svg-test",
+        runtrell::OperationKind::Tool,
+        "svg.generate",
+        json!({}),
+        runtrell::Amount::default(),
+    );
+    dispatch.price = cfg.capabilities.limits.price.clone();
+    assert_eq!(
+        dispatch.settlement_amount(&usage).unwrap(),
+        Some(usage.amount().unwrap())
+    );
+    cfg.capabilities.images.svg_author_prices[0].reasoning_in_output = false;
+    assert_eq!(
+        normalize(&cfg, &response).amount(),
+        Err(Error::UsageUnknown)
+    );
+    cfg.capabilities.images.svg_author_prices[0].reasoning_in_output = true;
+    response["svg_usage"]["model"] = json!("author-v2");
+    let unknown = normalize(&cfg, &response);
+    assert_eq!(
+        unknown.svg_usage.as_ref().unwrap().model.as_deref(),
+        Some("author-v2")
+    );
+    assert_eq!(unknown.amount(), Err(Error::UsageUnknown));
+    response["svg_usage"]["model"] = json!("author-v1");
+    response["svg_usage"]["reasoning_tokens"] = json!(12);
+    assert_eq!(
+        normalize(&cfg, &response).amount(),
+        Err(Error::UsageUnknown)
+    );
+}
+
+#[test]
+fn img26_owner_recovery_prices_author_without_losing_known_image_cost() {
+    let mut cfg = sunburst();
+    let mut response = official_minimal();
+    response["svg_usage"] = json!({"model":"author","input_tokens":7,"output_tokens":11,"reasoning_tokens":3,"total_tokens":18});
+    let stored = normalize(&cfg, &response);
+    assert_eq!(stored.micro_usd, Some(1870));
+    assert_eq!(stored.amount(), Err(Error::UsageUnknown));
+    let op = Operation {
+        id: "svg-op".into(),
+        run: cfg.run.clone(),
+        request: runtrell::DispatchRequest::new(
+            "svg-op",
+            runtrell::OperationKind::Tool,
+            "svg.generate",
+            json!({}),
+            runtrell::Amount::new(1000, 5000),
+        ),
+        state: runtrell::OperationState::Applied,
+        result: Some(runtrell::ExternalResult::Applied {
+            physical_evidence: None,
+            output: json!({}),
+            usage: stored.clone(),
+            external_id: None,
+        }),
+        settled: false,
+        unknown_usage: true,
+        send_generation: Some(1),
+        send_count: 1,
+        replay_proof_generation: None,
+        created_at: 0,
+        finished_at: Some(1),
+        usage_observations: vec![],
+        unsettled_result: None,
+        recovery: None,
+    };
+    cfg.capabilities.images.svg_author_prices = vec![runtrell::SvgAuthorPrice {
+        model: "author".into(),
+        input: 2_000_000,
+        output: 8_000_000,
+        reasoning_in_output: true,
+    }];
+    let mut refined = normalize(&cfg, &response);
+    refined.micro_usd = None; // owner API computes and checks the primary image cost.
+    let recovery = SettlementRecovery {
+        basis: "test-verified-author-rate".into(),
+        usage: refined,
+        price: price(SUNBURST),
+    };
+    let (_, record) = op.plan_recovery(&recovery, 2).unwrap().unwrap();
+    assert_eq!(record.amount, runtrell::Amount::new(118, 1972));
+    assert_eq!(record.previous, stored);
+    let mut removed = recovery.clone();
+    removed.usage.svg_usage = None;
+    assert!(op.plan_recovery(&removed, 2).is_err());
+    let mut rewritten = recovery;
+    rewritten.usage.svg_usage.as_mut().unwrap().reported["input_tokens"] = json!(0);
+    assert!(op.plan_recovery(&rewritten, 2).is_err());
+}
+
+#[test]
+fn img26_malformed_author_cannot_become_free_or_priced_in_owner_recovery() {
+    let cfg = sunburst();
+    let mut response = official_minimal();
+    response["svg_usage"] = json!({"model":"author","input_tokens":7,"output_tokens":11,"reasoning_tokens":"bad","total_tokens":18});
+    let mut usage = normalize(&cfg, &response);
+    let svg = usage.svg_usage.as_mut().unwrap();
+    assert_eq!(svg.unknown_reason.as_deref(), Some("SVG_USAGE_MALFORMED"));
+    svg.price = Some(runtrell::SvgAuthorPrice {
+        model: "author".into(),
+        input: 2_000_000,
+        output: 8_000_000,
+        reasoning_in_output: true,
+    });
+    svg.micro_usd = Some(102);
+    svg.unknown_reason = None;
+    assert_eq!(usage.amount(), Err(Error::UsageUnknown));
+}
+
+#[test]
+fn img26_exact_2_and_25_cache_contradiction_stays_unknown() {
+    for model in images_usage::GPT_IMAGE_2_FAMILY {
+        let cfg = config(model, Some(price(model)));
+        let mut response = official_minimal();
+        response["usage"]["input_tokens_details"]["cached_tokens"] = json!(12);
+        response["usage"]["input_tokens_details"]["cached_tokens_details"] =
+            json!({"image_tokens":8});
+        let usage = normalize(&cfg, &response);
+        assert_eq!(
+            (usage.cached, usage.cached_image_input),
+            (Some(12), Some(8))
+        );
+        assert_eq!(
+            usage.micro_usd, None,
+            "discounted impossible cache on {model}"
+        );
+        assert_eq!(
+            usage.unknown_reason.as_deref(),
+            Some(images_usage::REASON_INCONSISTENT)
+        );
+    }
+}
+
 const SUNBURST: &str = "gpt-image-2.5-sunburst";
 
 /// GPT Image 2.5 Standard rates (USD per million tokens): text 5 / cached 1.25,

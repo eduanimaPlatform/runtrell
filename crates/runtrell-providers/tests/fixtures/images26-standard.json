@@ -1,0 +1,14 @@
+{
+  "endpoint": "/v1/images/generations or /v1/images/edits",
+  "tier": "standard",
+  "unit": "micro-USD per 1000000 tokens",
+  "accessed": "2026-11-05",
+  "sources": {
+    "E1": "https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst",
+    "E5": "https://developers.openai.com/api/docs/pricing"
+  },
+  "prices": [
+    {"model":"gpt-image-2.6-sunburst","input":5000000,"cached":1250000,"image_input":8000000,"cached_image_input":2000000,"output":30000000,"image_output":30000000,"reasoning":30000000},
+    {"model":"gpt-image-2.6-flare","input":5000000,"cached":1250000,"image_input":8000000,"cached_image_input":2000000,"output":30000000,"image_output":30000000,"reasoning":30000000}
+  ]
+}

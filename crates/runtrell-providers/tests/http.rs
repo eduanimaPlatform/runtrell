@@ -24,6 +24,7 @@ mod openai_image_contracts {
     const OPENAI: bool = true;
     include!("support/images.rs");
     include!("support/openai_images.rs");
+    include!("support/img26.rs");
 }
 #[cfg(feature = "gemini")]
 #[path = "support/attachment_window.rs"]

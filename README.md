@@ -155,7 +155,7 @@ selected tools and default settings, which later calls can overwrite.
 | `files.search` | `FileTool` | Workspace store, Access, search bounds |
 | `artifacts.read` | `FileTool` | Artifact store, Access, read bounds |
 | `validate` | `ValidationTool` | TargetValidator, evidence store, pinned Run |
-| `image.generate/edit` | `ImageTool` + `ToolSet::image` | ImagePort, stores, Access/grants, Policy, RunStore, Clock, reservation and limits |
+| `image.generate/edit`, `svg.generate` | `ImageTool` + `ToolSet::image` | ImagePort, stores, Access/grants, Policy, RunStore, Clock, reservation and limits |
 | Large output envelope | `StoredOutputTool`, per selected tool | Artifact store, Access, inline size, retention/time |
 | `execute` | `ExecutionTool` | Control store, Workspace/Artifact store, execution ledger/backend, Policy/Clock, executable/argument policies, enforced limits, reservation and preview size |
 

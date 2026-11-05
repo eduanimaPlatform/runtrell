@@ -49,6 +49,13 @@ pub struct ImageCapabilities {
     pub generation: bool,
     pub reference_edit: bool,
     pub mask_edit: bool,
+    #[serde(default)]
+    pub svg_generation: bool,
+    #[serde(default)]
+    pub svg_model_selection: bool,
+    /// Host-verified author-model rates; never inferred from the image model price.
+    #[serde(default)]
+    pub svg_author_prices: Vec<runtrell::SvgAuthorPrice>,
     /// Exact response model names the host declares as the same billed model as
     /// `limits.model` (provider snapshot or alias names). A response naming any other
     /// model is not priced.

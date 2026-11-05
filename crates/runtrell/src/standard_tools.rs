@@ -19,13 +19,14 @@ pub enum StandardTool {
     Execution,
     ImageGenerate,
     ImageEdit,
+    SvgGenerate,
     DocumentView,
 }
 impl StandardTool {
     pub fn requirements(self) -> &'static [&'static str] {
         match self {
             Self::DocumentView => &["StandardToolStore", "Access", "Policy", "RunStore", "Clock"],
-            Self::ImageGenerate | Self::ImageEdit => &[
+            Self::ImageGenerate | Self::ImageEdit | Self::SvgGenerate => &[
                 "ImagePort",
                 "ArtifactStore",
                 "Access",
@@ -168,10 +169,10 @@ impl<S: StandardToolStore + Clone + 'static> ToolSet<S> {
         mut self,
         tool: images::ImageTool<I, S, P, R, C>,
     ) -> Self {
-        let kind = if tool.config.action == images::ImageAction::Generate {
-            StandardTool::ImageGenerate
-        } else {
-            StandardTool::ImageEdit
+        let kind = match tool.config.action {
+            images::ImageAction::Generate => StandardTool::ImageGenerate,
+            images::ImageAction::SvgGenerate => StandardTool::SvgGenerate,
+            _ => StandardTool::ImageEdit,
         };
         self.supplied.insert(kind, RegisteredTool::new(tool));
         self
@@ -242,7 +243,12 @@ impl<S: StandardToolStore + Clone + 'static> ToolSet<S> {
                 continue;
             };
             if let Some(stored) = settings.stored_output {
-                if matches!(kind, StandardTool::ImageGenerate | StandardTool::ImageEdit) {
+                if matches!(
+                    kind,
+                    StandardTool::ImageGenerate
+                        | StandardTool::ImageEdit
+                        | StandardTool::SvgGenerate
+                ) {
                     errors.push(ConfigDiagnostic {
                         code: "SETTING_UNSUPPORTED".into(),
                         location: format!("{kind:?}.stored_output"),

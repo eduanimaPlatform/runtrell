@@ -555,7 +555,7 @@
     "id": "RUN-05",
     "requirement": "MUST / モデル接続をadapterとして差し替えられる。対応能力、context上限、出力上限、利用量、rate limit、timeout、stream切断を扱う",
     "classification": "core",
-    "scope": "ModelPort・Usage・画像参照の認可/解決/保存/復旧・制限と結果不明の契約は共通。画像入力/生成/参照編集/mask編集は別能力。通信・usage変換はruntrell-providersの任意公開feature、画像toolはToolSetで選択する。資格情報・endpoint・modelごとの能力実値・価格はhostが供給する。"
+    "scope": "ModelPort・Usage・画像参照の認可/解決/保存/復旧・制限と結果不明の契約は共通。raster生成/raster参照編集/SVG生成は閉じた別request型と能力。SVGはUTF-8 XML bytesと独立byte上限、author usage・単価は画像費目から分離し、不明な費用は予約を保持する。SVG edit/入力・未知field・未対応組合せは送信前拒否。通信・usage変換はruntrell-providersの任意公開feature、画像toolはToolSetで選択する。資格情報・endpoint・modelごとの能力実値・検証済み価格はhostが供給する。"
   },
   {
     "id": "RUN-06",
