@@ -59,6 +59,21 @@ impl<
     F: Finalizer + 'static,
 > Runtime<S, M, T, P, C, V, F>
 {
+    fn checked_repair_policy(&self, run: &RunRecord) -> Result<RepairPolicy> {
+        let policy = self.validator.repair_policy();
+        if let Some(cp) = &run.checkpoint
+            && cp
+                .payload
+                .as_object()
+                .is_some_and(|payload| !payload.is_empty())
+            && cp.payload["repair_policy"]
+                != serde_json::to_value(&policy).map_err(|_| Error::Storage)?
+        {
+            return Err(Error::Unsupported("saved configuration unavailable".into()));
+        }
+        Ok(policy)
+    }
+
     async fn persist_result(
         &self,
         c: &Claim,
@@ -459,6 +474,7 @@ impl<
         }
         let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
+        let repair_policy = self.checked_repair_policy(&r)?;
         bx(|| self.store.mark_sent(c, &op.id, self.clock.now())).await?;
         let deadline = match (
             r.spec.deadline,
@@ -470,8 +486,7 @@ impl<
             (a, b) => a.or(b),
         };
         let repair_deadline = repair_started(&r).and_then(|started| {
-            self.validator
-                .repair_policy()
+            repair_policy
                 .max_elapsed
                 .map(|elapsed| started.saturating_add(elapsed))
         });
@@ -507,6 +522,8 @@ impl<
         payload["model"] = serde_json::to_value(self.model.limits()).map_err(|_| Error::Storage)?;
         payload["compaction_model"] =
             serde_json::to_value(self.model.compaction_limits()).map_err(|_| Error::Storage)?;
+        payload["repair_policy"] =
+            serde_json::to_value(self.checked_repair_policy(&r)?).map_err(|_| Error::Storage)?;
         bx(|| {
             self.store.checkpoint(
                 c,
@@ -751,6 +768,7 @@ impl<
         {
             return Err(Error::PermissionDenied);
         }
+        self.checked_repair_policy(&r)?;
         if let Some(repair) = r.checkpoint.as_ref().map(|cp| &cp.payload["repair"])
             && !repair.is_null()
         {
@@ -813,8 +831,7 @@ impl<
             let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
             if let Some(started) = repair_started(&current)
                 && self
-                    .validator
-                    .repair_policy()
+                    .checked_repair_policy(&current)?
                     .max_elapsed
                     .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
             {
@@ -919,7 +936,7 @@ impl<
                 .unwrap_or(Value::Null);
             let count = previous["count"].as_u64().unwrap_or(0);
             let started = repair_started(&current).unwrap_or(self.clock.now());
-            let policy = self.validator.repair_policy();
+            let policy = self.checked_repair_policy(&current)?;
             let mut progress = previous.clone();
             let diagnostics =
                 serde_json::to_value(&receipt.diagnostics).map_err(|_| Error::Storage)?;
@@ -1073,9 +1090,9 @@ impl<
                 reserve,
             );
             d.price = self.model.limits().price;
+            let repair_policy = self.checked_repair_policy(&current)?;
             let repair_remaining = repair_started(&current).and_then(|started| {
-                self.validator
-                    .repair_policy()
+                repair_policy
                     .max_elapsed
                     .map(|max| started.saturating_add(max).saturating_sub(self.clock.now()))
             });
@@ -1259,7 +1276,7 @@ impl<
         current: &RunRecord,
         diagnostic: Value,
     ) -> Result<Checkpoint> {
-        let policy = self.validator.repair_policy();
+        let policy = self.checked_repair_policy(current)?;
         let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
         cp.payload["last_tool_validation"] = diagnostic.clone();
         let diagnostics = diagnostic
@@ -1601,7 +1618,9 @@ fn record_repair_progress(
     state["no_progress"]["visits"][&fingerprint] = occurrences.into();
     state["no_progress"]["fingerprint"] = fingerprint.into();
     state["no_progress"]["occurrences"] = occurrences.into();
-    occurrences >= policy.max_no_progress.get()
+    policy
+        .max_no_progress
+        .is_some_and(|max| occurrences >= max.get())
 }
 fn no_progress_reason(diagnostics: &Value) -> String {
     // Never copy candidate, paths, free-text causes or hints into the terminal reason.

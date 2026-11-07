@@ -243,8 +243,7 @@ pub async fn no_progress_contract<S: ControlStore>(store: Arc<S>) {
                         4
                     } else {
                         3
-                    })
-                    .unwrap(),
+                    }),
                     ..RepairPolicy::default()
                 },
             };
@@ -291,6 +290,94 @@ pub async fn no_progress_contract<S: ControlStore>(store: Arc<S>) {
         }
         assert_eq!(model.requests.lock().unwrap().len(), replies.len());
         assert!(store.account(&account).await.unwrap().used.tokens < 10000);
+    }
+}
+
+/// Optional no-progress stop does not interrupt repeated or cyclic validation
+/// failures, even when a new worker reopens every checkpoint.
+pub async fn no_progress_disabled_contract<S: ControlStore>(store: Arc<S>) {
+    use runtrell::assembly::ValidationChain;
+    for mode in ["same", "cycle", "raw"] {
+        let account = store
+            .create_account("t", Amount::new(10000, 10000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new(
+                "t",
+                &format!("no-progress-disabled-{mode}"),
+                account.clone(),
+                "repair",
+            ))
+            .await
+            .unwrap();
+        let bad = if mode == "cycle" {
+            vec![0, -1, 0, -1, 0]
+        } else {
+            vec![0, 0, 0, 0, 0]
+        };
+        let mut replies: Vec<_> = bad
+            .iter()
+            .map(|answer| {
+                if mode == "raw" {
+                    ModelReply {
+                        text: "{".into(),
+                        ..FakeModel::decision(Value::Null)
+                    }
+                } else {
+                    FakeModel::decision(json!({"answer":answer}))
+                }
+            })
+            .collect();
+        replies.push(FakeModel::decision(json!({"answer":1})));
+        let model = FakeModel::scripted(replies);
+        for turn in 0..=bad.len() {
+            let now = turn as u64 * 101;
+            let claim = store.claim(&run, "worker", now, 100).await.unwrap();
+            let clock = TestClock::default();
+            clock.set(now);
+            let rt = Runtime {
+                store: store.clone(),
+                model: model.clone(),
+                tools: Vec::<BusinessTool>::new(),
+                policy: FakePolicy::default(),
+                clock,
+                validator: Arc::new(ValidationChain {
+                    validators: vec![],
+                    schema: json!({"properties":{"answer":{"minimum":1}}}),
+                    repair: RepairPolicy {
+                        max_no_progress: None,
+                        ..RepairPolicy::default()
+                    },
+                }),
+                finalizer: Arc::new(DecisionFinalizer),
+            };
+            let result = rt.drive(&claim).await.unwrap();
+            if turn < bad.len() {
+                assert_eq!(
+                    result.state,
+                    RunState::Waiting("validation repair".into()),
+                    "{mode}/{turn}"
+                );
+                assert_eq!(
+                    result.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+                    if mode == "cycle" {
+                        turn / 2 + 1
+                    } else {
+                        turn + 1
+                    }
+                );
+            } else {
+                assert_eq!(
+                    result.state,
+                    RunState::Terminal(Terminal::Succeeded),
+                    "{mode}"
+                );
+            }
+        }
+        assert_eq!(model.requests.lock().unwrap().len(), bad.len() + 1);
+        let account = store.account(&account).await.unwrap();
+        assert!(account.used.tokens > 0 && account.used.tokens < 10000);
     }
 }
 

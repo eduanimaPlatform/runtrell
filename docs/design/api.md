@@ -89,11 +89,11 @@ JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postg
 
 最終出力の修正可否は、hostのValidationReceipt.repairableと全blocking診断の明示分類を両方満たす場合にだけ許可する。Diagnostic.repairはDiagnosticRepair::{Agent,Host,Operator,Unknown}の単一判定であり、修復担当を表す。agent_can_write()とrepairable()はAgentの場合だけtrueとなる。hostがagentCanWrite等へ投影するときもこのメソッドを使い、code・パスや別の既定値から再判定しない。DataStoreのTargetValidatorは業務codeにも同じ分類を宣言できる。ValidationChain.repairable_codesは削除し、schema合格後の子validatorのreceiptと診断を保守的に統合する。driverの直接Validator経路でもHost/Operator/Unknownをreceipt flagだけで昇格させない。info/warning以外の未知severityは修復不能とする。candidateのJSON_SYNTAX／schema診断はAgentと明示する。json_artifact_diagnosticsはbytes/hashを照合して観測を設定するが、保存先の書込み権限は判断せずUnknownを返す。hostが実際の権限・修復方法を確認して分類する。host retry／operator actionの実行はhostの責務であり、RuntrellはAgentへ誤配送しない。
 
-修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: NonZeroU64の既定値3で、同じ失敗fingerprintが3回出現するとVALIDATION_NO_PROGRESSで失敗終了する。A→B→A→B→AでもAの3回目で停止する。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
+修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: Option<NonZeroU64>の既定Some(3)で、同じ失敗fingerprintが3回出現するとVALIDATION_NO_PROGRESSで失敗終了する。A→B→A→B→AでもAの3回目で停止する。用途ごとにNoneを指定すると回数判定を無効化でき、Some(N)で別上限を設定できる。Noneでも通常の口座予約・精算、Run期限、取消、認可、所有権の検査は常時適用される。無制限呼出しを許可する設定ではない。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
 
 進展の観測はDiagnostic.observation: Option<ArtifactObservation>でhostが渡す。artifactは安定した対象識別子、versionはArtifactVersion::ContentDigest（検査したbytesのdigest）またはRevision（内容を表すhost管理の版）とする。内容が同じ書込みでも増える保存世代・Runのcheckpoint revisionを内容版として使わず、その場合はcontent digestを使う。Runtrellはパスを推測せず、ファイルを独自に読み直さず、品質改善を推定しない。観測がある診断は対象・内容・規則・担当の変化を進展として扱い、completion envelopeや文面だけの変化は進展としない。観測のない診断はcandidateを含めて照合するため、混合receiptのcandidate側の修正も検出できる。対象の内容が変われば最終envelopeが同じでも別fingerprintとなる。hostは診断と同じ検査時点の正しい観測を渡し、stale digest等はConflictとして扱う。
 
-fingerprintはrun・修復role（validation/tool）・validator名/版・config・basisへ束縛する。code/file/path/schema_path/artifact/field/rule/repair/observationと、必要なcandidateを診断ごとにcanonical化し、集合を整列・重複除去する。info/warning、cause/hint、position/spanは進展判定から除外する。正常JSONはキー順・表記空白を無視し、array順と文字列値は保持する。不正JSONのraw文字列は連続空白を1空白へ正規化する。toolはtool名と入力をcandidateへ含める。repair.no_progress／tool_repair.no_progressへfingerprint・occurrences・visits（fingerprint別出現数）を保存し、runtime・claim再作成、process再起動、context compactionで失わない。visitsは異なる失敗の数に比例して増えるため、通常のhost予算・期限・任意修正上限とcheckpoint保存制約を維持する。旧consecutive形式の読替えは追加しない。
+RepairPolicy全体をcheckpointへ固定し、再開時に現行のhost policyが保存値と異なれば外部呼出し前に拒否する。旧checkpointの読替えは追加しない。fingerprintはrun・修復role（validation/tool）・validator名/版・config・basisへ束縛する。code/file/path/schema_path/artifact/field/rule/repair/observationと、必要なcandidateを診断ごとにcanonical化し、集合を整列・重複除去する。info/warning、cause/hint、position/spanは進展判定から除外する。正常JSONはキー順・表記空白を無視し、array順と文字列値は保持する。不正JSONのraw文字列は連続空白を1空白へ正規化する。toolはtool名と入力をcandidateへ含める。repair.no_progress／tool_repair.no_progressへfingerprint・occurrences・visits（fingerprint別出現数）を保存し、runtime・claim再作成、process再起動、context compactionで失わない。visitsは異なる失敗の数に比例して増えるため、通常のhost予算・期限・任意修正上限とcheckpoint保存制約を維持する。旧consecutive形式の読替えは追加しない。
 
 終了理由は最大4個の64文字以内の大文字ASCII codeだけを付け、本文・パス・hintを流出させない。直近の完全な診断はlast_validation／last_tool_validationに残す。新しい公開fieldは必須であり、旧形式fallbackはない。無進展停止は費用・停滞を抑える制御であり、診断欠落やowner不備そのものの修正完了を意味しない。反復時はモデル能力よりhost/tool/schema/validatorと検証対象の配線を優先調査し、原因修正後に同じ最小再現で成功を確認する。
 
@@ -345,7 +345,7 @@ pub struct Usage {
     /// Separate SVG author bill. Image counters and `micro_usd` above exclude it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svg_usage: Option<Box<SvgUsage>>,
-    /// Informational primary model price components; never used for settlement.
+    /// Informational primary model price components; never used by `amount` or settlement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_evidence: Option<Box<PriceEvidence>>,
     /// Safe, fixed reason code (uppercase ASCII, no payload text) saying why a counter
@@ -556,14 +556,24 @@ pub struct RepairPolicy {
     /// Maximum repair time in milliseconds from the first repair.
     pub max_elapsed: Option<u64>,
     /// Stop on this many occurrences of the same observed failure, including cycles.
-    pub max_no_progress: std::num::NonZeroU64,
+    /// `None` disables this stop; budget, deadline and cancellation remain active.
+    #[serde(deserialize_with = "deserialize_no_progress_limit")]
+    pub max_no_progress: Option<std::num::NonZeroU64>,
+}
+fn deserialize_no_progress_limit<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<std::num::NonZeroU64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<std::num::NonZeroU64>::deserialize(deserializer)
 }
 impl Default for RepairPolicy {
     fn default() -> Self {
         Self {
             max_repairs: None,
             max_elapsed: None,
-            max_no_progress: std::num::NonZeroU64::new(3).unwrap(),
+            max_no_progress: std::num::NonZeroU64::new(3),
         }
     }
 }

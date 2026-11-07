@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — configurable no-progress stop (breaking)
+
+- `RepairPolicy.max_no_progress` is now `Option<NonZeroU64>`: the default is
+  `Some(3)`, an explicit `None` disables the repeated-failure count, and
+  `Some(N)` sets another threshold. This applies to output validation and tool
+  input/execution repair. Rust callers that construct the field must use the
+  option type; serialized policies must explicitly include the field.
+- The full repair policy is pinned in Run checkpoints. A resumed runtime with a
+  different policy is refused before further model or tool work. Previously
+  saved checkpoints without the field are not reopened; no migration is provided.
+  Budget, deadline, cancellation and authorization gates remain in effect.
+
 ## Unreleased — partial price evidence (breaking)
 
 - Add `Price::cost_breakdown` and optional `Usage.price_evidence` with a pinned

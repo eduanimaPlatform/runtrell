@@ -363,15 +363,26 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         "elapsed",
         "mixed",
         "budget",
+        "budget_disabled",
         "input_limit",
         "no_progress",
         "no_progress_schema",
         "no_progress_cycle",
+        "no_progress_disabled",
+        "no_progress_disabled_schema",
+        "no_progress_disabled_nonobject",
     ] {
         let account = store
             .create_account(
                 "t",
-                Amount::new(if mode == "budget" { 21 } else { 1000 }, 1000),
+                Amount::new(
+                    if matches!(mode, "budget" | "budget_disabled") {
+                        21
+                    } else {
+                        1000
+                    },
+                    1000,
+                ),
                 None,
             )
             .await
@@ -401,7 +412,10 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             .unwrap();
         let bad = json!({"expected_revision":1,"edits":[{"path":"a","expected_digest":file.hash,"old_text":"alpha","new_text":"gamma"}]});
         let first = match mode {
-            "mixed" | "no_progress_schema" => json!({"expected_revision":"bad","edits":[]}),
+            "mixed" | "no_progress_schema" | "no_progress_disabled_schema" => {
+                json!({"expected_revision":"bad","edits":[]})
+            }
+            "no_progress_disabled_nonobject" => Value::Null,
             _ => bad.clone(),
         };
         let call = |id: &str, arguments| {
@@ -411,7 +425,10 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 arguments,
             }])
         };
-        let repeated = if mode == "no_progress_schema" {
+        let repeated = if matches!(
+            mode,
+            "no_progress_schema" | "no_progress_disabled_schema" | "no_progress_disabled_nonobject"
+        ) {
             first.clone()
         } else {
             bad.clone()
@@ -433,6 +450,12 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 call("a3", bad),
             ];
         }
+        if mode.starts_with("no_progress_disabled") {
+            replies = (0..5)
+                .map(|n| call(&format!("bad-{n}"), repeated.clone()))
+                .collect();
+            replies.push(FakeModel::decision(json!({"decision":"keep"})));
+        }
         let model = FakeModel::scripted(replies);
         let validator = runtrell::assembly::ValidationChain {
             validators: vec![],
@@ -440,7 +463,13 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             repair: RepairPolicy {
                 max_repairs: matches!(mode, "count" | "mixed").then_some(1),
                 max_elapsed: (mode == "elapsed").then_some(0),
-                ..RepairPolicy::default()
+                max_no_progress: if mode.starts_with("no_progress_disabled")
+                    || mode == "budget_disabled"
+                {
+                    None
+                } else {
+                    RepairPolicy::default().max_no_progress
+                },
             },
         };
         let rt = Runtime {
@@ -458,10 +487,15 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         };
         let done = rt.drive(&claim).await.unwrap();
         match mode {
+            "no_progress_disabled"
+            | "no_progress_disabled_schema"
+            | "no_progress_disabled_nonobject" => {
+                assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded))
+            }
             "no_progress" | "no_progress_schema" | "no_progress_cycle" => assert!(
                 matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_NO_PROGRESS"))
             ),
-            "budget" => assert!(matches!(
+            "budget" | "budget_disabled" => assert!(matches!(
                 done.state,
                 RunState::Terminal(Terminal::BudgetReached(_))
             )),
@@ -474,7 +508,9 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         }
         assert_eq!(
             model.requests.lock().unwrap().len(),
-            if mode == "no_progress_cycle" {
+            if mode.starts_with("no_progress_disabled") {
+                6
+            } else if mode == "no_progress_cycle" {
                 5
             } else if mode.starts_with("no_progress") {
                 3
@@ -491,11 +527,13 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             done.checkpoint.unwrap().payload["tool_repair"]["count"]
                 .as_u64()
                 .unwrap_or(0),
-            if mode == "no_progress_cycle" {
+            if mode.starts_with("no_progress_disabled") {
+                5
+            } else if mode == "no_progress_cycle" {
                 4
             } else if mode.starts_with("no_progress") {
                 2
-            } else if matches!(mode, "count" | "mixed" | "budget") {
+            } else if matches!(mode, "count" | "mixed" | "budget" | "budget_disabled") {
                 1
             } else {
                 0

@@ -36,6 +36,9 @@ same Run checkpoint and survive resume. See [driver contracts](docs/design/api.m
 Schema failures return JSON Pointer, cause and hint diagnostics for repair.
 Host validators classify custom failures with `ValidationReceipt.repairable`.
 Repair counts have no default limit; `RepairPolicy` supplies optional host limits.
+The no-progress limit defaults to three occurrences of the same failure. Hosts
+can set `max_no_progress` to `None` to disable that count or `Some(N)` to use
+another threshold. Budget, deadline, cancellation and authorization still apply.
 Storage, authorization and evidence failures remain separate errors.
 
 ## Time units

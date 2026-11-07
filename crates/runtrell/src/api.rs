@@ -1343,14 +1343,24 @@ pub struct RepairPolicy {
     /// Maximum repair time in milliseconds from the first repair.
     pub max_elapsed: Option<u64>,
     /// Stop on this many occurrences of the same observed failure, including cycles.
-    pub max_no_progress: std::num::NonZeroU64,
+    /// `None` disables this stop; budget, deadline and cancellation remain active.
+    #[serde(deserialize_with = "deserialize_no_progress_limit")]
+    pub max_no_progress: Option<std::num::NonZeroU64>,
+}
+fn deserialize_no_progress_limit<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<std::num::NonZeroU64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<std::num::NonZeroU64>::deserialize(deserializer)
 }
 impl Default for RepairPolicy {
     fn default() -> Self {
         Self {
             max_repairs: None,
             max_elapsed: None,
-            max_no_progress: std::num::NonZeroU64::new(3).unwrap(),
+            max_no_progress: std::num::NonZeroU64::new(3),
         }
     }
 }

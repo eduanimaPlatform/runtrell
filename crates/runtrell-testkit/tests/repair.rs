@@ -2,13 +2,37 @@
 use runtrell::{assembly::*, memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 fn chain() -> ValidationChain {
     ValidationChain {
         validators: vec![],
         schema: json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"integer","minimum":1}}}),
         repair: RepairPolicy::default(),
     }
+}
+#[test]
+fn no_progress_policy_requires_an_explicit_choice() {
+    assert_eq!(
+        serde_json::to_value(RepairPolicy::default()).unwrap()["max_no_progress"],
+        3
+    );
+    let disabled: RepairPolicy = serde_json::from_value(json!({
+        "max_repairs":null,"max_elapsed":null,"max_no_progress":null
+    }))
+    .unwrap();
+    assert!(disabled.max_no_progress.is_none());
+    assert!(
+        serde_json::from_value::<RepairPolicy>(json!({
+            "max_repairs":null,"max_elapsed":null,"max_no_progress":0
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<RepairPolicy>(json!({
+            "max_repairs":null,"max_elapsed":null
+        }))
+        .is_err()
+    );
 }
 async fn setup(budget: u64, deadline: Option<u64>) -> (Arc<MemoryStore>, Claim, String) {
     let store = Arc::new(MemoryStore::default());
@@ -52,6 +76,101 @@ fn runtime_with(
         validator: std::sync::Arc::new(validator),
         finalizer: std::sync::Arc::new(DecisionFinalizer),
     }
+}
+#[test]
+fn changed_repair_policy_is_rejected_before_resume_dispatch() {
+    block_on(async {
+        let (store, claim, _) = setup(1000, None).await;
+        let model = FakeModel::scripted(vec![
+            FakeModel::decision(json!({"answer":0})),
+            FakeModel::decision(json!({"answer":0})),
+        ]);
+        let first = runtime_with(store.clone(), model.clone(), chain());
+        assert_eq!(
+            first.drive(&claim).await.unwrap().state,
+            RunState::Waiting("validation repair".into())
+        );
+        drop(first);
+        let claim = store.claim(&claim.run, "second", 101, 100).await.unwrap();
+        let mut changed = chain();
+        changed.repair.max_no_progress = std::num::NonZeroU64::new(4);
+        let second = runtime_with(store, model.clone(), changed);
+        second.clock.set(101);
+        let refused = second.drive(&claim).await.unwrap();
+        assert!(matches!(
+            refused.state,
+            RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("saved configuration")
+        ));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+    });
+}
+#[test]
+fn tool_failure_cannot_replace_policy_pin_mid_drive() {
+    struct MutableValidator {
+        chain: ValidationChain,
+        policy: Arc<Mutex<RepairPolicy>>,
+    }
+    impl Validator for MutableValidator {
+        fn repair_policy(&self) -> RepairPolicy {
+            self.policy.lock().unwrap().clone()
+        }
+        fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt> {
+            self.chain.validate(run, candidate)
+        }
+    }
+    struct PolicyChangingTool(Arc<Mutex<RepairPolicy>>);
+    impl Tool for PolicyChangingTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            BusinessTool::new("search").descriptor()
+        }
+        async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
+            self.0.lock().unwrap().max_no_progress = None;
+            Ok(ExternalResult::Failed {
+                physical_evidence: None,
+                code: "TOOL_FAILURE".into(),
+                usage: Usage::measured(0, 0, 0),
+                retry_after: None,
+                repair_hint: Some("repair".into()),
+                provider_diagnostic: None,
+            })
+        }
+        async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+            Ok(Lookup::Unknown)
+        }
+    }
+    block_on(async {
+        let (store, claim, _) = setup(1000, None).await;
+        let policy = Arc::new(Mutex::new(RepairPolicy::default()));
+        let model = FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "first".into(),
+                name: "search".into(),
+                arguments: json!({}),
+            }]),
+            FakeModel::decision(json!({"answer":2})),
+        ]);
+        let rt = Runtime {
+            store: store.clone(),
+            model: model.clone(),
+            tools: vec![PolicyChangingTool(policy.clone())],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(MutableValidator {
+                chain: chain(),
+                policy,
+            }),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let stopped = rt.drive(&claim).await.unwrap();
+        assert!(matches!(stopped.state,
+            RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("saved configuration")));
+        assert_eq!(
+            stopped.checkpoint.unwrap().payload["repair_policy"]["max_no_progress"],
+            3
+        );
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert_eq!(store.list_operations(&claim.run).await.unwrap().len(), 2);
+    });
 }
 #[test]
 fn candidate_and_diagnostics_survive_worker_loss_and_revalidation() {
@@ -491,6 +610,60 @@ fn validation_no_progress_survives_resume() {
     block_on(repair_contracts::no_progress_contract(Arc::new(
         MemoryStore::default(),
     )));
+}
+#[test]
+fn disabled_no_progress_survives_resume() {
+    block_on(repair_contracts::no_progress_disabled_contract(Arc::new(
+        MemoryStore::default(),
+    )));
+}
+#[test]
+fn disabled_no_progress_keeps_budget_deadline_and_cancel_gates() {
+    block_on(async {
+        for mode in ["budget", "deadline", "cancel"] {
+            let (store, claim, account) = setup(1000, (mode == "deadline").then_some(10)).await;
+            let model = FakeModel::scripted(vec![FakeModel::decision(json!({"answer":0})); 5]);
+            let mut validator = chain();
+            validator.repair.max_no_progress = None;
+            let rt = runtime_with(store.clone(), model.clone(), validator);
+            for occurrence in 1..=4 {
+                let waiting = rt.drive(&claim).await.unwrap();
+                assert_eq!(
+                    waiting.state,
+                    RunState::Waiting("validation repair".into()),
+                    "{mode}/{occurrence}"
+                );
+                assert_eq!(
+                    waiting.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+                    occurrence
+                );
+            }
+            assert_eq!(model.requests.lock().unwrap().len(), 4);
+            let result = match mode {
+                "budget" => {
+                    store.exhaust(&claim, 0).await.unwrap();
+                    rt.drive(&claim).await.unwrap()
+                }
+                "deadline" => {
+                    rt.clock.set(10);
+                    rt.drive(&claim).await.unwrap()
+                }
+                _ => rt.cancel(&claim, "stop").await.unwrap(),
+            };
+            assert!(
+                matches!(
+                    (&mode, &result.state),
+                    (&"budget", RunState::Terminal(Terminal::BudgetReached(_)))
+                        | (&"deadline", RunState::Terminal(Terminal::DeadlineReached))
+                        | (&"cancel", RunState::Terminal(Terminal::Cancelled(_)))
+                ),
+                "{mode}: {:?}",
+                result.state
+            );
+            assert_eq!(model.requests.lock().unwrap().len(), 4, "{mode}");
+            assert!(store.account(&account).await.unwrap().used.tokens > 0);
+        }
+    });
 }
 #[test]
 fn artifact_content_defines_progress() {

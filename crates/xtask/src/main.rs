@@ -120,6 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "ModelRequest",
                 "ModelReply",
                 "Usage",
+                "PriceEvidence",
                 "SvgUsage",
                 "SvgAuthorPrice",
                 "ValidationReceipt",
