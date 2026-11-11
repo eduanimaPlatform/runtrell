@@ -36,7 +36,9 @@ pub enum OwnerResult {
     Resumed { revision: u64 },
     Settled(Box<SettlementRecord>),
 }
-/// Created only with a successful effect, in its transaction. Never rewritten.
+/// Created only with a successful effect, in its transaction. Accounting evidence
+/// remains immutable; Run erasure may redact opaque SVG provider JSON while
+/// preserving normalized counters, prices, identities and the original effect.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerReceipt {
     pub command: OwnerCommand,

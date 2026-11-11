@@ -59,6 +59,11 @@ impl Namespace {
         Ok(digest(&json!(self)))
     }
 }
+fn run_key(run: &RunHandle) -> String {
+    // The control store accepts opaque tenant/run IDs. Hashing makes them safe
+    // physical keys; erasure must also fence runs with no data namespaces.
+    digest(&json!(run))
+}
 /// Constructed by a trusted host from the authenticated Run and Agent, never tool arguments.
 #[derive(Clone, Debug)]
 pub struct Access {
@@ -385,9 +390,27 @@ impl Default for State {
     }
 }
 
+/// The complete recoverable payload for a Run. A tombstone contains no namespace
+/// state and prevents subsequent writes from recreating one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RunData {
+    schema: u32,
+    erased: bool,
+    namespaces: BTreeMap<String, State>,
+}
+impl Default for RunData {
+    fn default() -> Self {
+        Self {
+            schema: 1,
+            erased: false,
+            namespaces: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 enum Backend {
-    Memory(Arc<Mutex<BTreeMap<String, Arc<Mutex<State>>>>>),
+    Memory(Arc<Mutex<BTreeMap<String, Arc<Mutex<RunData>>>>>),
     Local(Arc<Local>),
     External(Arc<dyn NamespaceBackend>),
 }
@@ -396,7 +419,7 @@ pub struct DataStore {
     backend: Backend,
     policy: StoragePolicy,
 }
-/// Opaque, versioned namespace state. Adapters must durably CAS the complete
+/// Opaque, versioned Run state. Adapters must durably CAS the complete
 /// payload; no partial state may become visible. Version tokens must prevent ABA.
 pub trait NamespaceBackend: Send + Sync {
     fn load(&self, namespace: &str) -> Result<(String, Option<Vec<u8>>)>;
@@ -424,6 +447,48 @@ impl DataStore {
     pub fn policy(&self) -> &StoragePolicy {
         &self.policy
     }
+    /// Remove every recoverable namespace payload in this Run. Repeating the
+    /// operation succeeds; normal data operations thereafter return Closed.
+    pub fn erase_run(&self, run: &RunHandle) -> Result<()> {
+        let key = run_key(run);
+        let erase = |data: &mut RunData| {
+            if data.schema != 1 {
+                return Err(Error::Unsupported("run data schema".into()));
+            }
+            data.erased = true;
+            data.namespaces.clear();
+            Ok(())
+        };
+        match &self.backend {
+            Backend::Memory(map) => {
+                let data = map
+                    .lock()
+                    .map_err(|_| Error::Storage)?
+                    .entry(key)
+                    .or_default()
+                    .clone();
+                let mut guard = data.lock().map_err(|_| Error::Storage)?;
+                erase(&mut guard)
+            }
+            Backend::Local(local) => local.tx(&key, erase),
+            Backend::External(backend) => {
+                let (version, bytes) = backend.load(&key)?;
+                let mut data: RunData = match bytes {
+                    Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?,
+                    None => RunData::default(),
+                };
+                if data.schema != 1 {
+                    return Err(Error::Unsupported("run data schema".into()));
+                }
+                if data.erased && data.namespaces.is_empty() {
+                    return Ok(());
+                }
+                erase(&mut data)?;
+                let payload = serde_json::to_vec(&data).map_err(|_| Error::Storage)?;
+                backend.compare_exchange(&key, &version, &payload)
+            }
+        }
+    }
     fn tx<R>(&self, a: &Access, write: bool, f: impl FnOnce(&mut State) -> Result<R>) -> Result<R> {
         self.transaction(a, write, false, f)
     }
@@ -435,8 +500,16 @@ impl DataStore {
         f: impl FnOnce(&mut State) -> Result<R>,
     ) -> Result<R> {
         a.actor.key()?;
-        let key = a.target.key()?;
-        let apply = |s: &mut State| {
+        let namespace = a.target.key()?;
+        let key = run_key(&a.target.owner);
+        let apply = |data: &mut RunData| {
+            if data.schema != 1 {
+                return Err(Error::Unsupported("run data schema".into()));
+            }
+            if data.erased {
+                return Err(Error::Closed);
+            }
+            let s = data.namespaces.entry(namespace).or_default();
             if s.schema != 3 {
                 return Err(Error::Unsupported("data state schema".into()));
             }
@@ -484,9 +557,9 @@ impl DataStore {
             Backend::Local(local) => local.tx(&key, apply),
             Backend::External(backend) => {
                 let (version, bytes) = backend.load(&key)?;
-                let mut state = match bytes {
+                let mut state: RunData = match bytes {
                     Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?,
-                    None => State::default(),
+                    None => RunData::default(),
                 };
                 let before = if write && skip_unchanged {
                     Some(serde_json::to_vec(&state).map_err(|_| Error::Storage)?)

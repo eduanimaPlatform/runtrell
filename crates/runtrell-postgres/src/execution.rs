@@ -4,6 +4,28 @@ use crate::*;
 use runtrell::execution::{ExecutionLedger, ExecutionRecord};
 
 impl PgStore {
+    pub(crate) async fn guard_run_erasure(
+        &self,
+        conn: &mut PgConnection,
+        owner: &RunHandle,
+        lock: bool,
+    ) -> Result<()> {
+        let sql = format!(
+            "SELECT erasure FROM {}.runs WHERE tenant=$1 AND id=$2{}",
+            self.schema,
+            if lock { " FOR UPDATE" } else { "" }
+        );
+        let marker: Option<Option<String>> = sqlx::query_scalar(&sql)
+            .bind(&owner.tenant)
+            .bind(&owner.id)
+            .fetch_optional(conn)
+            .await
+            .map_err(|e| storage("PgStore::guard_run_erasure", e))?;
+        if marker.flatten().is_some() {
+            return Err(Error::Closed);
+        }
+        Ok(())
+    }
     async fn execution_write(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
         let mut tx = self
             .pool
@@ -33,6 +55,7 @@ impl ExecutionLedger for PgStore {
     async fn insert(&self, record: ExecutionRecord) -> Result<ExecutionRecord> {
         record.validate_intent()?;
         let mut tx = self.execution_write().await?;
+        self.guard_run_erasure(&mut tx, &record.owner, true).await?;
         sqlx::query(&format!("INSERT INTO {}.executions(owner,context_operation,request,revision,cancel_requested,observation,resources,reclaimed) VALUES($1,$2,$3,0,false,NULL,$4,false) ON CONFLICT DO NOTHING", self.schema))
             .bind(serde_json::to_value(&record.owner).map_err(|e| storage("PgStore::insert", e))?)
             .bind(&record.context_operation)
@@ -54,10 +77,12 @@ impl ExecutionLedger for PgStore {
             .acquire()
             .await
             .map_err(|e| storage("PgStore::get", e))?;
+        self.guard_run_erasure(&mut conn, owner, false).await?;
         self.execution_row(&mut conn, owner, operation, false).await
     }
     async fn cas(&self, expected: u64, record: ExecutionRecord) -> Result<ExecutionRecord> {
         let mut tx = self.execution_write().await?;
+        self.guard_run_erasure(&mut tx, &record.owner, true).await?;
         let saved = self
             .execution_row(&mut tx, &record.owner, &record.context_operation, true)
             .await?;

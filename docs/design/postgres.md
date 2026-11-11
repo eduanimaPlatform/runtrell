@@ -2,18 +2,42 @@
 
 ## Owner commands
 
-`initialize` applies `0001.sql` then the additive `0002_owner_receipts.sql` in its
+`initialize` applies `0001.sql`, then the additive `0002_owner_receipts.sql` and
+`0003_erasure.sql` in its
 schema-initialization transaction. Existing `0001.sql` bytes are unchanged. An owner
 must initialize this extension before deploying the new adapter; read-only
-`connect` requires `owner_receipts` and never installs it.
+`connect` requires `owner_receipts` and the Run `erasure` column and never installs them.
 
-`owner_receipts(key PRIMARY KEY, receipt JSONB)` stores immutable causal evidence,
-independent of subsequent Run state. The adapter only INSERTs/SELECTs these rows;
-an UPDATE/DELETE trigger rejects rewriting even identical values. Runtime owner
+## Run erasure
+
+The host-authorized `erase_run` locks the root and descendants in breadth-first
+parent order. It validates terminal state, expired ownership, confirmed or
+unneeded cleanup and settlement, settled attempts, and reclaimed execution
+inventory before changing the tree. The first synchronous transaction marks
+each Run `pending`, scrubs Run and attempt bodies, deletes late results and
+reclaimed executions, and releases leftover lifetime slots and queue permits.
+`pending` fences normal Run access and execution/late-result writers. The host's
+complete idempotent `RunPayloadStore` then erases every tree member; only after
+that succeeds does a second transaction mark them `done`. A failure leaves
+`pending` for retry with the same complete backend set. See
+[Run erasure](erasure.md) for the ownership boundary and retained accounting data.
+The erasure role needs SELECT/UPDATE on `runs` and `attempts`, SELECT/DELETE on
+`late_results`, `executions`, `slots` and `queue_entries`, and SELECT/UPDATE on
+`capacity_slots`. It also needs SELECT and UPDATE(`receipt`) on `owner_receipts`
+to redact opaque SVG usage JSON; the trigger permits only that deterministic
+redaction for the matching `pending` Run. Grant this permission to the trusted
+erasure role. Ordinary workers retain their SELECT/INSERT-only receipt privileges.
+
+`owner_receipts(key PRIMARY KEY, receipt JSONB)` stores causal evidence,
+independent of subsequent Run state. The adapter INSERTs/SELECTs these rows and,
+during Run erasure, redacts opaque SVG provider JSON from settlement receipts.
+The UPDATE/DELETE trigger permits only the exact deterministic redaction while
+the matching Run is `pending`; it rejects other rewrites, including identical values. Runtime owner
 roles need SELECT and INSERT on this table, in addition to the Run, attempts,
 accounts, session and slot privileges their transitions already require. Inspection
 needs SELECT only; hosts must authorize tenant access. Do not grant receipt
-UPDATE/DELETE/TRUNCATE to runtime roles. Schema administration remains a trusted
+DELETE/TRUNCATE to runtime roles. Grant UPDATE only to the trusted erasure role.
+Schema administration remains a trusted
 host responsibility, including retention (no receipt GC API is provided).
 
 Both owner operations serialize by schema + command key using a transaction advisory
@@ -47,7 +71,7 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 
 ## 接続専用入口（connect）と必要権限
 
-`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の13 tableと`attempts.recovery`列の存在確認（catalogの`to_regclass`・`pg_attribute`）だけである。列が無い古いruntimeはownerが`initialize`を再実行するまでNotFound。結果は次のとおり。
+`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の13 tableと`attempts.recovery`・`runs.erasure`列の存在確認（catalogの`to_regclass`・`pg_attribute`）だけである。列が無いruntimeはownerが`initialize`を明示実行するまでNotFound。結果は次のとおり。
 
 | 状況 | 結果 |
 |---|---|

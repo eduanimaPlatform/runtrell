@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::State;
+use super::RunData;
 use crate::{Error, Result};
 use rustix::fs::{
     AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, mkdirat,
@@ -52,15 +52,68 @@ impl Local {
                 _ => return Err(Error::Storage),
             }
         }
+        // Serialize first attachment across processes. A root without the layout
+        // marker may contain per-namespace state from the retired layout; never
+        // treat such data as an empty run-envelope store.
+        let layout_lock = openat(
+            &fd,
+            ".layout-lock",
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(err)?;
+        regular(&layout_lock)?;
+        flock(&layout_lock, FlockOperation::LockExclusive).map_err(err)?;
+        match openat(
+            &fd,
+            ".run-envelope-v1",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(marker) => {
+                regular(&marker)?;
+                let mut bytes = Vec::new();
+                File::from(marker).read_to_end(&mut bytes).map_err(err)?;
+                if bytes != b"run-envelope-v1\n" {
+                    return Err(Error::Storage);
+                }
+            }
+            Err(rustix::io::Errno::NOENT) => {
+                for entry in Dir::read_from(&fd).map_err(err)? {
+                    let entry = entry.map_err(err)?;
+                    let name = entry.file_name().to_bytes();
+                    if name != b"." && name != b".." && name != b".layout-lock" {
+                        return Err(Error::Storage);
+                    }
+                }
+                let marker = openat(
+                    &fd,
+                    ".run-envelope-v1",
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::RUSR | Mode::WUSR,
+                )
+                .map_err(err)?;
+                regular(&marker)?;
+                let mut marker = File::from(marker);
+                marker.write_all(b"run-envelope-v1\n").map_err(err)?;
+                marker.sync_all().map_err(err)?;
+                fsync(&fd).map_err(err)?;
+            }
+            Err(e) => return Err(err(e)),
+        }
         Ok(Self {
             root: fd,
             gate: Mutex::new(()),
         })
     }
-    pub fn tx<R>(&self, key: &str, f: impl FnOnce(&mut State) -> Result<R>) -> Result<R> {
-        // A per-namespace OS lock serializes processes. The local mutex only protects
+    pub fn tx<R>(&self, key: &str, f: impl FnOnce(&mut RunData) -> Result<R>) -> Result<R> {
+        // A per-Run OS lock serializes processes. The local mutex only protects
         // flock semantics for threads sharing this descriptor; it is held to open
-        // an independent namespace lock FD, never while another namespace does I/O.
+        // an independent Run lock FD, never while another Run does I/O.
         let dir = {
             let _g = self.gate.lock().map_err(err)?;
             match mkdirat(&self.root, key, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
@@ -79,7 +132,7 @@ impl Local {
         .map_err(err)?;
         regular(&lock)?;
         flock(&lock, FlockOperation::LockExclusive).map_err(err)?;
-        // Holding the namespace lock proves no live transaction owns these files.
+        // Holding the Run lock proves no live transaction owns these files.
         // They never became the authoritative state marker and are immediately
         // expired once their owning transaction has stopped.
         for entry in Dir::read_from(&dir).map_err(err)? {
@@ -113,9 +166,9 @@ impl Local {
                 regular(&fd)?;
                 let mut bytes = Vec::new();
                 File::from(fd).read_to_end(&mut bytes).map_err(err)?;
-                serde_json::from_slice::<State>(&bytes).map_err(err)?
+                serde_json::from_slice::<RunData>(&bytes).map_err(err)?
             }
-            Err(rustix::io::Errno::NOENT) => State::default(),
+            Err(rustix::io::Errno::NOENT) => RunData::default(),
             Err(e) => return Err(err(e)),
         };
         let before = serde_json::to_vec(&state).map_err(err)?;

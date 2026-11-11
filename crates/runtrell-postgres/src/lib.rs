@@ -13,10 +13,12 @@ use std::{
     },
 };
 mod engine;
+mod erasure;
 mod execution;
 mod observation;
 mod owner;
 mod persistence;
+pub use erasure::RunErasureState;
 pub use observation::storage_error;
 use observation::storage_error as storage;
 
@@ -142,6 +144,14 @@ impl PgStore {
         )
         .await
         .map_err(|e| storage("PgStore::initialize", e))?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            include_str!("../migrations/0003_erasure.sql")
+                .replace("{{schema}}", &store.schema)
+                .as_str(),
+        )
+        .await
+        .map_err(|e| storage("PgStore::initialize", e))?;
         let config = capacity_value(&store.capacity);
         sqlx::query(&format!("INSERT INTO {}.schema_config(singleton,version,capacity) VALUES(true,{SCHEMA_VERSION},$1) ON CONFLICT DO NOTHING", store.schema))
             .bind(&config).execute(&mut *tx).await.map_err(|e| storage("PgStore::initialize", e))?;
@@ -225,6 +235,17 @@ impl PgStore {
         if !has_recovery {
             return Err(Error::NotFound);
         }
+        let has_erasure: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) \
+             AND attname = 'erasure' AND NOT attisdropped)",
+        )
+        .bind(format!("{}.runs", store.schema))
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| storage("PgStore::connect", e))?;
+        if !has_erasure {
+            return Err(Error::NotFound);
+        }
         if saved != capacity_value(&store.capacity) {
             return Err(Error::Conflict);
         }
@@ -258,6 +279,7 @@ impl PgStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| storage("PgStore::retain_late_result", e))?;
+        self.guard_run_erasure(&mut tx, &c.run, true).await?;
         let op: Option<(Value,)> = sqlx::query_as(&format!(
             "SELECT to_jsonb(a) FROM {}.attempts a WHERE id=$1",
             self.schema

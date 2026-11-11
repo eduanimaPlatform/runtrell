@@ -319,6 +319,7 @@ fn local_rejects_symlink_hardlink_fifo_and_root_alias() {
         let alias = temp.path().join("alias");
         symlink(outside.path(), &alias).unwrap();
         assert!(DataStore::local(&alias, StoragePolicy::default()).is_err());
+        std::fs::remove_file(&alias).unwrap();
         let s = DataStore::local(
             &temp.path().canonicalize().unwrap(),
             StoragePolicy::default(),
@@ -328,7 +329,7 @@ fn local_rejects_symlink_hardlink_fifo_and_root_alias() {
         let directory = std::fs::read_dir(temp.path())
             .unwrap()
             .map(|e| e.unwrap().path())
-            .find(|p| p.is_dir() && p.file_name().unwrap() != "alias")
+            .find(|p| p.is_dir())
             .unwrap();
         let state = directory.join("state");
         let original = std::fs::read(&state).unwrap();
@@ -527,10 +528,9 @@ fn local_storage_failure_does_not_commit_manifest_and_capacity_is_bounded() {
         let before = s.snapshot(&a).await.unwrap();
         let directory = std::fs::read_dir(temp.path())
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
         let state = directory.join("state");
         std::fs::rename(&state, directory.join("backup")).unwrap();
         std::fs::create_dir(&state).unwrap();

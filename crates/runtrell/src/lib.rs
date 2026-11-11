@@ -6,6 +6,8 @@ mod api;
 pub use api::*;
 mod owner;
 pub use owner::*;
+mod erasure;
+pub use erasure::RunPayloadStore;
 mod driver;
 pub mod memory;
 pub use driver::Runtime;

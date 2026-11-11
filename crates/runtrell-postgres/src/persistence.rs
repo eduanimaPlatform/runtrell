@@ -22,8 +22,8 @@ pub(crate) enum Scope<'a> {
     Request(&'a RunSpec),
     Account(Option<&'a str>),
     LockedAccount(&'a str),
-    Slot(&'a str),
-    Empty,
+    Slot(&'a str, Option<&'a RunHandle>),
+    Queue(&'a QueueEntry),
     Attempt(&'a RunHandle, &'a str, bool),
     Begin(&'a RunHandle, &'a DispatchRequest),
     Logical(&'a RunHandle, &'a str),
@@ -319,7 +319,6 @@ impl PgStore {
                 unreachable!("normalized scope")
             }
 
-            Scope::Empty => {}
             Scope::LockedAccount(id) => {
                 self.accounts(conn, &mut s, id, write).await?;
             }
@@ -366,7 +365,7 @@ impl PgStore {
                         "runs",
                         "tenant=$1 AND principal=$2 AND request_key=$3",
                         &[&spec.tenant, &spec.principal, &spec.request_key],
-                        false,
+                        write,
                     )
                     .await?
                 {
@@ -528,19 +527,31 @@ impl PgStore {
                     }
                 }
             }
-            Scope::Slot(k) => {
+            Scope::Slot(k, run) => {
                 // Same-key scheduler calls serialize; unrelated slot identities do not.
                 sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
                     .bind(format!("{}:slot:{k}", self.schema))
                     .execute(&mut *conn)
                     .await
                     .map_err(|e| storage("PgStore::load", e))?;
+                if let Some(run) = run {
+                    self.guard_run_erasure(conn, run, write).await?;
+                }
                 for v in self.rows(conn, "slots", "key=$1", &[k], write).await? {
                     add_slot(&mut s, v)?;
                 }
                 for v in self.rows(conn, "attempts", "id=$1", &[k], false).await? {
                     let op: Operation = decode(v)?;
                     s.operations.insert(op.id.clone(), op);
+                }
+            }
+            Scope::Queue(e) => {
+                if let Some(id) = e.key.strip_prefix(&format!("{}:", e.tenant)) {
+                    let run = RunHandle {
+                        tenant: e.tenant.clone(),
+                        id: id.into(),
+                    };
+                    self.guard_run_erasure(conn, &run, write).await?;
                 }
             }
         }
@@ -698,7 +709,7 @@ impl PgStore {
         }
         Ok(())
     }
-    async fn free(&self, conn: &mut PgConnection, holder: &str) -> Result<()> {
+    pub(crate) async fn free(&self, conn: &mut PgConnection, holder: &str) -> Result<()> {
         // Stable ordering also covers release of multiple permit scopes.
         sqlx::query(&format!("SELECT ordinal FROM {}.capacity_slots WHERE holder=$1 ORDER BY scope,ordinal FOR UPDATE",self.schema))
             .bind(holder).fetch_all(&mut *conn).await.map_err(|e| storage("PgStore::free", e))?;
@@ -797,7 +808,7 @@ impl PgStore {
         )
         .await
     }
-    async fn remove_queue(&self, conn: &mut PgConnection, k: &str) -> Result<()> {
+    pub(crate) async fn remove_queue(&self, conn: &mut PgConnection, k: &str) -> Result<()> {
         sqlx::query(&format!(
             "DELETE FROM {}.queue_entries WHERE key=$1",
             self.schema
@@ -939,6 +950,9 @@ fn add_queue(s: &mut Ledger, v: Value) -> Result<()> {
 }
 
 fn load_run(s: &mut Ledger, value: Value) -> Result<RunRecord> {
+    if !value["erasure"].is_null() {
+        return Err(Error::Closed);
+    }
     let request = decode(value["request_spec"].clone())?;
     let run: RunRecord = decode(value)?;
     s.requests.insert(key(&run.handle), request);

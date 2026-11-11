@@ -188,7 +188,9 @@ impl Usage {
 }
 
 /// Separately reported author counters, with the entire original JSON retained even
-/// when malformed or unpriced. `total` and `reasoning` are never additional charges.
+/// when malformed or unpriced, until explicit Run erasure removes opaque payload
+/// fields while preserving accounting validity. `total` and `reasoning` are never
+/// additional charges.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SvgUsage {
     pub model: Option<String>,

@@ -86,6 +86,19 @@ runtime and changes nothing: one read-only transaction, no DDL, no write to
 capacity). Operations on the returned store need the privileges of the tables
 they touch; see [docs/design/postgres.md](docs/design/postgres.md).
 
+## Run erasure
+
+A host can call `PgStore::erase_run(&run, &payloads, now).await` after authorizing
+the RunHandle. `payloads` implements `RunPayloadStore`; `DataStore` supplies the
+built-in implementation for all of a run's agent namespaces. A composite host
+must include every custom payload backend. The operation rejects active or
+unsettled runs, erases the terminal run tree, retains body-free accounting, and
+durably prevents resume and replay. Retry the same call after any error;
+`erasure_status` distinguishes pending deletion from completion.
+
+See [the erasure contract](docs/design/erasure.md) for deletion boundaries,
+ordering, storage layout requirements, accounting retention and failure recovery.
+
 ## PostgreSQL transaction API
 
 | API | Stages in the host's `sqlx::Transaction<'_, Postgres>` |

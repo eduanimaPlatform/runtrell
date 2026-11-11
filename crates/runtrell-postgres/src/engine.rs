@@ -1031,11 +1031,16 @@ impl OperationStore for PgStore {
 }
 impl Scheduler for PgStore {
     async fn acquire(&self, r: SlotRequest) -> Result<()> {
-        self.tx(Scope::Slot(&r.key.clone()), |s| acquire(s, r))
+        let key = r.key.clone();
+        let run = RunHandle {
+            tenant: r.tenant.clone(),
+            id: r.run.clone(),
+        };
+        self.tx(Scope::Slot(&key, Some(&run)), |s| acquire(s, r))
             .await
     }
     async fn release_slot(&self, key: &str) -> Result<()> {
-        self.tx(Scope::Slot(key), |s| {
+        self.tx(Scope::Slot(key, None), |s| {
             if s.operations.get(key).is_some_and(|o| !o.settled) {
                 return Err(Error::UsageUnknown);
             }
@@ -1048,7 +1053,8 @@ impl Scheduler for PgStore {
         if e.scheduling.weight == 0 {
             return Err(Error::Invalid("queue weight".into()));
         }
-        self.tx(Scope::Empty, |s| {
+        let guard = e.clone();
+        self.tx(Scope::Queue(&guard), |s| {
             s.queue.push_back(e);
             Ok(())
         })

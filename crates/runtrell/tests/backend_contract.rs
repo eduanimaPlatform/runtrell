@@ -389,10 +389,9 @@ async fn local_collects_only_orphan_transaction_uploads_under_namespace_lock() {
     s.write(&a, "saved", None, b"committed").await.unwrap();
     let directory = std::fs::read_dir(&path)
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
     let orphan = directory.join(format!("stage-{}", uuid::Uuid::new_v4()));
     let unrelated = directory.join("stage-unrelated");
     std::fs::write(&orphan, b"partial state").unwrap();
