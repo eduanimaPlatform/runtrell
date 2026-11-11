@@ -19,6 +19,22 @@ fn image_config(url: String) -> Config {
         generation: true,
         reference_edit: true,
         mask_edit: false,
+        generation_size: Some(if OPENAI {
+            ImageSizePolicy::Values {
+                sizes: vec!["1024x1024".into(), "1536x768".into()],
+                auto: true,
+            }
+        } else {
+            ImageSizePolicy::Unsized
+        }),
+        reference_edit_size: Some(if OPENAI {
+            ImageSizePolicy::Values {
+                sizes: vec!["1024x1024".into(), "1536x768".into()],
+                auto: true,
+            }
+        } else {
+            ImageSizePolicy::Unsized
+        }),
         ..Default::default()
     };
     c.max_request_bytes = c.image_limits.max_request_bytes;
@@ -82,6 +98,97 @@ async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) 
         ..context()
     };
     (tool, context)
+}
+#[tokio::test]
+async fn model_size_capability_rejects_before_send_and_guides_repair() {
+    let (url, task) = server(200, "", image_response()).await;
+    let mut c = image_config(url);
+    c.capabilities.images.generation_size = Some(ImageSizePolicy::Dimensions {
+        multiple: 16,
+        min_pixels: 655_360,
+        max_pixels: 8_294_400,
+        max_edge: 3840,
+        max_aspect_ratio: 3,
+        auto: true,
+    });
+    let (mut tool, ctx) = fixture(c, ImageAction::Generate).await;
+    let schema = tool.descriptor().input_schema;
+    assert!(
+        schema["properties"]["size"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("655360")
+    );
+    if OPENAI {
+        tool.quote(
+            &tool.runs.get(&ctx.claim.run).await.unwrap(),
+            &json!({"prompt":"draw","size":"1536x768"}),
+        )
+        .await
+        .unwrap();
+    }
+    let error = tool
+        .quote(
+            &tool.runs.get(&ctx.claim.run).await.unwrap(),
+            &json!({"prompt":"draw","size":"384x384"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidToolInput { .. }));
+    assert!(error.to_string().contains("655360"));
+    tool.provider = Images::new({
+        let mut missing = image_config("http://127.0.0.1:1/v1/images/generations".into());
+        missing.capabilities.images.generation_size = None;
+        missing
+    })
+    .unwrap();
+    assert_eq!(
+        tool.descriptor().input_schema["properties"]["size"],
+        json!({"not":{}})
+    );
+    let error = tool
+        .quote(
+            &tool.runs.get(&ctx.claim.run).await.unwrap(),
+            &json!({"prompt":"draw"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("IMAGE_SIZE_POLICY_MISSING"));
+    assert!(task.await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn edit_size_capability_rejects_before_send() {
+    let (url, task) = server(200, "", image_response()).await;
+    let mut c = image_config(url);
+    c.capabilities.images.reference_edit_size = Some(ImageSizePolicy::Values {
+        sizes: vec!["1024x1024".into(), "1536x1024".into()],
+        auto: true,
+    });
+    let (tool, ctx) = fixture(c, ImageAction::Edit).await;
+    let staged = ArtifactStore::stage_named(
+        &tool.resolver.store,
+        &tool.output_access,
+        ArtifactSpec {
+            id: "edit-input".into(),
+            media_type: "image/png".into(),
+            class: DataClass::Intermediate,
+        },
+        &png(),
+        0,
+    )
+    .await
+    .unwrap();
+    let reference = ArtifactStore::save(&tool.resolver.store, &tool.output_access, staged, 0)
+        .await
+        .unwrap();
+    let input = json!({"prompt":"edit","size":"384x384","references":[ImageReference::Artifact(reference)]});
+    let error = tool
+        .quote(&tool.runs.get(&ctx.claim.run).await.unwrap(), &input)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("1024x1024"));
+    assert!(task.await.unwrap().is_empty());
 }
 #[tokio::test]
 async fn generation_reference_edit_wire_usage_and_saved_lookup() {
@@ -233,7 +340,9 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
     let (url, task) = raw_server("HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n{}".into()).await;
     let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
     let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
-    let diagnostic = result.provider_diagnostic().expect("read failure diagnostic");
+    let diagnostic = result
+        .provider_diagnostic()
+        .expect("read failure diagnostic");
     assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseRead);
     assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
     assert_eq!(diagnostic.http_status, Some(200));
@@ -293,15 +402,18 @@ async fn transport_configuration_and_gemini_output_options_are_preflight_errors(
     assert!(!format!("{:?}", tool.provider).contains("TEST-KEY"));
     if !OPENAI {
         tool.resolver.limits.allowed_mime.push("image/jpeg".into());
-        for options in [
-            json!({"prompt":"draw","size":"auto"}),
-            json!({"prompt":"draw","output_format":"jpeg"}),
-        ] {
-            assert!(matches!(
-                tool.invoke(&ctx, options).await,
-                Err(Error::Unsupported(_))
-            ));
-        }
+        let size_error = tool
+            .invoke(&ctx, json!({"prompt":"draw","size":"auto"}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&size_error, Error::InvalidToolInput { path, hint } if path == "/size" && hint.contains("omit size"))
+        );
+        assert!(matches!(
+            tool.invoke(&ctx, json!({"prompt":"draw","output_format":"jpeg"}))
+                .await,
+            Err(Error::Unsupported(_))
+        ));
     }
     assert!(task.await.unwrap().is_empty());
 }

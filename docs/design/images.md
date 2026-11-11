@@ -58,6 +58,17 @@ or Flare model, optional quality (`auto/low/medium/high`), complexity
 (`low/medium/high`) and background (`auto/opaque/transparent`) are sent only when
 provided. No default complexity is sent. Transparent raster output requires PNG/WebP.
 Unknown fields, `xhigh/max` quality, markup, GIF and SVG edit are rejected before HTTP.
+The host declares a separate `ImageSizePolicy` for each enabled model action
+(generation, reference edit, SVG generation) through `ImageCapabilities`.
+`Values` lists exact `WIDTHxHEIGHT` strings; `Dimensions` declares multiple,
+pixel, edge and aspect bounds. `auto` also permits omission; `Unsized` permits
+only omission for endpoints without a size option. Missing declarations fail
+closed before reservation or send. Tool schemas show exact choices or the
+dimension rule; rejected caller sizes become typed `InvalidToolInput` and the
+runtime sends `TOOL_INPUT_INVALID` with `/size` and a repair guide to the Agent.
+The same path covers tighter `ImageLimits` payload bounds. Sizes
+are not rounded or replaced. The host supplies constraints verified for the
+selected model and endpoint.
 Exactly one `data[0].b64_json` is required. Both adapters reject mask editing.
 GeminiImages rejects size/non-PNG/options rather than silently ignoring them.
 Output MIME must be enabled in the host's ImageLimits.
@@ -140,7 +151,7 @@ and WebP (RIFF bounds, VP8/VP8L and optional VP8X dimensions) can be enabled by
 adding `image/jpeg`/`image/webp` to `allowed_mime`; PNG remains the default.
 Inspection does not decompress pixels or judge image quality; hosts can add a
 separate validator for that purpose. Animated WebP is rejected. Raster explicit `size`
-is `auto` or `WIDTHxHEIGHT` within the same dimension/pixel bounds. Timeouts
+must satisfy both the host's model/action policy and the payload bounds. Timeouts
 are host-configured and bounded by operation/Run deadlines, never fixed at two seconds.
 
 SVG uses bounded Base64 → UTF-8 XML bytes, without a raster decoder or pixel/dimension

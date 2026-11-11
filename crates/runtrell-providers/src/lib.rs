@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 //! Optional, single-send ModelPort implementations. See docs/design/providers.md.
 use runtrell::attachments::AttachmentResolver;
-pub use runtrell::images::ImageLimits;
+pub use runtrell::images::{ImageLimits, ImageSizePolicy};
 use runtrell::{ModelLimits, RunHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,6 +53,13 @@ pub struct ImageCapabilities {
     pub svg_generation: bool,
     #[serde(default)]
     pub svg_model_selection: bool,
+    /// Exact host-declared size support for each enabled action and selected model.
+    #[serde(default)]
+    pub generation_size: Option<ImageSizePolicy>,
+    #[serde(default)]
+    pub reference_edit_size: Option<ImageSizePolicy>,
+    #[serde(default)]
+    pub svg_generation_size: Option<ImageSizePolicy>,
     /// Host-verified author-model rates; never inferred from the image model price.
     #[serde(default)]
     pub svg_author_prices: Vec<runtrell::SvgAuthorPrice>,
@@ -61,6 +68,16 @@ pub struct ImageCapabilities {
     /// model is not priced.
     #[serde(default)]
     pub response_model_aliases: Vec<String>,
+}
+impl ImageCapabilities {
+    pub fn size_policy(&self, action: runtrell::images::ImageAction) -> Option<ImageSizePolicy> {
+        match action {
+            runtrell::images::ImageAction::Generate => self.generation_size.clone(),
+            runtrell::images::ImageAction::Edit => self.reference_edit_size.clone(),
+            runtrell::images::ImageAction::SvgGenerate => self.svg_generation_size.clone(),
+            runtrell::images::ImageAction::MaskEdit => None,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentTransports {

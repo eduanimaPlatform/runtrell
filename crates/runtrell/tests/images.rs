@@ -3,6 +3,65 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use runtrell::images::*;
 
 #[test]
+fn host_size_policy_rejects_small_edit_and_exposes_constraints() {
+    let policy = ImageSizePolicy::Dimensions {
+        multiple: 16,
+        min_pixels: 655_360,
+        max_pixels: 8_294_400,
+        max_edge: 3840,
+        max_aspect_ratio: 3,
+        auto: true,
+    };
+    policy.validate_configuration().unwrap();
+    let error = policy.validate_size(Some("384x384")).unwrap_err();
+    assert!(error.to_string().contains("655360"));
+    for value in [
+        "1024x640",
+        "1536x768",
+        "1536x512",
+        "1024x1024",
+        "3840x2160",
+        "2160x3840",
+        "auto",
+    ] {
+        policy.validate_size(Some(value)).unwrap();
+    }
+    for value in [
+        "",
+        "0x1024",
+        "1535x768",
+        "3840x384",
+        "3840x3840",
+        "01536x768",
+    ] {
+        assert!(policy.validate_size(Some(value)).is_err(), "{value}");
+    }
+    let schema = policy.schema();
+    assert!(schema.to_string().contains("655360"));
+}
+
+#[test]
+fn finite_and_unsized_size_policies_are_explicit() {
+    let values = ImageSizePolicy::Values {
+        sizes: vec!["1024x1024".into(), "1536x1024".into()],
+        auto: false,
+    };
+    values.validate_configuration().unwrap();
+    assert!(values.validate_size(Some("1024x1024")).is_ok());
+    assert!(values.validate_size(Some("384x384")).is_err());
+    assert!(values.validate_size(Some("auto")).is_err());
+    assert!(values.validate_size(None).is_err());
+    assert!(values.validate_size(Some("")).is_err());
+    assert!(values.schema().to_string().contains("1536x1024"));
+    assert!(ImageSizePolicy::Unsized.validate_size(None).is_ok());
+    assert!(
+        ImageSizePolicy::Unsized
+            .validate_size(Some("auto"))
+            .is_err()
+    );
+}
+
+#[test]
 fn svg_codec_is_utf8_xml_with_separate_byte_bound_and_no_pixel_bound() {
     let xml = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"999999\" height=\"999999\"><text>図</text></svg>";
     let mut limits = ImageLimits {

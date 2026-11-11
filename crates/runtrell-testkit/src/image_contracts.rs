@@ -56,6 +56,16 @@ impl Default for FakeImages {
     }
 }
 impl ImagePort for FakeImages {
+    fn size_policy(&self, _action: ImageAction) -> Option<ImageSizePolicy> {
+        Some(ImageSizePolicy::Dimensions {
+            multiple: 16,
+            min_pixels: 655_360,
+            max_pixels: 8_294_400,
+            max_edge: 3840,
+            max_aspect_ratio: 3,
+            auto: true,
+        })
+    }
     fn identity(&self) -> String {
         "fake-images-1".into()
     }
@@ -82,6 +92,201 @@ impl ImagePort for FakeImages {
             provider_diagnostic: None,
         })
     }
+}
+
+pub async fn size_repair_returns_to_agent() {
+    for (bad_size, limits, expected_hint) in [
+        ("384x384", ImageLimits::default(), "655360"),
+        (
+            "1536x768",
+            ImageLimits {
+                max_width: 1024,
+                ..ImageLimits::default()
+            },
+            "1024x8192",
+        ),
+    ] {
+        let store = Arc::new(runtrell::memory::MemoryStore::default());
+        let account = store
+            .create_account("images", Amount::new(10_000, 10_000), None)
+            .await
+            .unwrap();
+        let handle = store
+            .start(RunSpec::new(
+                "images",
+                "size-repair",
+                account.clone(),
+                "draw",
+            ))
+            .await
+            .unwrap();
+        let claim = store.claim(&handle, "worker", 0, 100).await.unwrap();
+        let access = Access::owner(Namespace {
+            owner: handle.clone(),
+            agent: "main".into(),
+        });
+        let provider = FakeImages::default();
+        let data = DataStore::memory(StoragePolicy::default());
+        let tool = ImageTool {
+            provider: provider.clone(),
+            resolver: ImageResolver {
+                store: data.clone(),
+                policy: FakePolicy::default(),
+                accesses: vec![access.clone()],
+                limits: limits.clone(),
+            },
+            runs: store.clone(),
+            clock: TestClock::default(),
+            output_access: access.clone(),
+            config: ImageToolConfig {
+                action: ImageAction::Generate,
+                reserve: Amount::new(32, 32),
+                timeout: 30,
+            },
+        };
+        let model = FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "bad".into(),
+                name: "image.generate".into(),
+                arguments: json!({"prompt":"draw","size":bad_size}),
+            }]),
+            FakeModel::calls(vec![ToolCall {
+                id: "good".into(),
+                name: "image.generate".into(),
+                arguments: json!({"prompt":"draw","size":"1024x1024"}),
+            }]),
+            FakeModel::decision(json!({"decision":"keep"})),
+        ]);
+        let rt = Runtime {
+            store: store.clone(),
+            model: ImageModel {
+                inner: model.clone(),
+                resolver: ImageResolver {
+                    store: data,
+                    policy: FakePolicy::default(),
+                    accesses: vec![access],
+                    limits: limits.clone(),
+                },
+                runs: store.clone(),
+            },
+            tools: vec![tool],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let done = rt.drive(&claim).await.unwrap();
+        assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded));
+        assert_eq!(provider.sends.load(Ordering::SeqCst), 1);
+        {
+            let requests = model.requests.lock().unwrap();
+            let feedback = requests[1]
+                .messages
+                .iter()
+                .find(|m| m.role == "tool")
+                .unwrap();
+            assert_eq!(feedback.data["diagnostics"][0]["path"], "/size");
+            assert!(
+                feedback.data["diagnostics"][0]["hint"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected_hint)
+            );
+        }
+        let operations = store.list_operations(&handle).await.unwrap();
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| op.request.target == "image.generate")
+                .count(),
+            1
+        );
+        assert_eq!(store.account(&account).await.unwrap().unknown, 0);
+    }
+}
+pub async fn size_repair_respects_limit() {
+    let store = Arc::new(runtrell::memory::MemoryStore::default());
+    let account = store
+        .create_account("images", Amount::new(10_000, 10_000), None)
+        .await
+        .unwrap();
+    let handle = store
+        .start(RunSpec::new(
+            "images",
+            "size-repair-limit",
+            account.clone(),
+            "draw",
+        ))
+        .await
+        .unwrap();
+    let claim = store.claim(&handle, "worker", 0, 100).await.unwrap();
+    let access = Access::owner(Namespace {
+        owner: handle.clone(),
+        agent: "main".into(),
+    });
+    let provider = FakeImages::default();
+    let tool = ImageTool {
+        provider: provider.clone(),
+        resolver: ImageResolver {
+            store: DataStore::memory(StoragePolicy::default()),
+            policy: FakePolicy::default(),
+            accesses: vec![access.clone()],
+            limits: ImageLimits::default(),
+        },
+        runs: store.clone(),
+        clock: TestClock::default(),
+        output_access: access,
+        config: ImageToolConfig {
+            action: ImageAction::Generate,
+            reserve: Amount::new(32, 32),
+            timeout: 30,
+        },
+    };
+    let model = FakeModel::scripted(
+        (0..2)
+            .map(|n| {
+                FakeModel::calls(vec![ToolCall {
+                    id: format!("bad-{n}"),
+                    name: "image.generate".into(),
+                    arguments: json!({"prompt":"draw","size":"384x384"}),
+                }])
+            })
+            .collect(),
+    );
+    let validator = runtrell::assembly::ValidationChain {
+        validators: vec![],
+        schema: json!({}),
+        repair: RepairPolicy {
+            max_repairs: Some(1),
+            max_no_progress: None,
+            ..RepairPolicy::default()
+        },
+    };
+    let rt = Runtime {
+        store: store.clone(),
+        model: model.clone(),
+        tools: vec![tool],
+        policy: FakePolicy::default(),
+        clock: TestClock::default(),
+        validator: Arc::new(validator),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let done = rt.drive(&claim).await.unwrap();
+    assert!(
+        matches!(done.state,RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_REPAIR_LIMIT"))
+    );
+    assert_eq!(provider.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store
+            .list_operations(&handle)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|op| op.request.target == "image.generate")
+            .count(),
+        0
+    );
+    assert_eq!(store.account(&account).await.unwrap().unknown, 0);
 }
 pub struct LoseImageReply<T> {
     pub inner: T,

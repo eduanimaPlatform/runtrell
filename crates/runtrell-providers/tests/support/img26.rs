@@ -4,6 +4,10 @@ fn img26_config(url: String) -> Config {
     cfg.capabilities.limits.model = "gpt-image-2.6-sunburst".into();
     cfg.capabilities.limits.price.as_mut().unwrap().model = cfg.capabilities.limits.model.clone();
     cfg.capabilities.images.svg_generation = true;
+    cfg.capabilities.images.svg_generation_size = Some(ImageSizePolicy::Values {
+        sizes: vec!["1024x1024".into(), "1536x1024".into(), "1024x1536".into()],
+        auto: true,
+    });
     cfg.image_limits.allowed_mime.push("image/svg+xml".into());
     cfg
 }
@@ -24,12 +28,19 @@ async fn img26_svg_wire_prices_image_and_author_usage() {
     let mut cfg = img26_config(url);
     cfg.capabilities.limits.model = "gpt-image-2.6-flare".into();
     cfg.capabilities.limits.price = Some(Price {
-        model: "gpt-image-2.6-flare".into(), input: 5_000_000, cached: 1_250_000,
-        output: 30_000_000, reasoning: 30_000_000, image_input: 8_000_000,
-        image_output: 30_000_000, cached_image_input: 2_000_000,
+        model: "gpt-image-2.6-flare".into(),
+        input: 5_000_000,
+        cached: 1_250_000,
+        output: 30_000_000,
+        reasoning: 30_000_000,
+        image_input: 8_000_000,
+        image_output: 30_000_000,
+        cached_image_input: 2_000_000,
     });
     cfg.capabilities.images.svg_author_prices = vec![SvgAuthorPrice {
-        model: "gpt-6-luna".into(), input: 100_000, output: 500_000,
+        model: "gpt-6-luna".into(),
+        input: 100_000,
+        output: 500_000,
         reasoning_in_output: true,
     }];
     let limits = cfg.image_limits.clone();
@@ -37,14 +48,25 @@ async fn img26_svg_wire_prices_image_and_author_usage() {
     tool.resolver.limits = limits;
     let input = json!({"prompt":"draw svg","output_format":"svg"});
     let result = tool.invoke(&ctx, input.clone()).await.unwrap();
-    let ExternalResult::Applied { usage, .. } = &result else { panic!("expected saved result") };
+    let ExternalResult::Applied { usage, .. } = &result else {
+        panic!("expected saved result")
+    };
     assert_eq!((usage.cached, usage.cached_image_input), (Some(0), Some(0)));
-    assert_eq!(usage.price_evidence.as_ref().unwrap().output_micro_usd, Some(24_720));
-    assert_eq!(usage.price_evidence.as_ref().unwrap().input_micro_usd, Some(555));
+    assert_eq!(
+        usage.price_evidence.as_ref().unwrap().output_micro_usd,
+        Some(24_720)
+    );
+    assert_eq!(
+        usage.price_evidence.as_ref().unwrap().input_micro_usd,
+        Some(555)
+    );
     assert_eq!(usage.micro_usd, Some(25_275));
     assert_eq!(usage.svg_usage.as_ref().unwrap().micro_usd, Some(1_311));
     assert_eq!(usage.amount(), Ok(Amount::new(4822, 26_586)));
-    assert_eq!(tool.lookup(&ctx, input).await.unwrap(), Lookup::Found(result));
+    assert_eq!(
+        tool.lookup(&ctx, input).await.unwrap(),
+        Lookup::Found(result)
+    );
     assert_eq!(http.await.unwrap().len(), 1);
 }
 

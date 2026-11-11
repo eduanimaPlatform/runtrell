@@ -251,6 +251,169 @@ impl ImageLimits {
         Err(invalid("IMAGE_FORMAT"))
     }
 }
+
+/// Host-declared size support for one model and one image action. A missing
+/// declaration is never interpreted as unrestricted provider support.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImageSizePolicy {
+    /// The endpoint has no size option (for example, native Gemini images).
+    Unsized,
+    /// Exact strings accepted by the endpoint. `auto` also permits omission.
+    Values { sizes: Vec<String>, auto: bool },
+    /// Bounds declared by the host for an endpoint with custom dimensions.
+    Dimensions {
+        multiple: u32,
+        min_pixels: u64,
+        max_pixels: u64,
+        max_edge: u32,
+        max_aspect_ratio: u32,
+        auto: bool,
+    },
+}
+impl ImageSizePolicy {
+    pub fn validate_configuration(&self) -> Result<()> {
+        match self {
+            Self::Unsized => Ok(()),
+            Self::Values { sizes, .. } => {
+                let unique: std::collections::BTreeSet<_> = sizes.iter().collect();
+                if sizes.is_empty()
+                    || sizes.len() > 12
+                    || unique.len() != sizes.len()
+                    || sizes
+                        .iter()
+                        .any(|s| s.len() > 16 || parse_size(s).is_none())
+                {
+                    Err(invalid("IMAGE_SIZE_POLICY_CONFIGURATION"))
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Dimensions {
+                multiple,
+                min_pixels,
+                max_pixels,
+                max_edge,
+                max_aspect_ratio,
+                ..
+            } => {
+                if *multiple == 0
+                    || *min_pixels == 0
+                    || min_pixels > max_pixels
+                    || *max_edge == 0
+                    || *multiple > *max_edge
+                    || *max_aspect_ratio == 0
+                    || u64::from(*max_edge) * u64::from(*max_edge) < *min_pixels
+                {
+                    Err(invalid("IMAGE_SIZE_POLICY_CONFIGURATION"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+    pub fn validate_size(&self, size: Option<&str>) -> Result<()> {
+        self.validate_configuration()?;
+        let guide = self.guide();
+        match (self, size) {
+            (Self::Unsized, None) => Ok(()),
+            (
+                Self::Values { auto: true, .. } | Self::Dimensions { auto: true, .. },
+                None | Some("auto"),
+            ) => Ok(()),
+            (Self::Values { sizes, .. }, Some(s)) if sizes.iter().any(|allowed| allowed == s) => {
+                Ok(())
+            }
+            (
+                Self::Dimensions {
+                    multiple,
+                    min_pixels,
+                    max_pixels,
+                    max_edge,
+                    max_aspect_ratio,
+                    ..
+                },
+                Some(s),
+            ) => {
+                let valid = parse_size(s).is_some_and(|(w, h)| {
+                    let pixels = u64::from(w) * u64::from(h);
+                    w % multiple == 0
+                        && h % multiple == 0
+                        && w <= *max_edge
+                        && h <= *max_edge
+                        && pixels >= *min_pixels
+                        && pixels <= *max_pixels
+                        && u64::from(w.max(h)) <= u64::from(w.min(h)) * u64::from(*max_aspect_ratio)
+                });
+                if valid {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidToolInput {
+                        path: "/size".into(),
+                        hint: guide,
+                    })
+                }
+            }
+            _ => Err(Error::InvalidToolInput {
+                path: "/size".into(),
+                hint: guide,
+            }),
+        }
+    }
+    pub fn schema(&self) -> Value {
+        match self {
+            Self::Unsized => {
+                json!({"type":"null","description":"Omit size; this endpoint does not accept a size option."})
+            }
+            Self::Values { sizes, auto } => {
+                let mut choices = sizes.iter().map(|s| json!(s)).collect::<Vec<_>>();
+                if *auto {
+                    choices.push(json!("auto"));
+                    choices.push(Value::Null);
+                }
+                json!({"enum":choices,"description":self.guide()})
+            }
+            Self::Dimensions { auto, .. } => {
+                // JSON Schema cannot express the area and aspect bound. The tool
+                // gives the model the full rule and preflight enforces it.
+                json!({"type":if *auto {json!(["string","null"])} else {json!("string")},"pattern":if *auto {"^(auto|[1-9][0-9]*x[1-9][0-9]*)$"} else {"^[1-9][0-9]*x[1-9][0-9]*$"},"description":self.guide()})
+            }
+        }
+    }
+    fn allows_omission(&self) -> bool {
+        matches!(
+            self,
+            Self::Unsized | Self::Values { auto: true, .. } | Self::Dimensions { auto: true, .. }
+        )
+    }
+    fn guide(&self) -> String {
+        match self {
+            Self::Unsized => "omit size".into(),
+            Self::Values { sizes, auto } => format!(
+                "use {}{}",
+                sizes.join(", "),
+                if *auto { ", auto, or omit size" } else { "" }
+            ),
+            Self::Dimensions {
+                multiple,
+                min_pixels,
+                max_pixels,
+                max_edge,
+                max_aspect_ratio,
+                auto,
+            } => format!(
+                "use WIDTHxHEIGHT (multiples of {multiple}; {min_pixels}..={max_pixels} pixels; edge <= {max_edge}; aspect <= {max_aspect_ratio}:1){}",
+                if *auto { ", auto, or omit size" } else { "" }
+            ),
+        }
+    }
+}
+fn parse_size(size: &str) -> Option<(u32, u32)> {
+    let (w, h) = size.split_once('x')?;
+    let (width, height) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+    (width > 0 && height > 0 && w == width.to_string() && h == height.to_string())
+        .then_some((width, height))
+}
 /// Ephemeral transport payload, never serialized into checkpoints or operation input.
 #[derive(Clone)]
 pub struct ResolvedImage {
@@ -747,16 +910,19 @@ impl ImageRequest {
         })
     }
 }
-fn input_schema(action: ImageAction) -> Value {
+fn input_schema(action: ImageAction, policy: Option<&ImageSizePolicy>) -> Value {
     let mut properties = json!({
         "prompt":{"type":"string","minLength":1,"maxLength":65536},
-        "size":{"type":["string","null"],"maxLength":128},
+        "size":policy.map_or(json!({"not":{}}), ImageSizePolicy::schema),
         "quality":{"enum":[null,"auto","low","medium","high"]},
         "complexity":{"enum":[null,"low","medium","high"]},
         "background":{"enum":[null,"auto","opaque","transparent"]},
         "output_format":{"enum":["png","jpeg","webp"],"default":"png"}
     });
     let mut required = vec!["prompt"];
+    if policy.is_some_and(|p| !p.allows_omission()) {
+        required.push("size");
+    }
     match action {
         ImageAction::Generate => (),
         ImageAction::Edit | ImageAction::MaskEdit => {
@@ -825,7 +991,7 @@ impl PreparedImageRequest {
         self.action
     }
     pub fn size(&self) -> Option<&str> {
-        self.request.size.as_deref().filter(|s| !s.is_empty())
+        self.request.size.as_deref()
     }
     pub fn output_format(&self) -> Option<ImageOutputFormat> {
         self.request.output_format
@@ -868,6 +1034,9 @@ pub enum ImageResponse {
 pub trait ImagePort: Send + Sync {
     /// Model/endpoint/limits identity; credentials must never be included.
     fn identity(&self) -> String;
+    fn size_policy(&self, _action: ImageAction) -> Option<ImageSizePolicy> {
+        None
+    }
     fn check(&self, request: &PreparedImageRequest) -> Result<()>;
     fn quote(&self, request: &PreparedImageRequest) -> Result<Amount> {
         self.check(request)?;
@@ -937,6 +1106,16 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
     }
     async fn prepare(&self, run: &RunRecord, input: &Value) -> Result<PreparedImageRequest> {
         let request = ImageRequest::parse(self.config.action, input.clone())?;
+        if self.config.action == ImageAction::MaskEdit {
+            return Err(Error::Unsupported("mask_edit".into()));
+        }
+        let policy = self
+            .provider
+            .size_policy(self.config.action)
+            .ok_or_else(|| {
+                invalid("IMAGE_SIZE_POLICY_MISSING: configure model/action size capability")
+            })?;
+        policy.validate_size(request.size.as_deref())?;
         if request.prompt.is_empty() || request.prompt.len() > 65536 || self.config.timeout == 0 {
             return Err(invalid("IMAGE_REQUEST"));
         }
@@ -956,28 +1135,27 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
                 "IMAGE_BACKGROUND: transparent requires png or webp",
             ));
         }
-        if let Some(size) = request
-            .size
-            .as_deref()
-            .filter(|s| !s.is_empty() && *s != "auto")
+        if let Some((width, height)) = request.size.as_deref().and_then(parse_size)
+            && self.config.action != ImageAction::SvgGenerate
         {
-            let (width, height) = size.split_once('x').ok_or_else(|| invalid("IMAGE_SIZE"))?;
-            let width: u32 = width.parse().map_err(|_| invalid("IMAGE_SIZE"))?;
-            let height: u32 = height.parse().map_err(|_| invalid("IMAGE_SIZE"))?;
-            if self.config.action != ImageAction::SvgGenerate {
-                self.resolver.limits.dimensions(width, height)?;
-            } else if width == 0 || height == 0 {
-                return Err(invalid("IMAGE_SIZE"));
-            }
+            self.resolver
+                .limits
+                .dimensions(width, height)
+                .map_err(|_| Error::InvalidToolInput {
+                    path: "/size".into(),
+                    hint: format!(
+                        "use dimensions within {}x{} and {} pixels",
+                        self.resolver.limits.max_width,
+                        self.resolver.limits.max_height,
+                        self.resolver.limits.max_pixels
+                    ),
+                })?;
         }
         match self.config.action {
             ImageAction::Generate if !request.references.is_empty() || request.mask.is_some() => {
                 return Err(invalid("IMAGE_REQUEST"));
             }
             ImageAction::Edit if request.references.is_empty() || request.mask.is_some() => {
-                return Err(invalid("IMAGE_REQUEST"));
-            }
-            ImageAction::MaskEdit if request.references.is_empty() || request.mask.is_none() => {
                 return Err(invalid("IMAGE_REQUEST"));
             }
             _ => (),
@@ -1071,7 +1249,10 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             account: "images".into(),
             permission: self.name().into(),
             capability: "image-generation-editing".into(),
-            input_schema: input_schema(self.config.action),
+            input_schema: input_schema(
+                self.config.action,
+                self.provider.size_policy(self.config.action).as_ref(),
+            ),
             output_schema: json!({"type":"object"}),
             side_effect: true,
             timeout: self.config.timeout,

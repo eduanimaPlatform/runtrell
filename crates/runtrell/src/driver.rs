@@ -1368,6 +1368,42 @@ impl<
             if matches!(call, PendingToolCall::Malformed(_)) && diagnostics.is_empty() {
                 diagnostics = schema_diagnostics(&input, &serde_json::json!({"type":"object"}))?;
             }
+            let mut fresh_quote = None;
+            let mut old = None;
+            if diagnostics.is_empty() && matches!(call, PendingToolCall::Execute(_)) {
+                // Live admission precedes any input-specific quote. Replaying an
+                // existing operation uses its original reserve and never requotes.
+                tool.authorize_input(&current, &input).await?;
+                old = bx(|| self.store.operation(&c.run, &key)).await?;
+                if let Some(op) = &old
+                    && op.request.input != input
+                {
+                    return Err(Error::Conflict);
+                }
+                if old.is_none() {
+                    match tool.quote(&current, &input).await {
+                        Ok(quote) => fresh_quote = Some(quote),
+                        Err(Error::InvalidToolInput { path, hint }) => {
+                            diagnostics.push(Diagnostic {
+                                repair: DiagnosticRepair::Agent,
+                                observation: None,
+                                code: "TOOL_INPUT_INVALID".into(),
+                                severity: "error".into(),
+                                path,
+                                schema_path: None,
+                                artifact: None,
+                                file: None,
+                                field: None,
+                                span: None,
+                                position: None,
+                                cause: "Tool input rejected by preflight".into(),
+                                hint,
+                            })
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
             if !diagnostics.is_empty() {
                 let output =
                     serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
@@ -1413,16 +1449,13 @@ impl<
             let PendingToolCall::Execute(call) = call else {
                 return Err(Error::Conflict);
             };
-            // A settled Failed result can be replayed without invoke/lookup. Check
-            // the original input's live admission before exposing that feedback.
-            tool.authorize_input(&current, &input).await?;
             let mut d = DispatchRequest::new(
                 &key,
                 tool.operation_kind(),
                 &name,
                 input.clone(),
-                if bx(|| self.store.operation(&c.run, &key)).await?.is_none() {
-                    let quote = tool.quote(&current, &input).await?;
+                if old.is_none() {
+                    let quote = fresh_quote.ok_or(Error::Conflict)?;
                     Amount::new(
                         quote.tokens.max(descriptor.reserve.tokens),
                         quote.micro_usd.max(descriptor.reserve.micro_usd),
@@ -1436,12 +1469,6 @@ impl<
             d.scope = Some(file_tools::catalog_digest(&descriptor));
             d.account_binding = descriptor.account.clone();
             d.timeout = Some(descriptor.timeout);
-            let old = bx(|| self.store.operation(&c.run, &key)).await?;
-            if let Some(op) = &old
-                && op.request.input != input
-            {
-                return Err(Error::Conflict);
-            }
             let lookup_input = input.clone();
             let repair_input = input.clone();
             if let Some(op) = &old {

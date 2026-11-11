@@ -41,6 +41,16 @@ impl GeminiImages {
         {
             return Err(Error::Unsupported("image_output_options".into()));
         }
+        config
+            .capabilities
+            .images
+            .size_policy(request.action())
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "IMAGE_SIZE_POLICY_MISSING: configure model/action size capability".into(),
+                )
+            })?
+            .validate_size(request.size())?;
         let supported = match request.action() {
             ImageAction::Generate => config.capabilities.images.generation,
             ImageAction::Edit => config.capabilities.images.reference_edit,
@@ -68,6 +78,9 @@ impl GeminiImages {
     }
 }
 impl ImagePort for GeminiImages {
+    fn size_policy(&self, action: ImageAction) -> Option<ImageSizePolicy> {
+        self.0.config.capabilities.images.size_policy(action)
+    }
     fn identity(&self) -> String {
         let c = &self.0.config;
         digest(&json!([

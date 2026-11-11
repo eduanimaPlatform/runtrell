@@ -43,6 +43,16 @@ impl OpenAiImages {
     }
     fn body(&self, request: &PreparedImageRequest) -> Result<Value> {
         let config = &self.adapter.config;
+        config
+            .capabilities
+            .images
+            .size_policy(request.action())
+            .ok_or_else(|| {
+                Error::Invalid(
+                    "IMAGE_SIZE_POLICY_MISSING: configure model/action size capability".into(),
+                )
+            })?
+            .validate_size(request.size())?;
         let supported = match request.action() {
             ImageAction::Generate => config.capabilities.images.generation,
             ImageAction::Edit => config.capabilities.images.reference_edit,
@@ -118,6 +128,9 @@ impl OpenAiImages {
     }
 }
 impl ImagePort for OpenAiImages {
+    fn size_policy(&self, action: ImageAction) -> Option<ImageSizePolicy> {
+        self.adapter.config.capabilities.images.size_policy(action)
+    }
     fn identity(&self) -> String {
         let c = &self.adapter.config;
         digest(&json!([

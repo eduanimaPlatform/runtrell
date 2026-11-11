@@ -526,7 +526,9 @@ pub trait Tool: Send + Sync {
         async move { Ok(()) }
     }
     /// Preflight the complete request and quote any floor above the descriptor's
-    /// configured reserve. Runtime reserves the maximum of both.
+    /// configured reserve. Runtime reserves the maximum of both. Return
+    /// `InvalidToolInput` only for caller input that the Agent can correct;
+    /// host configuration, permission, storage and other failures remain ordinary errors.
     fn quote(
         &self,
         _run: &RunRecord,

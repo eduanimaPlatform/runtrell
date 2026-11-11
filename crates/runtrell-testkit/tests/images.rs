@@ -15,3 +15,11 @@ fn images_paid_validation_failure_and_unknown_usage() {
         MemoryStore::default(),
     )));
 }
+#[test]
+fn image_size_repair_returns_to_agent_without_a_bad_send() {
+    block_on(image_contracts::size_repair_returns_to_agent());
+}
+#[test]
+fn image_size_repair_stops_at_repair_limit() {
+    block_on(image_contracts::size_repair_respects_limit());
+}
