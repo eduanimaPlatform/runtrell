@@ -20,7 +20,7 @@ retentionは2a Clockと同じUnix millisecond（`ClassPolicy.retention`は期間
 
 ## File tool input bounds
 
-`runtrell-files-3` の descriptor は接続された `StandardToolStore::policy()` から範囲を生成する。
+`runtrell-files-4` の descriptor は接続された `StandardToolStore::policy()` から範囲を生成する。
 
 | tool / field | 宣言する範囲 |
 | --- | --- |
@@ -42,6 +42,19 @@ queryは最大4096 UTF-8 byte、全editのold_text/new_text合計はmax_edit_byt
 cursorは保存済みpageの値を使い、offsetは現在のfile/blob長との実行時照合を行う。
 ArtifactRefは保存済み参照をそのまま返す。所有権・digest・metadata・manifestの照合は実行時に行い、
 不一致を引数範囲の修復へ分類しない。
+
+モデル向けの `files.read` と `artifacts.read` は、保存層の `ByteRange` をそのままJSONへ直列化しない。
+成功時は範囲のUTF-8文字列を `text`、`offset`、`total`、`truncated` として返す。
+`artifacts.read` は参照・所有権・hashを保存層で検証した後、`text/*`、`application/json`、
+`application/xml`、`application/*+json`、`application/*+xml` に限って文字列を返す。
+PDF・画像・未知のmedia typeは `BINARY_ARTIFACT` の型付き失敗とし、本文を返さず、
+`document.view` または画像入力を案内する。許可されたmedia typeでも、選択した範囲が
+正しいUTF-8でなければ `NON_UTF8_TEXT`、NULなど通常の文章に不要な制御文字を含めば
+`BINARY_TEXT` とし、lossy変換しない。
+host向けの `WorkspaceStore` / `ArtifactStore` のraw-byte読取り契約は維持する。
+`StoredOutputTool` のモデル向けpreviewもUTF-8文字列へ投影する。
+tool出力上限は `descriptor.max_output_bytes` と直列化後のJSON byte数を比較してから
+履歴へ追加する。モデル文脈・予算の上限は変更しない。
 
 schema違反は通常のtool_repairでモデルへ返し、実行時のPAGE_LIMIT／RANGE_LIMIT／SEARCH_LIMIT／EDIT_LIMITも
 policy値入りの固定hintで修正可能にする。容量・保存上限・INPUT_LIMIT・SEARCH_MATCH_TOO_LARGE・権限・storageは終端のまま。

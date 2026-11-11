@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 
 type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 trait ErasedTool: Send + Sync {
+    fn authorize_input<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, ()>;
     fn authorize_result<'a>(&'a self, run: &'a RunRecord, output: &'a Value) -> Call<'a, ()>;
     fn quote<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, Amount>;
     fn operation_kind(&self) -> OperationKind;
@@ -23,6 +24,9 @@ trait ErasedTool: Send + Sync {
 }
 struct Erase<T>(T);
 impl<T: Tool> ErasedTool for Erase<T> {
+    fn authorize_input<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, ()> {
+        Box::pin(self.0.authorize_input(run, input))
+    }
     fn authorize_result<'a>(&'a self, run: &'a RunRecord, output: &'a Value) -> Call<'a, ()> {
         Box::pin(self.0.authorize_result(run, output))
     }
@@ -64,6 +68,9 @@ impl RegisteredTool {
     }
 }
 impl Tool for RegisteredTool {
+    async fn authorize_input(&self, run: &RunRecord, input: &Value) -> Result<()> {
+        self.0.authorize_input(run, input).await
+    }
     async fn authorize_result(&self, run: &RunRecord, output: &Value) -> Result<()> {
         self.0.authorize_result(run, output).await
     }

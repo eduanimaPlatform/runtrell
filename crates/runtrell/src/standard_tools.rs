@@ -86,6 +86,9 @@ struct ConfiguredTool {
     descriptor: ToolDescriptor,
 }
 impl Tool for ConfiguredTool {
+    async fn authorize_input(&self, run: &RunRecord, input: &serde_json::Value) -> Result<()> {
+        self.inner.authorize_input(run, input).await
+    }
     async fn authorize_result(&self, run: &RunRecord, output: &serde_json::Value) -> Result<()> {
         self.inner.authorize_result(run, output).await
     }

@@ -1371,6 +1371,13 @@ impl<
             if !diagnostics.is_empty() {
                 let output =
                     serde_json::json!({"code":"TOOL_INPUT_INVALID","diagnostics":diagnostics});
+                if serde_json::to_vec(&output)
+                    .map_err(|_| Error::Storage)?
+                    .len()
+                    > descriptor.max_output_bytes
+                {
+                    return Err(Error::Invalid("tool output exceeds declared limit".into()));
+                }
                 let mut cp = self.prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":input,"repairable":true,"diagnostics":diagnostics})).await?;
                 messages.push(Message {
                     role: "tool".into(),
@@ -1406,6 +1413,9 @@ impl<
             let PendingToolCall::Execute(call) = call else {
                 return Err(Error::Conflict);
             };
+            // A settled Failed result can be replayed without invoke/lookup. Check
+            // the original input's live admission before exposing that feedback.
+            tool.authorize_input(&current, &input).await?;
             let mut d = DispatchRequest::new(
                 &key,
                 tool.operation_kind(),
@@ -1527,6 +1537,13 @@ impl<
                     // Preserve the operation's exact result and expose its references
                     // as text, but do not activate an over-limit binary input.
                     let feedback = serde_json::json!({"code":code,"repairable":true,"hint":"Open fewer files or a narrower page range with the same tool.","result":output});
+                    if serde_json::to_vec(&feedback)
+                        .map_err(|_| Error::Storage)?
+                        .len()
+                        > descriptor.max_output_bytes
+                    {
+                        return Err(Error::Invalid("tool output exceeds declared limit".into()));
+                    }
                     let answer = ToolResult::failed(ToolExecutionError::new(
                         ToolErrorKind::InvalidArgs,
                         feedback.to_string(),

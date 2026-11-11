@@ -2,6 +2,58 @@
 //! Standard tools are ordinary Tool adapters; Runtime is the invocation authority.
 use crate::{data::*, *};
 use serde_json::{Value, json};
+
+fn model_text_range(range: ByteRange) -> Result<Value> {
+    let text =
+        String::from_utf8(range.bytes).map_err(|_| Error::Invalid("NON_UTF8_TEXT".into()))?;
+    if crate::data::binary_text(&text) {
+        return Err(Error::Invalid("BINARY_TEXT".into()));
+    }
+    Ok(json!({
+        "text": text,
+        "offset": range.offset,
+        "total": range.total,
+        "truncated": range.truncated,
+    }))
+}
+
+fn text_media_type(media_type: &str) -> bool {
+    let essence = media_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence.starts_with("text/")
+        || essence == "application/json"
+        || essence == "application/xml"
+        || (essence.starts_with("application/")
+            && (essence.ends_with("+json") || essence.ends_with("+xml")))
+}
+
+fn model_stored_output(stored: StoredOutput) -> Result<Value> {
+    Ok(match stored {
+        StoredOutput::Inline(value) => json!({"Inline": value}),
+        StoredOutput::External { artifact, preview } => {
+            let valid_len = match std::str::from_utf8(&preview.bytes) {
+                Ok(_) => preview.bytes.len(),
+                Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                Err(_) => return Err(Error::Storage),
+            };
+            let text =
+                std::str::from_utf8(&preview.bytes[..valid_len]).map_err(|_| Error::Storage)?;
+            json!({"External": {
+                "artifact": artifact,
+                "preview": {
+                    "text": text,
+                    "offset": preview.offset,
+                    "total": preview.total,
+                    "truncated": preview.truncated || valid_len < preview.bytes.len(),
+                }
+            }})
+        }
+    })
+}
 #[derive(Clone, Copy, Debug)]
 pub enum FileAction {
     List,
@@ -17,6 +69,10 @@ pub struct FileTool<S = DataStore> {
     pub store: S,
     pub access: Access,
     pub action: FileAction,
+}
+enum FileToolOutcome {
+    Value(Value),
+    BinaryArtifact(ArtifactRef),
 }
 impl<S: StandardToolStore> FileTool<S> {
     /// Explicit allowlist: unknown errors and resource stop conditions are fatal.
@@ -48,6 +104,12 @@ impl<S: StandardToolStore> FileTool<S> {
                     "RANGE" => "Read within the current file size using a valid offset.",
                     "BINARY" | "NON_UTF8" => {
                         "Exact replacement requires UTF-8 text without binary control characters; choose a text file and text edits."
+                    }
+                    "NON_UTF8_TEXT" => {
+                        "Choose a UTF-8 text source or request a range aligned to UTF-8 character boundaries."
+                    }
+                    "BINARY_TEXT" => {
+                        "The selected text contains binary control characters. Choose a plain text source."
                     }
                     "expected_revision" | "expected_revision required" => {
                         "Use the current integer revision, or explicit null only when creating a file."
@@ -131,7 +193,7 @@ impl<S: StandardToolStore> FileTool<S> {
         }
         Ok(())
     }
-    async fn execute(&self, input: Value) -> Result<Value> {
+    async fn execute(&self, input: Value) -> Result<FileToolOutcome> {
         let string = |name: &str| {
             input[name]
                 .as_str()
@@ -151,22 +213,22 @@ impl<S: StandardToolStore> FileTool<S> {
                 .map(str::to_string)
         };
         match self.action {
-            FileAction::List => Ok(json!(
+            FileAction::List => Ok(FileToolOutcome::Value(json!(
                 self.store
                     .list(&self.access, cursor(), size("limit")?)
                     .await?
-            )),
-            FileAction::Read => Ok(json!(
+            ))),
+            FileAction::Read => Ok(FileToolOutcome::Value(model_text_range(
                 self.store
                     .read(
                         &self.access,
                         string("path")?,
                         number("revision")?,
                         number("offset")?,
-                        size("length")?
+                        size("length")?,
                     )
-                    .await?
-            )),
+                    .await?,
+            )?)),
             FileAction::Write => {
                 let expected = match input.get("expected_revision") {
                     Some(Value::Null) => None,
@@ -176,7 +238,7 @@ impl<S: StandardToolStore> FileTool<S> {
                     ),
                     None => return Err(Error::Invalid("expected_revision required".into())),
                 };
-                Ok(json!(
+                Ok(FileToolOutcome::Value(json!(
                     self.store
                         .write(
                             &self.access,
@@ -185,15 +247,15 @@ impl<S: StandardToolStore> FileTool<S> {
                             string("text")?.as_bytes()
                         )
                         .await?
-                ))
+                )))
             }
             FileAction::Delete => {
                 self.store
                     .delete(&self.access, string("path")?, number("expected_revision")?)
                     .await?;
-                Ok(json!({"saved":true}))
+                Ok(FileToolOutcome::Value(json!({"saved":true})))
             }
-            FileAction::Search => Ok(json!(
+            FileAction::Search => Ok(FileToolOutcome::Value(json!(
                 self.store
                     .search(
                         &self.access,
@@ -203,24 +265,27 @@ impl<S: StandardToolStore> FileTool<S> {
                         size("max_bytes")?
                     )
                     .await?
-            )),
+            ))),
             FileAction::ExactReplace => {
                 let edits = serde_json::from_value(input["edits"].clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
-                Ok(json!(
+                Ok(FileToolOutcome::Value(json!(
                     self.store
                         .exact_replace(&self.access, number("expected_revision")?, edits)
                         .await?
-                ))
+                )))
             }
             FileAction::ArtifactRead => {
                 let reference = serde_json::from_value(input["artifact"].clone())
                     .map_err(|e| Error::Invalid(e.to_string()))?;
-                Ok(json!(
-                    self.store
-                        .read_artifact(&self.access, &reference, number("offset")?, size("length")?)
-                        .await?
-                ))
+                let range = self
+                    .store
+                    .read_artifact(&self.access, &reference, number("offset")?, size("length")?)
+                    .await?;
+                if !text_media_type(&reference.media_type) {
+                    return Ok(FileToolOutcome::BinaryArtifact(reference));
+                }
+                Ok(FileToolOutcome::Value(model_text_range(range)?))
             }
         }
     }
@@ -233,7 +298,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
         );
         ToolDescriptor {
             name: self.name().into(),
-            version: "runtrell-files-3".into(),
+            version: "runtrell-files-4".into(),
             account: "local-files".into(),
             permission: if write {
                 "workspace.write"
@@ -284,11 +349,22 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
             });
         }
         Ok(match self.execute(input).await {
-            Ok(output) => ExternalResult::Applied {
+            Ok(FileToolOutcome::Value(output)) => ExternalResult::Applied {
                 physical_evidence: None,
                 output,
                 usage: Usage::measured(0, 0, 0),
                 external_id: None,
+            },
+            Ok(FileToolOutcome::BinaryArtifact(reference)) => ExternalResult::Failed {
+                repair_hint: Some(format!(
+                    "Binary artifact: media_type={}, size={}, sha256={}. Use document.view for documents or an image input for images.",
+                    reference.media_type, reference.bytes, reference.hash
+                )),
+                physical_evidence: None,
+                code: "BINARY_ARTIFACT".into(),
+                usage: Usage::measured(0, 0, 0),
+                retry_after: None,
+                provider_diagnostic: None,
             },
             Err(e) => ExternalResult::Failed {
                 repair_hint: self.repair_failure(&e).map(|(_, hint)| hint),
@@ -354,19 +430,19 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
                 external_id,
             } => {
                 validate_schema(&output, &self.inner.descriptor().output_schema)?;
+                let stored = self
+                    .store
+                    .store_output(
+                        &self.access,
+                        &context.operation,
+                        output,
+                        self.inline_limit,
+                        self.now,
+                    )
+                    .await?;
                 ExternalResult::Applied {
                     physical_evidence,
-                    output: json!(
-                        self.store
-                            .store_output(
-                                &self.access,
-                                &context.operation,
-                                output,
-                                self.inline_limit,
-                                self.now
-                            )
-                            .await?
-                    ),
+                    output: model_stored_output(stored)?,
                     usage,
                     external_id,
                 }
@@ -376,6 +452,9 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
     }
 }
 impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
+    async fn authorize_input(&self, run: &RunRecord, input: &Value) -> Result<()> {
+        self.inner.authorize_input(run, input).await
+    }
     async fn authorize_result(&self, run: &RunRecord, output: &Value) -> Result<()> {
         self.inner.authorize_result(run, output).await
     }
@@ -398,7 +477,7 @@ impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
 
     fn descriptor(&self) -> ToolDescriptor {
         let mut d = self.inner.descriptor();
-        d.version = format!("{}:stored-output-1:{}", d.version, self.inline_limit);
+        d.version = format!("{}:stored-output-2:{}", d.version, self.inline_limit);
         d.output_schema = json!({"type":"object"});
         d.max_output_bytes = self.inline_limit.saturating_mul(6).saturating_add(8192);
         d
@@ -481,5 +560,38 @@ impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'stati
         // operation. Matching evidence can predate this invocation, so it cannot
         // establish the outcome of a timed-out operation.
         Ok(Lookup::Unknown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stored_output_preview_trims_an_incomplete_utf8_character() {
+        let store = DataStore::memory(StoragePolicy::default());
+        let access = Access::owner(Namespace {
+            owner: RunHandle {
+                tenant: "tenant".into(),
+                id: "run".into(),
+            },
+            agent: "main".into(),
+        });
+        let value = json!({"text":"é".repeat(10)});
+        let serialized = serde_json::to_vec(&value).unwrap();
+        let split = serialized.iter().position(|b| *b == 0xc3).unwrap() + 1;
+        let stored = store
+            .store_output(&access, "unicode", value, split, 0)
+            .await
+            .unwrap();
+        let StoredOutput::External { preview, .. } = &stored else {
+            panic!("expected stored output")
+        };
+        assert_eq!(preview.bytes.len(), split);
+        assert!(std::str::from_utf8(&preview.bytes).is_err());
+        let output = model_stored_output(stored).unwrap();
+        assert_eq!(output["External"]["preview"]["text"], "{\"text\":\"");
+        assert_eq!(output["External"]["preview"]["truncated"], true);
+        assert!(output.pointer("/External/preview/bytes").is_none());
     }
 }

@@ -14,7 +14,7 @@ pub fn content_digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
-fn binary_text(text: &str) -> bool {
+pub(crate) fn binary_text(text: &str) -> bool {
     text.chars()
         .any(|c| c.is_control() && !['\r', '\n', '\t'].contains(&c))
 }

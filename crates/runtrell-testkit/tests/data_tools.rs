@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::attachments::{Attachment, ExternalAttachment};
 use runtrell::{data::*, file_tools::*, memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::{Value, json};
+use std::future::Future;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::task::Poll;
 use std::time::{Duration, Instant};
 #[test]
 fn file_execution_failures_are_model_repairable() {
@@ -642,8 +645,9 @@ fn validator_tool_and_output_wrapper_use_common_dispatch() {
         let ExternalResult::Applied { output, .. } = result else {
             panic!("output result")
         };
-        let stored: StoredOutput = serde_json::from_value(output).unwrap();
-        assert!(matches!(stored, StoredOutput::External { .. }));
+        assert!(output.pointer("/External/artifact").is_some());
+        assert!(output.pointer("/External/preview/text").is_some());
+        assert!(output.pointer("/External/preview/bytes").is_none());
     });
 }
 #[test]
@@ -702,6 +706,351 @@ fn lost_file_response_keeps_saved_content_and_does_not_replay() {
         assert_eq!(
             s.list_operations(&c.run).await.unwrap()[0].state,
             OperationState::Unknown
+        );
+    });
+}
+
+#[derive(Clone)]
+struct EscapingOutputTool;
+
+impl Tool for EscapingOutputTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        let mut descriptor = BusinessTool::new("escaping").descriptor();
+        descriptor.max_output_bytes = 40;
+        descriptor
+    }
+
+    async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
+        Ok(ExternalResult::Applied {
+            physical_evidence: None,
+            output: json!({"text":"\n".repeat(20)}),
+            usage: Usage::measured(0, 0, 0),
+            external_id: None,
+        })
+    }
+
+    async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+        Ok(Lookup::Unknown)
+    }
+}
+
+#[test]
+fn runtime_rejects_json_expansion_before_model_history() {
+    block_on(async {
+        let output = json!({"text":"\n".repeat(20)});
+        assert!(output["text"].as_str().unwrap().len() + 11 < 40);
+        assert!(serde_json::to_vec(&output).unwrap().len() > 40);
+        let store = Arc::new(MemoryStore::default());
+        let (_, claim) = start(&store).await;
+        let model = FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "escaped".into(),
+                name: "escaping".into(),
+                arguments: json!({}),
+            }]),
+            FakeModel::decision(json!({"decision":"keep"})),
+        ]);
+        let runtime = Runtime {
+            store: store.clone(),
+            model: model.clone(),
+            tools: vec![EscapingOutputTool],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let outcome = runtime.drive(&claim).await.unwrap();
+        assert!(matches!(
+            outcome.state,
+            RunState::Terminal(Terminal::Failed(ref reason)) if reason == "invalid input: tool output exceeds declared limit"
+        ));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        let operation = store
+            .list_operations(&claim.run)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|op| op.request.target == "escaping")
+            .unwrap();
+        assert!(matches!(
+            operation.result,
+            Some(ExternalResult::Applied { .. })
+        ));
+    });
+}
+
+struct TinyInputTool;
+
+impl Tool for TinyInputTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        let mut descriptor = BusinessTool::new("tiny-input").descriptor();
+        descriptor.max_output_bytes = 40;
+        descriptor.input_schema = json!({"type":"object","properties":{"required":{"type":"string"}},"required":["required"]});
+        descriptor
+    }
+
+    async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
+        panic!("schema-invalid input must not invoke the tool")
+    }
+
+    async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+        panic!("schema-invalid input must not lookup the tool")
+    }
+}
+
+#[test]
+fn runtime_rejects_oversized_schema_feedback_before_model_history() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        let (_, claim) = start(&store).await;
+        let model = FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "invalid".into(),
+                name: "tiny-input".into(),
+                arguments: json!({}),
+            }]),
+            FakeModel::decision(json!({"decision":"keep"})),
+        ]);
+        let runtime = Runtime {
+            store: store.clone(),
+            model: model.clone(),
+            tools: vec![TinyInputTool],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let outcome = runtime.drive(&claim).await.unwrap();
+        assert!(matches!(
+            outcome.state,
+            RunState::Terminal(Terminal::Failed(ref reason)) if reason == "invalid input: tool output exceeds declared limit"
+        ));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert!(
+            store
+                .list_operations(&claim.run)
+                .await
+                .unwrap()
+                .iter()
+                .all(|op| op.request.kind != OperationKind::Tool)
+        );
+    });
+}
+
+#[derive(Clone)]
+struct AttachmentLimitModel(FakeModel);
+
+impl ModelPort for AttachmentLimitModel {
+    fn check_input_attachments(
+        &self,
+        attachments: &[Attachment],
+        _: &[runtrell::images::ImageReference],
+    ) -> Result<()> {
+        if attachments.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Invalid("MODEL_ATTACHMENT_LIMIT".into()))
+        }
+    }
+
+    fn limits(&self) -> ModelLimits {
+        self.0.limits()
+    }
+
+    fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
+        self.0.input_upper_bound(request)
+    }
+
+    fn recovery(&self) -> Option<(String, u64)> {
+        self.0.recovery()
+    }
+
+    async fn invoke(
+        &self,
+        context: &ToolContext,
+        request: PreparedModelRequest,
+    ) -> Result<ExternalResult> {
+        self.0.invoke(context, request).await
+    }
+
+    async fn lookup(&self, context: &ToolContext, request: PreparedModelRequest) -> Result<Lookup> {
+        self.0.lookup(context, request).await
+    }
+}
+
+struct NearLimitAttachmentTool;
+
+impl NearLimitAttachmentTool {
+    fn output() -> Value {
+        json!({"attachments":[Attachment::External(ExternalAttachment {
+            reference_id: "document".into(),
+            version: "1".into(),
+            pages: None,
+            mime_type: "application/pdf".into(),
+            bytes: 1,
+            digest: "0".repeat(64),
+        })]})
+    }
+}
+
+impl Tool for NearLimitAttachmentTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        let mut descriptor = BusinessTool::new("near-limit-attachment").descriptor();
+        descriptor.max_output_bytes = serde_json::to_vec(&Self::output()).unwrap().len() + 1;
+        descriptor
+    }
+
+    async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
+        Ok(ExternalResult::Applied {
+            physical_evidence: None,
+            output: Self::output(),
+            usage: Usage::measured(0, 0, 0),
+            external_id: None,
+        })
+    }
+
+    async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+        Ok(Lookup::Unknown)
+    }
+}
+
+#[test]
+fn attachment_limit_feedback_respects_serialized_output_cap() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        let (_, claim) = start(&store).await;
+        let scripted = FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "document".into(),
+                name: "near-limit-attachment".into(),
+                arguments: json!({}),
+            }]),
+            FakeModel::decision(json!({"decision":"keep"})),
+        ]);
+        let runtime = Runtime {
+            store,
+            model: AttachmentLimitModel(scripted.clone()),
+            tools: vec![NearLimitAttachmentTool],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let outcome = runtime.drive(&claim).await.unwrap();
+        assert!(matches!(
+            outcome.state,
+            RunState::Terminal(Terminal::Failed(ref reason)) if reason == "invalid input: tool output exceeds declared limit"
+        ));
+        assert_eq!(scripted.requests.lock().unwrap().len(), 1);
+        assert!(
+            outcome
+                .checkpoint
+                .unwrap()
+                .messages
+                .iter()
+                .all(|message| message.role != "tool")
+        );
+    });
+}
+
+struct PausedRepairFailure {
+    store: Arc<MemoryStore>,
+    recorded: Arc<AtomicBool>,
+    revoked: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Tool for PausedRepairFailure {
+    async fn authorize_input(&self, _: &RunRecord, _: &Value) -> Result<()> {
+        if self.revoked.load(Ordering::SeqCst) {
+            Err(Error::PermissionDenied)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn descriptor(&self) -> ToolDescriptor {
+        BusinessTool::new("scoped-failure").descriptor()
+    }
+
+    async fn invoke(&self, context: &ToolContext, _: Value) -> Result<ExternalResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let failure = ExternalResult::Failed {
+            physical_evidence: None,
+            code: "BINARY_ARTIFACT".into(),
+            usage: Usage::measured(0, 0, 0),
+            retry_after: None,
+            repair_hint: Some("Use document.view".into()),
+            provider_diagnostic: None,
+        };
+        self.store
+            .record(&context.claim, &context.operation, failure, 0)
+            .await?;
+        self.recorded.store(true, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
+    async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+        panic!("settled failure must not use lookup")
+    }
+}
+
+#[test]
+fn revoked_input_blocks_replay_of_settled_repair_failure() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        let (_, claim) = start(&store).await;
+        let recorded = Arc::new(AtomicBool::new(false));
+        let revoked = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model = FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "source".into(),
+                name: "scoped-failure".into(),
+                arguments: json!({"artifact":"source"}),
+            }]),
+            FakeModel::decision(json!({"decision":"keep"})),
+        ]);
+        let runtime = Runtime {
+            store: store.clone(),
+            model: model.clone(),
+            tools: vec![PausedRepairFailure {
+                store: store.clone(),
+                recorded: recorded.clone(),
+                revoked: revoked.clone(),
+                calls: calls.clone(),
+            }],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let mut driving = Box::pin(runtime.drive(&claim));
+        std::future::poll_fn(|cx| {
+            assert!(driving.as_mut().poll(cx).is_pending());
+            if recorded.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        drop(driving);
+        revoked.store(true, Ordering::SeqCst);
+        let outcome = runtime.drive(&claim).await.unwrap();
+        assert!(matches!(
+            outcome.state,
+            RunState::Terminal(Terminal::Failed(ref reason)) if reason == "permission denied"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert!(
+            outcome
+                .checkpoint
+                .unwrap()
+                .messages
+                .iter()
+                .all(|message| message.role != "tool")
         );
     });
 }

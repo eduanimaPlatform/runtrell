@@ -79,6 +79,11 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 `DispatchRequest.recovery_proof`は最終要求・intent・全祖先予約と同じbegin境界に固定する。invoke/lookup/cancelのToolContextから元証明を参照できる。既存操作では準備を再実行せず、保存済み要求と証明で照合する。adapterが現在の保存世代・lease・ownerとの一致を検証する。新attemptの証明取得でも元予約snapshotのrecovery_untilを延長しない。準備済み操作のNotFoundはproof.generationと照合し、Toolのdescriptor digestであるscopeとは分ける。初回準備失敗で予約を作らないことと、既存Unknownの予約を保持することは別契約である。RegisteredToolとStoredOutputToolも準備宣言・hookを転送する。
 
+Toolの `authorize_input(run, input)` は、schema合格後に新規実行と保存済み結果の再提示の両方で呼ぶ。
+許可済み参照や委譲grantが失効した場合、Failedの修復hintもモデルへ再提示しない。
+hookは参照本文を取得せず、liveな認可・対象照合だけを行う。RegisteredTool、ConfiguredTool、
+StoredOutputToolはこのhookを内側のToolへ転送する。既定実装は追加の認可条件を持たないTool向けである。
+
 `ExternalResult::{Applied,Failed}.physical_evidence`は接続先が報告した物理送信の観測列。各観測は順序番号と不透明bytes、列全体はComplete/Truncatedを持ち、最大256観測・合計65536 bytes、順序番号は狭義増加とする。切詰めはadapterが宣言し、Runtrellは黙って切り捨てず上限違反を拒否する。これは`Operation.usage_observations`（Runtrellの未精算論理結果の使用量履歴）とは別物。結果と一緒にMemory/Pgへ保存し、再照合・同値結果の重複精算防止に使う。証拠bytesをRuntrellが料金へ解釈することはなく、Usageの測定・完全性検査も引き続き必要となる。
 
 Provider adapterの失敗診断は公開`ProviderDiagnostic`を`ExternalResult::Failed.provider_diagnostic`または`ExternalResult::UnknownDiagnostic`に持たせ、Operationの既存result／unsettled_resultと共に保存する。`Operation::provider_diagnostic()`は未精算結果の証拠を優先する。phase、送信確実性、実HTTP statusと制限されたprovider識別子だけを公開し、message、header、URL、bodyは含めない。分類・再試行に使う既存`Failure.status`は本文中の数値codeを反映し得るため、実HTTP statusとは別に扱う。詳細は[providers](providers.md#contract)。
@@ -148,6 +153,9 @@ shared limits and recovery without re-executing a saved operation.
 | `PATH_NOT_CANONICAL`, `PATH_ALIAS`, `FILE_PARENT`, `DUPLICATE_PATH` | Repair: list files and correct the path or edit set |
 | `CURSOR`, `RANGE` | Repair: restart pagination or correct the byte offset |
 | `BINARY`, `NON_UTF8` | Repair: choose a UTF-8 text file/text edits |
+| `BINARY_ARTIFACT` | Repair: use `document.view` or an image input for a saved binary artifact; no binary bytes are returned |
+| `NON_UTF8_TEXT` | Repair: request an aligned UTF-8 text range or choose a text source |
+| `BINARY_TEXT` | Repair: choose a plain text source without binary control characters |
 | Invalid `expected_revision` shape | Schema repair before invocation; adapter diagnostic also allows correcting revision |
 | Workspace `Conflict`, `NotFound` | Repair: refresh list/read revision/digest/cursor or select/create the correct path |
 | Artifact `Conflict`, `NotFound` | Fatal: do not reinterpret missing/inconsistent owned references as workspace CAS |
@@ -160,7 +168,7 @@ Custom `StandardToolStore` adapters must reserve workspace `Conflict` for
 known atomic CAS/input conflicts and `NotFound` for requested paths; report
 backend/transaction uncertainty as `Storage` or the appropriate non-input error.
 
-File descriptor version `runtrell-files-3` declares the active store's page,
+File descriptor version `runtrell-files-4` declares the active store's page,
 read/search and edit-count bounds in its input schema. The canonical path and
 search-query constants are shared with `DataStore`. Schema rejection uses the
 existing `TOOL_INPUT_INVALID` feedback and checkpointed `tool_repair` path before
@@ -500,6 +508,16 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    /// Recheck live authorization for this exact model input before either a new
+    /// invocation or replaying a settled result into model history. This hook
+    /// must not acquire or expose the referenced content.
+    fn authorize_input(
+        &self,
+        _run: &RunRecord,
+        _input: &Value,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Ok(()) }
+    }
     fn authorize_result(
         &self,
         _run: &RunRecord,

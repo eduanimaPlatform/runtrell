@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — text-only model file reads (breaking)
+
+- `files.read` and `artifacts.read` return a UTF-8 `text` range to the model.
+  Binary artifacts return `BINARY_ARTIFACT` with bounded metadata and guidance;
+  invalid UTF-8 or binary controls are rejected. Host storage APIs still return
+  raw bytes. The file descriptor version is `runtrell-files-4`.
+- Stored output previews use text and trim an incomplete UTF-8 character.
+  Their descriptor version is `stored-output-2`. `Tool::authorize_input` is
+  called on new tool calls and saved-result replay so a revoked grant cannot
+  expose a stored failure hint.
+
 ## Unreleased — configurable no-progress stop (breaking)
 
 - `RepairPolicy.max_no_progress` is now `Option<NonZeroU64>`: the default is

@@ -167,7 +167,7 @@ fn text_bounds_come_from_policy_without_changing_byte_semantics() {
     let store = DataStore::memory(policy);
     let write = tool(&store, FileAction::Write).descriptor();
     let replace = tool(&store, FileAction::ExactReplace).descriptor();
-    assert_eq!(write.version, "runtrell-files-3");
+    assert_eq!(write.version, "runtrell-files-4");
     assert_eq!(write.input_schema["properties"]["text"]["maxLength"], 300);
     let fields = &replace.input_schema["properties"]["edits"]["items"]["properties"];
     assert_eq!(fields["old_text"]["maxLength"], 200);

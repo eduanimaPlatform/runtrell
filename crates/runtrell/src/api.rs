@@ -1287,6 +1287,16 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    /// Recheck live authorization for this exact model input before either a new
+    /// invocation or replaying a settled result into model history. This hook
+    /// must not acquire or expose the referenced content.
+    fn authorize_input(
+        &self,
+        _run: &RunRecord,
+        _input: &Value,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        async move { Ok(()) }
+    }
     fn authorize_result(
         &self,
         _run: &RunRecord,

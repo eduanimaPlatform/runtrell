@@ -128,10 +128,9 @@ async fn contract(open: impl Fn() -> DataStore) {
     else {
         panic!("stored tool output")
     };
-    assert!(matches!(
-        serde_json::from_value::<StoredOutput>(output).unwrap(),
-        StoredOutput::External { .. }
-    ));
+    assert!(output.pointer("/External/artifact").is_some());
+    assert!(output.pointer("/External/preview/text").is_some());
+    assert!(output.pointer("/External/preview/bytes").is_none());
     let before = s.context(&a).await.unwrap();
     s.append_context(
         &a,
