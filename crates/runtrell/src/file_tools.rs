@@ -421,6 +421,8 @@ impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
 pub struct ValidationTool<V, S = DataStore> {
     pub adapter: std::sync::Arc<DataValidator<V, S>>,
     pub run: RunRecord,
+    /// Host supplied operation deadline in milliseconds; must be positive.
+    pub timeout: u64,
 }
 impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'static> Tool
     for ValidationTool<V, S>
@@ -436,7 +438,7 @@ impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'stati
             input_schema: json!({"type":"object"}),
             output_schema: json!({"type":"object"}),
             side_effect: false,
-            timeout: 30_000,
+            timeout: self.timeout,
             max_output_bytes: self.adapter.store.policy().max_read,
             reserve: Amount::default(),
             quantities: Default::default(),
@@ -444,7 +446,7 @@ impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'stati
             retry: RetryPolicy {
                 max_attempts: 1,
                 backoff: 0,
-                max_elapsed: 30_000,
+                max_elapsed: self.timeout,
             },
         }
     }
@@ -467,7 +469,17 @@ impl<V: TargetValidator + 'static, S: EvidenceStore + StandardToolStore + 'stati
             external_id: None,
         })
     }
-    async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+    async fn lookup(&self, context: &ToolContext, _: Value) -> Result<Lookup> {
+        if context.claim.run != self.run.handle
+            || !matches!(context.permission.as_str(), "validate" | "reconcile")
+            || context.account_binding != "local-validation"
+            || self.adapter.access.actor().owner != self.run.handle
+        {
+            return Err(Error::PermissionDenied);
+        }
+        // EvidenceStore records target/validator evidence, not the originating
+        // operation. Matching evidence can predate this invocation, so it cannot
+        // establish the outcome of a timed-out operation.
         Ok(Lookup::Unknown)
     }
 }

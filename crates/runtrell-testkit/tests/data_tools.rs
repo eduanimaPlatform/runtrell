@@ -4,8 +4,9 @@ use runtrell_testkit::*;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::time::{Duration, Instant};
 #[test]
 fn file_execution_failures_are_model_repairable() {
     block_on(tool_failure_contracts::file_repairs(Arc::new(
@@ -154,6 +155,244 @@ impl TargetValidator for Rules {
     fn check(&self, _: &Target) -> Result<Vec<Diagnostic>> {
         Ok(vec![])
     }
+}
+struct SlowRules {
+    delay: Duration,
+    version: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+impl TargetValidator for SlowRules {
+    fn key(&self) -> ValidatorKey {
+        ValidatorKey::new("slow-host", self.version)
+    }
+    fn check(&self, _: &Target) -> Result<Vec<Diagnostic>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        Ok(vec![])
+    }
+}
+#[derive(Clone)]
+struct WallClock(Instant);
+impl Clock for WallClock {
+    fn now(&self) -> u64 {
+        self.0.elapsed().as_millis() as u64
+    }
+    async fn wait_until(&self, deadline: u64) {
+        tokio::time::sleep(Duration::from_millis(deadline.saturating_sub(self.now()))).await;
+    }
+}
+fn validation_context(claim: &Claim, permission: &str) -> ToolContext {
+    ToolContext {
+        recovery_proof: None,
+        claim: claim.clone(),
+        principal: "judge".into(),
+        operation: "validation-op".into(),
+        attempt: 1,
+        deadline: None,
+        permission: permission.into(),
+        account_binding: "local-validation".into(),
+    }
+}
+async fn validation_fixture(
+    delay: Duration,
+    timeout: u64,
+) -> (
+    Arc<MemoryStore>,
+    Claim,
+    DataStore,
+    Access,
+    ValidationTool<SlowRules>,
+) {
+    let store = Arc::new(MemoryStore::default());
+    let account = store
+        .create_account("tenant", Amount::new(10000, 10000), None)
+        .await
+        .unwrap();
+    let handle = store
+        .start(RunSpec::new("tenant", "slow", account, "judge"))
+        .await
+        .unwrap();
+    let claim = store.claim(&handle, "worker", 0, 100_000).await.unwrap();
+    let data = DataStore::memory(StoragePolicy::default());
+    let access = Access::owner(Namespace {
+        owner: handle,
+        agent: "main".into(),
+    });
+    let tool = ValidationTool {
+        adapter: Arc::new(DataValidator {
+            store: data.clone(),
+            access: access.clone(),
+            validator: SlowRules {
+                delay,
+                version: "1",
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            workspace: true,
+            artifacts: vec![],
+        }),
+        run: store.get(&claim.run).await.unwrap(),
+        timeout,
+    };
+    (store, claim, data, access, tool)
+}
+#[test]
+fn slow_validation_over_thirty_seconds_applies_with_host_timeout() {
+    block_on(async {
+        let (store, claim, _, _, tool) =
+            validation_fixture(Duration::from_millis(30_100), 35_000).await;
+        let clock = WallClock(Instant::now());
+        let rt = Runtime {
+            store: store.clone(),
+            model: FakeModel::scripted(vec![]),
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock,
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let descriptor = tool.descriptor();
+        assert_eq!(descriptor.timeout, 35_000);
+        assert_eq!(descriptor.retry.max_elapsed, 35_000);
+        let input = json!({"candidate":"slow"});
+        let mut request = DispatchRequest::new(
+            "slow-validation",
+            OperationKind::Tool,
+            "validate",
+            input.clone(),
+            descriptor.reserve,
+        );
+        request.account_binding = descriptor.account;
+        request.timeout = Some(descriptor.timeout);
+        let invoke = &tool;
+        let lookup = &tool;
+        let output = rt
+            .dispatch(
+                &claim,
+                request,
+                "validate",
+                |ctx| {
+                    let input = input.clone();
+                    async move { invoke.invoke(&ctx, input).await }
+                },
+                |ctx| {
+                    let input = input.clone();
+                    async move { lookup.lookup(&ctx, input).await }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output, ExternalResult::Applied { .. }));
+        assert!(store.list_operations(&claim.run).await.unwrap()[0].settled);
+    });
+}
+#[test]
+fn timed_out_validation_remains_unknown_even_after_evidence_arrives() {
+    block_on(async {
+        let (store, claim, data, access, tool) =
+            validation_fixture(Duration::from_millis(150), 30).await;
+        let clock = WallClock(Instant::now());
+        let rt = Runtime {
+            store: store.clone(),
+            model: FakeModel::scripted(vec![]),
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock,
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let descriptor = tool.descriptor();
+        let input = json!({"candidate":"late"});
+        let mut request = DispatchRequest::new(
+            "late-validation",
+            OperationKind::Tool,
+            "validate",
+            input.clone(),
+            descriptor.reserve,
+        );
+        request.account_binding = descriptor.account;
+        request.timeout = Some(descriptor.timeout);
+        let invoke = &tool;
+        let lookup = &tool;
+        let result = rt
+            .dispatch(
+                &claim,
+                request.clone(),
+                "validate",
+                |ctx| {
+                    let input = input.clone();
+                    async move { invoke.invoke(&ctx, input).await }
+                },
+                |ctx| {
+                    let input = input.clone();
+                    async move { lookup.lookup(&ctx, input).await }
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, ExternalResult::Unknown);
+        assert!(matches!(
+            tool.lookup(&validation_context(&claim, "validate"), input.clone())
+                .await
+                .unwrap(),
+            Lookup::Unknown
+        ));
+        assert!(!store.list_operations(&claim.run).await.unwrap()[0].settled);
+        let target = data
+            .run_target(&access, &tool.run, input.clone(), true, vec![])
+            .unwrap();
+        let wait_start = Instant::now();
+        while data.evidence(&access, &target).unwrap().is_empty()
+            && wait_start.elapsed() < Duration::from_secs(2)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(data.evidence(&access, &target).unwrap().len(), 1);
+        assert!(matches!(
+            tool.lookup(&validation_context(&claim, "reconcile"), input.clone())
+                .await
+                .unwrap(),
+            Lookup::Unknown
+        ));
+        assert_eq!(tool.adapter.validator.calls.load(Ordering::SeqCst), 1);
+        let mut wrong_account = validation_context(&claim, "validate");
+        wrong_account.account_binding = "other".into();
+        assert!(matches!(
+            tool.lookup(&wrong_account, input.clone()).await,
+            Err(Error::PermissionDenied)
+        ));
+        assert!(matches!(
+            tool.lookup(
+                &validation_context(&claim, "validate"),
+                json!({"candidate":"different"})
+            )
+            .await
+            .unwrap(),
+            Lookup::Unknown
+        ));
+        data.write(&access, "new", None, b"changed").await.unwrap();
+        assert!(matches!(
+            tool.lookup(&validation_context(&claim, "validate"), input.clone())
+                .await
+                .unwrap(),
+            Lookup::Unknown
+        ));
+        let recovered = rt
+            .dispatch(
+                &claim,
+                request,
+                "validate",
+                |ctx| {
+                    let input = input.clone();
+                    async move { invoke.invoke(&ctx, input).await }
+                },
+                |ctx| {
+                    let input = input.clone();
+                    async move { lookup.lookup(&ctx, input).await }
+                },
+            )
+            .await;
+        assert!(matches!(recovered, Err(Error::UsageUnknown)));
+    });
 }
 #[test]
 fn same_validator_finalizer_contract_for_artifact_and_structured_judgment() {
@@ -350,6 +589,7 @@ fn validator_tool_and_output_wrapper_use_common_dispatch() {
                 artifacts: vec![],
             }),
             run: s.get(&c.run).await.unwrap(),
+            timeout: 30_000,
         };
         let d = tool.descriptor();
         let mut req = DispatchRequest::new(

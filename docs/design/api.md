@@ -69,6 +69,8 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 `FileTool<S>`/`StoredOutputTool<T,S>`は`StandardToolStore`（WorkspaceStore + ArtifactStore）を、`DataValidator<V,S>`/`DataFinalizer<S>`は`EvidenceStore`を要求する。context圧縮は`ContextStore`を受け取る。既定型はDataStoreであり、外部adapterはtraitを直接実装するか、`NamespaceBackend`のopaque state読取/CASへ接続して共通アルゴリズムを再利用する。同期EvidenceStore/Validator/FinalizerはRuntimeとValidationToolが明示的にspawn_blockingへ配置する。Runtimeのvalidator/finalizerとValidationToolのadapterはArcで所有する。DataStore.validateもArc所有のTargetValidatorを受け取り、認可・対象照合・validator実行・証跡CASまでblocking poolで処理する。DataStoreのasync保存経路も同期namespace I/Oをblocking poolへ出す。native async adapterはWorkspaceStore等へ直接実装できる。同期APIの直接呼出しは呼出し元がblocking境界を担当する。
 
+`ValidationTool.timeout` はhostがミリ秒で明示する正の期限で、Runtrellの固定既定値はない。tool descriptorの操作期限とretryの最大経過時間に同値を使う。hostは検証器が待つ下位RPC上限より余裕を持たせ、Run全体のdeadlineとも整合させる。期限超過はUnknownとして保存し、検証の成功と推定しない。現在のEvidenceStoreが保存するreceiptは対象・検証器には結び付くが、元のtool operation IDには結び付かない。同じ対象の証跡が期限超過した呼出しより前に存在し得るため、ValidationTool.lookupは証跡から元operationの成功を推定せずUnknownを返す。安全な自動照合には元operation IDを耐久保存したreceiptが別途必要である。検証が副作用なしでも、元のoperationをlookupで無条件に再実行せず、hostの明示した新しい試行だけを通常の受付・期限・権限検査に通す。既存Unknownは操作台帳上未解決のまま保持する。
+
 `schema::compile_schema`/`schema_diagnostics`/`validate_schema`は同一評価器。SchemaValidatorはTargetValidatorとして保存証跡へ接続でき、ValidationChainは構造化出力に使える。未知keywordを検査する前処理は対応範囲の拒否専用で、インスタンスの検証はjsonschemaへ委譲する。Schema構成エラーとインスタンス不合格は区別し、診断はinstance pointer（path）・schema pointer（schema_path）・原因を保持する。
 
 ## 予約前の復旧準備と証拠
