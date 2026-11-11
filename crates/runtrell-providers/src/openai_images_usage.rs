@@ -2,7 +2,7 @@
 //! Usage normalization for the OpenAI Images API (`/images/generations` and
 //! `/images/edits`). It is separate from the Responses path: the Images response has
 //! its own usage object. Reported cache details are preserved; missing cache
-//! counters are inferred zero only for the exact documented 2/2.5 model list.
+//! counters are inferred zero only for the exact 2/2.5/2.6 model list below.
 //!
 //! Sources (read 2026-11-03):
 //! - OpenAI OpenAPI description `openai/openai-openapi`, `main` at c2aecc2 (2026-10-31),
@@ -16,15 +16,17 @@
 //!   pricing "doesn't apply to direct Images API requests, including /v1/images/edits".
 //!   Every input token on this endpoint is therefore billed at the ordinary rate, so the
 //!   cached counters are exactly 0 for those models.
-//! - The model IDs of those families are the ones the OpenAI OpenAPI description lists for
+//! - The model IDs of the 2/2.5 families are the ones the OpenAI OpenAPI description lists for
 //!   `CreateImageRequest.model` (`main` at f69b0e1, 2026-11-03) and the guide/pricing pages
-//!   name: [`GPT_IMAGE_2_FAMILY`]. The list is exact; no prefix, suffix or future model is
-//!   inferred from it. Any other model (`gpt-image-1*`, `chatgpt-image-latest`, a model released
-//!   later, a Responses image tool) keeps its cached counters unknown until this list is
-//!   extended from a documented statement.
+//!   name: [`GPT_IMAGE_2_FAMILY`]. On 2026-11-11 the user decided to apply the same direct
+//!   Images billing rule to the exact 2.6 Sunburst/Flare IDs: their Standard prices match 2.5,
+//!   although the guide's cache exclusion names only 2/2.5. This is an authorized policy
+//!   extrapolation, not an official statement about 2.6. The list is exact; no prefix, suffix,
+//!   dated 2.6 snapshot or future model is inferred from it. Other models and Responses image
+//!   tools keep missing cache counters unknown.
 //!
-//! A counter is filled only by one of those statements. Everything else stays `None`, with a
-//! distinct safe `Usage::unknown_reason`.
+//! A counter is filled only by the guide statement or the stated user decision.
+//! Everything else stays `None`, with a distinct safe `Usage::unknown_reason`.
 use crate::Config;
 use runtrell::{Error, Price, SettlementRecovery, SvgUsage, Usage};
 use serde_json::Value;
@@ -42,16 +44,17 @@ pub const REASON_NO_PRICE: &str = "IMAGE_USAGE_NO_PRICE";
 pub const REASON_OVERFLOW: &str = "IMAGE_USAGE_COST_OVERFLOW";
 pub const REASON_PRICE_COUNTER_UNKNOWN: &str = "IMAGE_USAGE_PRICE_COUNTER_UNKNOWN";
 
-/// Exact model IDs named by OpenAI for GPT Image 2 and GPT Image 2.5 on the direct Images API:
-/// `CreateImageRequest.model` in the OpenAPI description (2026-11-03) and the image-generation
-/// guide and pricing page (2026-11-04). Dated entries are the snapshots that description lists.
-pub const GPT_IMAGE_2_FAMILY: [&str; 6] = [
+/// Exact direct Images IDs covered by the 2/2.5 guide statement or the 2026-11-11 user decision.
+/// The 2/2.5 dated entries are documented snapshots; no dated 2.6 ID is inferred.
+pub const GPT_IMAGE_2_FAMILY: [&str; 8] = [
     "gpt-image-2",
     "gpt-image-2-2026-04-21",
     "gpt-image-2.5-sunburst",
     "gpt-image-2.5-sunburst-2026-09-08",
     "gpt-image-2.5-flare",
     "gpt-image-2.5-flare-2026-09-08",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.6-flare",
 ];
 
 /// True only for the exact IDs in [`GPT_IMAGE_2_FAMILY`].
@@ -286,10 +289,10 @@ fn attach_price_evidence(config: &Config, u: &mut Usage, billed_as_requested: bo
     }
 }
 
-/// Builds the owner settlement recovery for a usage that was stored before this
-/// normalization existed: the same spec statements, applied to the stored counters.
+/// Builds the owner settlement recovery for stored usage under the same direct Images rule:
+/// the guide statement for 2/2.5 and the 2026-11-11 user decision for 2.6.
 /// Returns `UsageUnknown` when the model family is not covered (the operation then stays for
-/// the operator) and never invents a counter the spec does not give.
+/// the operator) and fills only the cache counters covered by that rule.
 pub fn recovery_for_stored_usage(
     stored: &Usage,
     price: &Price,

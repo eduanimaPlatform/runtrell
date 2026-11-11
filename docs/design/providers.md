@@ -219,28 +219,31 @@ section "Cached input pricing".
 `output_tokens_details` is not in `ImagesUsage` but real responses carry it; it is accepted only
 when consistent with `output_tokens`.
 
-**Cached counters.** Reported `input_tokens_details.cached_tokens` and
-`input_tokens_details.cached_tokens_details.image_tokens` are preserved. The guide states that for GPT Image 2 and
-GPT Image 2.5 cached input pricing "doesn't apply to direct Images API requests, including
-/v1/images/edits", so every input token on this endpoint is billed at the ordinary rate and
-missing `cached` and `cached_image_input` are exactly 0 only for the six exact IDs
-in `openai_images_usage::GPT_IMAGE_2_FAMILY` (2 and 2.5, including documented snapshots).
-This rule does not cover 2.6 Sunburst/Flare. Their missing cache counters stay unknown
-(`None`), never zero-filled. `Price::cost` keeps
-its refusal semantics and the price is the host's, with all four input rates independent (see
-[budget](budget.md)). The [guide's cached-input statement](https://developers.openai.com/api/docs/guides/image-generation#cached-input-pricing)
-was checked 2026-11-05: it names 2 and 2.5, but gives no such exclusion for 2.6.
-For 2.6 with an unreported cache count, `Usage.price_evidence` can retain a
-known output component and the host-priced `SvgUsage` can retain the author
-component, while `Usage.micro_usd` and aggregate settlement remain unknown.
+**Cached counters.** For direct Images API calls, the 2026-11-11 user decision applies the
+GPT Image 2/2.5 billing rule to the two exact 2.6 IDs, `gpt-image-2.6-sunburst` and
+`gpt-image-2.6-flare`. The [pricing page](https://developers.openai.com/api/docs/pricing)
+lists identical Standard token rates for 2.5 and 2.6 Sunburst/Flare: text input $5,
+image input $8, and image output $30 per million tokens, with cached rates $1.25 and $2.
+The [guide's cached-input statement](https://developers.openai.com/api/docs/guides/image-generation#cached-input-pricing)
+explicitly excludes cache discounts for direct Images API requests, including edits, for 2 and
+2.5 only; applying that exclusion to 2.6 is the user's policy decision, not an official 2.6
+statement. Responses API image tools and other routes can have different cache behavior and
+are outside this rule.
+
+For the eight exact IDs in `openai_images_usage::GPT_IMAGE_2_FAMILY`, missing `cached` and
+`cached_image_input` are filled with zero, and all input tokens are billed at ordinary rates.
+Explicit nonzero cache counters contradict this rule and cause `IMAGE_USAGE_INCONSISTENT`;
+reported counters remain visible for diagnosis. Owner recovery applies the same rule to stored
+Images usage, filling only missing cache counters and refusing contradictory values. Other
+models retain unknown missing cache counters. `Price::cost` keeps its refusal semantics and
+the price is the host's, with all four input rates independent (see [budget](budget.md)).
+For an unpriced or incomplete response, `Usage.price_evidence` can retain a known
+component and the host-priced `SvgUsage` can retain the author component.
 The host reads this evidence through saved `Operation` usage and the owner
 recovery audit; it is informational, not a partial charge.
 If a response omits one total, valid counters on the other axis can still
 produce that axis's evidence. Contradictory reported parts produce no price
 evidence; the complete amount remains unknown in either case.
-An explicitly nonzero cache count on the exact 2/2.5 list contradicts that rule:
-its reported counters are retained but cost remains unknown (`IMAGE_USAGE_INCONSISTENT`).
-
 An image that arrived with unsettleable usage is kept; the adapter returns the counters it can
 prove and `Usage.unknown_reason`:
 
@@ -250,7 +253,7 @@ prove and `Usage.unknown_reason`:
 | `IMAGE_USAGE_MALFORMED` | a counter is not a non-negative integer |
 | `IMAGE_USAGE_INCOMPLETE` | a schema-required counter is missing |
 | `IMAGE_USAGE_INCONSISTENT` | parts do not add up to the totals |
-| `IMAGE_USAGE_CACHED_UNREPORTED` | model family not covered by the cached-input statement |
+| `IMAGE_USAGE_CACHED_UNREPORTED` | model outside the exact direct Images no-cache rule has unreported cache counters |
 | `IMAGE_USAGE_MODEL_UNPRICED` | the response names a model other than the requested one or a declared alias |
 | `IMAGE_USAGE_NO_PRICE` | the host configured no price |
 | `IMAGE_USAGE_PRICE_COUNTER_UNKNOWN` | another counter that affects the bill is unknown |

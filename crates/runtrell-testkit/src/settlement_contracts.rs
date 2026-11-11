@@ -93,8 +93,8 @@ pub fn recovery() -> SettlementRecovery {
 /// ceil((343 * 5 + 601 * 30) micro-USD).
 pub const EXPECTED_MICRO_USD: u64 = 19_745;
 
-/// The 2.6 response shape with unreported cache persists partial evidence and
-/// can only charge after an owner verifies the missing counters.
+/// Historical 2.6 usage stored before the 2026-11-11 direct Images rule can retain partial
+/// evidence; the owner recovery in this test fills its previously unreported cache counters.
 pub async fn partial_price_evidence_recovery<S: ControlStore + 'static>(
     store: Arc<S>,
     restarted: Arc<S>,

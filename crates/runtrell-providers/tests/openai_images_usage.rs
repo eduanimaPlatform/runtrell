@@ -13,7 +13,110 @@ use runtrell_providers::{
 use serde_json::{Value, json};
 
 #[test]
-fn img26_standard_catalog_and_reported_cache_are_not_inferred_zero() {
+fn img26_synthetic_usage_prices_missing_cache_as_zero_and_recovers_stored_usage() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/images26-synthetic-usage.json")).unwrap();
+    assert!(
+        fixture["note"]
+            .as_str()
+            .unwrap()
+            .starts_with("Synthetic provider response")
+    );
+    for model in ["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"] {
+        let cfg = config(model, Some(price(model)));
+        let missing = normalize(&cfg, &fixture);
+        assert_eq!(
+            (missing.cached, missing.cached_image_input),
+            (Some(0), Some(0))
+        );
+        assert_eq!(missing.micro_usd, Some(1_870));
+        let stored = normalize(&config(model, None), &fixture);
+        assert_eq!(
+            (stored.cached, stored.cached_image_input),
+            (Some(0), Some(0))
+        );
+        assert_eq!(stored.micro_usd, None);
+        let recovered = recovery_for_stored_openai_images_usage(&stored, &price(model)).unwrap();
+        assert_eq!(recovered.basis, images_usage::BASIS);
+        assert_eq!(recovered.price.cost(&recovered.usage), Ok(1_870));
+        let mut old_stored = stored.clone();
+        old_stored.cached = None;
+        old_stored.cached_image_input = None;
+        let recovered =
+            recovery_for_stored_openai_images_usage(&old_stored, &price(model)).unwrap();
+        assert_eq!(
+            (recovered.usage.cached, recovered.usage.cached_image_input),
+            (Some(0), Some(0))
+        );
+        assert_eq!(recovered.price.cost(&recovered.usage), Ok(1_870));
+        let flat_price = Price {
+            cached: 5_000_000,
+            cached_image_input: 8_000_000,
+            ..price(model)
+        };
+        assert!(recovery_for_stored_openai_images_usage(&old_stored, &flat_price).is_ok());
+
+        for (cached, cached_image) in [(0, 0), (12, 8)] {
+            let mut response = fixture.clone();
+            response["usage"]["input_tokens_details"]["cached_tokens"] = json!(cached);
+            response["usage"]["input_tokens_details"]["cached_tokens_details"] =
+                json!({"image_tokens":cached_image});
+            let measured = normalize(&cfg, &response);
+            assert_eq!(
+                (measured.cached, measured.cached_image_input),
+                (Some(cached), Some(cached_image))
+            );
+            if cached == 0 {
+                assert_eq!(measured.micro_usd, Some(1_870));
+            } else {
+                assert_eq!(measured.micro_usd, None);
+                assert_eq!(
+                    measured.unknown_reason.as_deref(),
+                    Some(images_usage::REASON_INCONSISTENT)
+                );
+                let reported_stored = normalize(&config(model, None), &response);
+                assert!(
+                    recovery_for_stored_openai_images_usage(&reported_stored, &price(model))
+                        .is_err()
+                );
+            }
+        }
+
+        let mut partial = old_stored.clone();
+        partial.cached = Some(0);
+        let recovered = recovery_for_stored_openai_images_usage(&partial, &price(model)).unwrap();
+        assert_eq!(
+            (recovered.usage.cached, recovered.usage.cached_image_input),
+            (Some(0), Some(0))
+        );
+        let mut invalid = old_stored.clone();
+        invalid.cached = Some(3);
+        invalid.cached_image_input = Some(4);
+        assert!(recovery_for_stored_openai_images_usage(&invalid, &price(model)).is_err());
+        let mut complete = old_stored.clone();
+        complete.cached = Some(0);
+        complete.cached_image_input = Some(0);
+        complete.input = None;
+        let incomplete_recovery =
+            recovery_for_stored_openai_images_usage(&complete, &price(model)).unwrap();
+        assert_eq!(
+            incomplete_recovery.price.cost(&incomplete_recovery.usage),
+            Err(Error::UsageUnknown)
+        );
+    }
+    let unknown_model = "gpt-image-2.6-unlisted";
+    let mut complete_unknown =
+        normalize(&config(unknown_model, Some(price(unknown_model))), &fixture);
+    complete_unknown.cached = Some(0);
+    complete_unknown.cached_image_input = Some(0);
+    assert_eq!(
+        recovery_for_stored_openai_images_usage(&complete_unknown, &price(unknown_model)),
+        Err(Error::UsageUnknown)
+    );
+}
+
+#[test]
+fn img26_standard_catalog_prices_direct_images_with_zero_cache() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/images26-standard.json")).unwrap();
     assert_eq!(fixture["tier"], "standard");
@@ -32,14 +135,14 @@ fn img26_standard_catalog_and_reported_cache_are_not_inferred_zero() {
         );
         let cfg = config(&price.model, Some(price.clone()));
         let mut response = official_minimal();
-        let unknown = normalize(&cfg, &response);
+        let normalized = normalize(&cfg, &response);
         assert_eq!(
             (
-                unknown.cached,
-                unknown.cached_image_input,
-                unknown.micro_usd
+                normalized.cached,
+                normalized.cached_image_input,
+                normalized.micro_usd
             ),
-            (None, None, None)
+            (Some(0), Some(0), Some(1_870))
         );
         response["usage"]["input_tokens_details"]["cached_tokens"] = json!(12);
         response["usage"]["input_tokens_details"]["cached_tokens_details"] =
@@ -49,8 +152,11 @@ fn img26_standard_catalog_and_reported_cache_are_not_inferred_zero() {
             (reported.cached, reported.cached_image_input),
             (Some(12), Some(8))
         );
-        // 6 text + 4 cached text + 32 image + 8 cached image + 50 output.
-        assert_eq!(reported.micro_usd, Some(1_807));
+        assert_eq!(reported.micro_usd, None);
+        assert_eq!(
+            reported.unknown_reason.as_deref(),
+            Some(images_usage::REASON_INCONSISTENT)
+        );
     }
 }
 
@@ -234,7 +340,7 @@ fn img26_malformed_author_cannot_become_free_or_priced_in_owner_recovery() {
 }
 
 #[test]
-fn img26_exact_2_and_25_cache_contradiction_stays_unknown() {
+fn img26_exact_family_cache_contradiction_stays_unknown() {
     for model in images_usage::GPT_IMAGE_2_FAMILY {
         let cfg = config(model, Some(price(model)));
         let mut response = official_minimal();
@@ -260,7 +366,7 @@ fn img26_exact_2_and_25_cache_contradiction_stays_unknown() {
 const SUNBURST: &str = "gpt-image-2.5-sunburst";
 
 #[test]
-fn img26_unknown_cache_keeps_known_output_and_author_evidence() {
+fn img26_zero_cache_prices_image_and_author_evidence() {
     let mut cfg = config("gpt-image-2.6-flare", Some(price("gpt-image-2.6-flare")));
     cfg.capabilities.images.svg_author_prices = vec![runtrell::SvgAuthorPrice {
         model: "gpt-6-luna".into(),
@@ -275,23 +381,27 @@ fn img26_unknown_cache_keeps_known_output_and_author_evidence() {
         "svg_usage":{"model":"gpt-6-luna","input_tokens":1583,"output_tokens":2304,
             "reasoning_tokens":1779,"total_tokens":3887}});
     let u = images_usage::normalize_with_svg(&cfg, &response, true);
-    assert_eq!((u.cached, u.cached_image_input), (None, None));
-    assert_eq!(u.price_evidence.as_ref().unwrap().input_micro_usd, None);
+    assert_eq!((u.cached, u.cached_image_input), (Some(0), Some(0)));
+    assert_eq!(
+        u.price_evidence.as_ref().unwrap().input_micro_usd,
+        Some(555)
+    );
     assert_eq!(
         u.price_evidence.as_ref().unwrap().output_micro_usd,
         Some(24_720)
     );
     assert_eq!(u.svg_usage.as_ref().unwrap().micro_usd, Some(1_311));
-    assert_eq!(u.micro_usd, None);
-    assert_eq!(u.amount(), Err(Error::UsageUnknown));
+    assert_eq!(u.micro_usd, Some(25_275));
+    assert_eq!(u.amount(), Ok(runtrell::Amount::new(4822, 26_586)));
     let stored: Usage = serde_json::from_value(serde_json::to_value(&u).unwrap()).unwrap();
     assert_eq!(stored, u);
 
-    let mut refined = u.clone();
-    refined.cached = Some(0);
-    refined.cached_image_input = Some(0);
-    refined.unknown_reason = None;
-    refined.price_evidence = None; // owner derives evidence from the verified price
+    let mut old = u.clone();
+    old.cached = None;
+    old.cached_image_input = None;
+    old.micro_usd = None;
+    old.unknown_reason = Some(images_usage::REASON_CACHED_UNREPORTED.into());
+    old.price_evidence = None; // owner derives evidence from the verified price
     let op = Operation {
         id: "img26".into(),
         run: cfg.run.clone(),
@@ -306,7 +416,7 @@ fn img26_unknown_cache_keeps_known_output_and_author_evidence() {
         result: Some(runtrell::ExternalResult::Applied {
             physical_evidence: None,
             output: json!({}),
-            usage: u.clone(),
+            usage: old.clone(),
             external_id: None,
         }),
         settled: false,
@@ -320,13 +430,10 @@ fn img26_unknown_cache_keeps_known_output_and_author_evidence() {
         unsettled_result: None,
         recovery: None,
     };
-    let recovery = SettlementRecovery {
-        basis: "verified-explicit-cache-zero".into(),
-        usage: refined,
-        price: price("gpt-image-2.6-flare"),
-    };
+    let recovery =
+        recovery_for_stored_openai_images_usage(&old, &price("gpt-image-2.6-flare")).unwrap();
     let (_, record) = op.plan_recovery(&recovery, 2).unwrap().unwrap();
-    assert_eq!(record.previous, u);
+    assert_eq!(record.previous, old);
     assert_eq!(record.amount, runtrell::Amount::new(4822, 26_586));
     assert_eq!(
         record
@@ -612,6 +719,8 @@ fn family_matcher_is_exact() {
         "gpt-image-3",
         "gpt-image-2.5",
         "gpt-image-2.5-sunburst-2099-01-01",
+        "gpt-image-2.6-sunburst-2026-11-11",
+        "gpt-image-2.6-flare-2026-11-11",
         "gpt-image-2-mini",
         "gpt-image-20",
         "gpt-image-2x",

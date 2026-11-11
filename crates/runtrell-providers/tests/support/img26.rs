@@ -11,7 +11,7 @@ fn img26_config(url: String) -> Config {
 const SVG_SOURCE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"999999\" height=\"999999\"><text>図 &amp; α</text></svg>\n";
 
 #[tokio::test]
-async fn img26_svg_wire_retains_partial_price_evidence() {
+async fn img26_svg_wire_prices_image_and_author_usage() {
     let mut body = image_response();
     body["data"][0]["b64_json"] = json!(STANDARD.encode(SVG_SOURCE));
     body["usage"] = json!({"total_tokens":935,"input_tokens":111,"output_tokens":824,
@@ -38,10 +38,12 @@ async fn img26_svg_wire_retains_partial_price_evidence() {
     let input = json!({"prompt":"draw svg","output_format":"svg"});
     let result = tool.invoke(&ctx, input.clone()).await.unwrap();
     let ExternalResult::Applied { usage, .. } = &result else { panic!("expected saved result") };
+    assert_eq!((usage.cached, usage.cached_image_input), (Some(0), Some(0)));
     assert_eq!(usage.price_evidence.as_ref().unwrap().output_micro_usd, Some(24_720));
-    assert_eq!(usage.price_evidence.as_ref().unwrap().input_micro_usd, None);
+    assert_eq!(usage.price_evidence.as_ref().unwrap().input_micro_usd, Some(555));
+    assert_eq!(usage.micro_usd, Some(25_275));
     assert_eq!(usage.svg_usage.as_ref().unwrap().micro_usd, Some(1_311));
-    assert_eq!(usage.amount(), Err(Error::UsageUnknown));
+    assert_eq!(usage.amount(), Ok(Amount::new(4822, 26_586)));
     assert_eq!(tool.lookup(&ctx, input).await.unwrap(), Lookup::Found(result));
     assert_eq!(http.await.unwrap().len(), 1);
 }
