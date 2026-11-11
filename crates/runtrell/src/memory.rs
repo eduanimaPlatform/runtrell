@@ -634,16 +634,29 @@ impl RunStore for MemoryStore {
                 s.accounts[&id].admission(true)?;
             }
             if s.operations.values().any(|o| {
+                let superseded = s.operations.values().any(|later| {
+                    later.run == o.run
+                        && later.request.key == o.request.key
+                        && later.request.attempt > o.request.attempt
+                });
+                let superseded_model_retry = superseded
+                    && matches!(
+                        o.request.kind,
+                        OperationKind::Model | OperationKind::Compaction
+                    )
+                    && matches!(
+                        o.result,
+                        Some(ExternalResult::Failed {
+                            retry_after: Some(_),
+                            ..
+                        })
+                    );
                 o.run == c.run
-                    && (!o.settled
+                    && ((!o.settled && !superseded_model_retry)
                         || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
                         || (o.state == OperationState::Failed
                             && !o.model_repair_acknowledged(&r)
-                            && !s.operations.values().any(|later| {
-                                later.run == o.run
-                                    && later.request.key == o.request.key
-                                    && later.request.attempt > o.request.attempt
-                            })))
+                            && !superseded))
             }) {
                 return Err(Error::UsageUnknown);
             }
@@ -865,6 +878,72 @@ impl OperationStore for MemoryStore {
     async fn proven_unsent(&self, c: &Claim, id: &str, scope: &str, now: u64) -> Result<()> {
         MemoryStore::proven_unsent(self, c, id, scope, now).await
     }
+    async fn abort_unsent(&self, c: &Claim, id: &str, now: u64) -> Result<ExternalResult> {
+        self.tx(|s| {
+            let r = fence(s, c, now, false)?;
+            let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
+            if old.run != c.run {
+                return Err(Error::PermissionDenied);
+            }
+            if old.request.attempt <= 1
+                || !matches!(
+                    old.request.kind,
+                    OperationKind::Model | OperationKind::Compaction
+                )
+                || old.state != OperationState::Intent
+                || old.send_count != 0
+                || old.send_generation.is_some()
+                || old.result.is_some()
+                || old.unsettled_result.is_some()
+                || !old.usage_observations.is_empty()
+                || old.settled
+                || old.unknown_usage
+            {
+                return Err(Error::Conflict);
+            }
+            let mut usage = Usage::measured(0, 0, 0);
+            usage.model = old
+                .request
+                .price
+                .as_ref()
+                .map_or_else(String::new, |p| p.model.clone());
+            usage.cached = Some(0);
+            usage.reasoning = Some(0);
+            usage.image_input = Some(0);
+            usage.image_output = Some(0);
+            usage.cached_image_input = Some(0);
+            usage.quantities = old
+                .request
+                .quantities
+                .keys()
+                .map(|k| (k.clone(), 0))
+                .collect();
+            let result = ExternalResult::Failed {
+                repair_hint: None,
+                physical_evidence: None,
+                code: "RETRY_EXHAUSTED: total elapsed".into(),
+                usage,
+                retry_after: None,
+                provider_diagnostic: None,
+            };
+            for account in ancestors(s, &r.spec.account)? {
+                let a = s.accounts.get_mut(&account).unwrap();
+                a.reserved = a.reserved.subtract(old.request.reserve);
+                for (key, count) in &old.request.quantities {
+                    let reserved = a.quantity_reserved.get_mut(key).ok_or(Error::Conflict)?;
+                    *reserved = reserved.checked_sub(*count).ok_or(Error::Conflict)?;
+                }
+            }
+            let op = s.operations.get_mut(id).unwrap();
+            op.state = OperationState::Failed;
+            op.result = Some(result.clone());
+            op.settled = true;
+            op.finished_at = Some(now);
+            s.slots.remove(id);
+            refresh_settlement(s, &c.run);
+            Ok(result)
+        })
+    }
     async fn begin(&self, c: &Claim, request: DispatchRequest, now: u64) -> Result<Operation> {
         if request.kind == OperationKind::ChildRun {
             return Err(Error::Invalid(
@@ -905,15 +984,13 @@ impl OperationStore for MemoryStore {
                             && op.request.attempt == request.attempt - 1
                     })
                     .ok_or(Error::Conflict)?;
-                if !previous.settled
-                    || !matches!(
-                        previous.result,
-                        Some(ExternalResult::Failed {
-                            retry_after: Some(_),
-                            ..
-                        })
-                    )
-                    || previous.request.target != request.target
+                if !matches!(
+                    previous.result,
+                    Some(ExternalResult::Failed {
+                        retry_after: Some(_),
+                        ..
+                    })
+                ) || previous.request.target != request.target
                     || previous.request.version != request.version
                     || previous.request.account_binding != request.account_binding
                 {

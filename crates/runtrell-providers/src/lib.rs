@@ -3,7 +3,7 @@
 //! Optional, single-send ModelPort implementations. See docs/design/providers.md.
 use runtrell::attachments::AttachmentResolver;
 pub use runtrell::images::{ImageLimits, ImageSizePolicy};
-use runtrell::{ModelLimits, RunHandle};
+use runtrell::{ModelLimits, RetryPolicy, RunHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -137,6 +137,8 @@ pub struct Config {
     pub endpoint: String,
     pub key: ApiKey,
     pub capabilities: Capabilities,
+    /// Pinned model retry bounds. The host includes this in its Run configuration identity.
+    pub retry_policy: RetryPolicy,
     pub run: RunHandle,
     pub session: Option<String>,
     pub input_token_upper_bound: u64,
@@ -173,6 +175,7 @@ pub enum ErrorClass {
     Authentication,
     InvalidRequest,
     RateLimit,
+    Retryable,
     SpendingLimit,
     Unclassified,
     Redirect,

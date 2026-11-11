@@ -3,7 +3,9 @@
 //! schema (openai/openai-openapi main c2aecc2, read 2026-11-03) and the stored usage of
 //! a real image operation whose cost stayed unknown.
 #![cfg(feature = "openai")]
-use runtrell::{Error, ModelLimits, Operation, Price, RunHandle, SettlementRecovery, Usage};
+use runtrell::{
+    Error, ModelLimits, Operation, Price, RetryPolicy, RunHandle, SettlementRecovery, Usage,
+};
 use runtrell_providers::{
     ApiKey, Capabilities, Config, CounterSupport, DocumentCapabilities, DocumentLimits,
     ImageCapabilities, ImageLimits,
@@ -592,6 +594,11 @@ fn config(model: &str, price: Option<Price>) -> Config {
                 image_output: true,
                 cached_image_input: false,
             },
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 3,
+            backoff: 1_000,
+            max_elapsed: 60_000,
         },
         run: RunHandle {
             tenant: "t".into(),

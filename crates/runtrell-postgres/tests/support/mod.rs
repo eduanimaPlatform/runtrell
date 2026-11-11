@@ -213,6 +213,9 @@ impl OperationStore for TestPg {
     async fn proven_unsent(&self, claim: &Claim, id: &str, scope: &str, now: u64) -> Result<()> {
         self.0.proven_unsent(claim, id, scope, now).await
     }
+    async fn abort_unsent(&self, claim: &Claim, id: &str, now: u64) -> Result<ExternalResult> {
+        self.0.abort_unsent(claim, id, now).await
+    }
     async fn begin(&self, claim: &Claim, request: DispatchRequest, now: u64) -> Result<Operation> {
         self.0.begin(claim, request, now).await
     }

@@ -32,6 +32,11 @@ fn config(endpoint: String) -> Config {
                 cached_image_input: true,
             },
         },
+        retry_policy: RetryPolicy {
+            max_attempts: 3,
+            backoff: 1_000,
+            max_elapsed: 60_000,
+        },
         run: RunHandle {
             tenant: "tenant".into(),
             id: "run-a".into(),

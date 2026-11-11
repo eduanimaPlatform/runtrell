@@ -154,6 +154,9 @@ impl Adapter {
             || l.max_output > l.context
             || l.price.as_ref().is_some_and(|p| p.model != l.model)
             || l.timeout == 0
+            || config.retry_policy.max_attempts == 0
+            || config.retry_policy.backoff == 0
+            || config.retry_policy.max_elapsed == 0
             || config.max_request_bytes == 0
             || config.max_response_bytes == 0
             || config.input_token_upper_bound == 0
@@ -485,6 +488,7 @@ impl Adapter {
             )));
         };
         let status = response.status().as_u16();
+        let retry_header_present = response.headers().contains_key("retry-after");
         let retry_header = response
             .headers()
             .get("retry-after")
@@ -533,12 +537,35 @@ impl Adapter {
                 .and_then(|n| u16::try_from(n).ok())
                 .filter(|n| (400..600).contains(n))
                 .unwrap_or(status);
+            let mut class = classify(effective_status, &parsed);
+            let retryable = self.wire == Wire::Responses
+                && match status {
+                    429 => {
+                        parsed["error"]["type"] == "rate_limit_error"
+                            && parsed["error"]["code"] == "slow_down"
+                    }
+                    503 => {
+                        parsed["error"]["type"] == "service_unavailable_error"
+                            && parsed["error"]["code"] == "server_is_overloaded"
+                    }
+                    _ => false,
+                }
+                && class != ErrorClass::SpendingLimit;
+            if retryable {
+                class = ErrorClass::Retryable;
+            }
             let failure = Failure {
-                class: classify(effective_status, &parsed),
+                class,
                 status: effective_status,
                 retry_after: retry_header.clone(),
             };
-            let delay = retry_header.as_deref().and_then(retry_delay);
+            let delay = retryable.then(|| match retry_header_present {
+                true => retry_header
+                    .as_deref()
+                    .and_then(retry_delay)
+                    .unwrap_or(u64::MAX),
+                false => 0,
+            });
             return Ok(HttpResult::Failure(ExternalResult::Failed {
                 repair_hint: None,
                 physical_evidence: None,
@@ -1012,11 +1039,7 @@ macro_rules! adapter {
                 Ok(self.0.config.input_token_upper_bound)
             }
             fn retry_policy(&self) -> RetryPolicy {
-                RetryPolicy {
-                    max_attempts: 1,
-                    backoff: 0,
-                    max_elapsed: self.limits().timeout,
-                }
+                self.0.config.retry_policy.clone()
             }
             async fn invoke(
                 &self,

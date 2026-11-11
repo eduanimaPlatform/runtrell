@@ -320,6 +320,28 @@ impl<
         let existing = bx(|| self.store.operation(&c.run, &request.key))
             .await?
             .filter(|op| op.request.attempt == request.attempt);
+        let retry_deadline = if request.attempt > 1
+            && matches!(
+                request.kind,
+                OperationKind::Model | OperationKind::Compaction
+            ) {
+            Some(
+                bx(|| self.store.list_operations(&c.run))
+                    .await?
+                    .iter()
+                    .filter(|op| op.request.key == request.key)
+                    .map(|op| op.created_at)
+                    .min()
+                    .ok_or(Error::Conflict)?
+                    .saturating_add(self.model.retry_policy().max_elapsed),
+            )
+        } else {
+            None
+        };
+        if existing.is_none() && retry_deadline.is_some_and(|deadline| self.clock.now() >= deadline)
+        {
+            return Err(Error::Invalid("RETRY_EXHAUSTED: total elapsed".into()));
+        }
         let op = if let Some(op) = existing {
             // Stored request is authoritative, including exact output cap and price.
             if request.recovery_proof.is_some()
@@ -394,6 +416,9 @@ impl<
                 );
             }
             request.recovery_proof = proof;
+            if retry_deadline.is_some_and(|deadline| self.clock.now() >= deadline) {
+                return Err(Error::Invalid("RETRY_EXHAUSTED: total elapsed".into()));
+            }
             match bx(|| self.store.begin(c, request, self.clock.now())).await {
                 Err(Error::ReservationDenied)
                     if matches!(r.spec.budget, ReservationPolicy::Shrink { .. }) =>
@@ -403,6 +428,12 @@ impl<
                 result => result?,
             }
         };
+        if retry_deadline.is_some_and(|deadline| self.clock.now() >= deadline)
+            && op.state == OperationState::Intent
+            && op.send_count == 0
+        {
+            return bx(|| self.store.abort_unsent(c, &op.id, self.clock.now())).await;
+        }
         let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         if op.settled {
@@ -475,7 +506,6 @@ impl<
         let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         let repair_policy = self.checked_repair_policy(&r)?;
-        bx(|| self.store.mark_sent(c, &op.id, self.clock.now())).await?;
         let deadline = match (
             r.spec.deadline,
             op.request
@@ -490,10 +520,21 @@ impl<
                 .max_elapsed
                 .map(|elapsed| started.saturating_add(elapsed))
         });
-        let deadline = match (deadline, repair_deadline) {
+        let mut deadline = match (deadline, repair_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        if let Some(retry_deadline) = retry_deadline {
+            if self.clock.now() >= retry_deadline {
+                return if op.state == OperationState::Intent && op.send_count == 0 {
+                    bx(|| self.store.abort_unsent(c, &op.id, self.clock.now())).await
+                } else {
+                    Err(Error::Invalid("RETRY_EXHAUSTED: total elapsed".into()))
+                };
+            }
+            deadline = Some(deadline.map_or(retry_deadline, |current| current.min(retry_deadline)));
+        }
+        bx(|| self.store.mark_sent(c, &op.id, self.clock.now())).await?;
         let mut ctx = ctx;
         ctx.deadline = deadline;
         let result = Box::pin(self.bounded(invoke(ctx), deadline))
@@ -520,6 +561,8 @@ impl<
         payload["protocol"] = serde_json::to_value(run).map_err(|_| Error::Storage)?;
         payload["catalog"] = serde_json::to_value(catalog).map_err(|_| Error::Storage)?;
         payload["model"] = serde_json::to_value(self.model.limits()).map_err(|_| Error::Storage)?;
+        payload["model_retry_policy"] =
+            serde_json::to_value(self.model.retry_policy()).map_err(|_| Error::Storage)?;
         payload["compaction_model"] =
             serde_json::to_value(self.model.compaction_limits()).map_err(|_| Error::Storage)?;
         payload["repair_policy"] =
@@ -577,21 +620,39 @@ impl<
                 .map(|op| op.created_at)
                 .min()
                 .unwrap_or(old.created_at);
-            if old.request.attempt >= policy.max_attempts
-                || self.clock.now().saturating_sub(first) >= policy.max_elapsed
-            {
+            let retry_deadline = first.saturating_add(policy.max_elapsed);
+            if old.request.attempt >= policy.max_attempts || self.clock.now() >= retry_deadline {
                 return Err(Error::Invalid(format!("RETRY_EXHAUSTED: {code}")));
             }
-            if self.clock.now()
-                < old
-                    .finished_at
-                    .unwrap_or(old.created_at)
-                    .saturating_add((*delay).max(policy.backoff))
-            {
+            let wait = if *delay > 0 {
+                (*delay).max(policy.backoff)
+            } else {
+                let exponential = policy
+                    .backoff
+                    .saturating_mul(1_u64 << old.request.attempt.saturating_sub(1).min(16));
+                // Stable per attempt and independent of worker scheduling or restarts.
+                let hash = digest(&serde_json::json!([old.id, old.request.attempt]));
+                let jitter = u64::from_str_radix(&hash[..16], 16).map_err(|_| Error::Storage)?
+                    % policy.backoff.saturating_div(4).max(1);
+                exponential.saturating_add(jitter)
+            };
+            let ready_at = old
+                .finished_at
+                .unwrap_or(old.created_at)
+                .saturating_add(wait);
+            if ready_at >= retry_deadline {
+                return Err(Error::Invalid(format!("RETRY_EXHAUSTED: {code}")));
+            }
+            if self.clock.now() < ready_at {
                 return Err(Error::Pending("retry backoff".into()));
             }
             let mut req = old.request.clone();
             req.attempt = req.attempt.checked_add(1).ok_or(Error::Conflict)?;
+            req.timeout = Some(
+                req.timeout
+                    .unwrap_or(u64::MAX)
+                    .min(retry_deadline.saturating_sub(self.clock.now())),
+            );
             Ok(req)
         } else {
             Ok(old.request.clone())
@@ -622,7 +683,19 @@ impl<
         Ok(bx(|| self.store.list_operations(&c.run))
             .await?
             .iter()
-            .any(|op| op.stalled(now)))
+            .any(|op| {
+                op.stalled(now)
+                    && !(matches!(
+                        op.request.kind,
+                        OperationKind::Model | OperationKind::Compaction
+                    ) && matches!(
+                        op.result,
+                        Some(ExternalResult::Failed {
+                            retry_after: Some(_),
+                            ..
+                        })
+                    ))
+            }))
     }
 
     /// Writes the wait for a machine-pending reason; an unchanged unsettleable result becomes the
@@ -804,6 +877,8 @@ impl<
                     )
                     .unwrap()
                     || cp.payload["model"] != serde_json::to_value(self.model.limits()).unwrap()
+                    || cp.payload["model_retry_policy"]
+                        != serde_json::to_value(self.model.retry_policy()).unwrap()
                     || cp.payload["compaction_model"]
                         != serde_json::to_value(self.model.compaction_limits()).unwrap()
                 {
@@ -1775,7 +1850,21 @@ impl<
             {
                 return Err(Error::Conflict);
             }
-            bx(|| self.next_attempt(c, &op, self.model.retry_policy())).await?
+            let mut dispatch = bx(|| self.next_attempt(c, &op, self.model.retry_policy())).await?;
+            if dispatch.attempt != op.request.attempt {
+                let prepared = bx(|| self.model.prepare_request(&current, request.clone())).await?;
+                let input = self.model.input_upper_bound(&prepared)?;
+                let (cap, reserve) = limits.cap_for_policy(
+                    input,
+                    bx(|| self.store.remaining(c, self.clock.now())).await?,
+                    &current.spec.budget,
+                )?;
+                let next = prepared.with_max_output(cap);
+                dispatch.reserve = reserve;
+                dispatch.input =
+                    serde_json::to_value(next.request()).map_err(|_| Error::Storage)?;
+            }
+            dispatch
         } else {
             let prepared = bx(|| self.model.prepare_request(&current, request)).await?;
             let input = self.model.input_upper_bound(&prepared)?;

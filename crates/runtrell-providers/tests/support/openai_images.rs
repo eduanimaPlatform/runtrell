@@ -186,7 +186,8 @@ async fn openai_malformed_single_result_and_http_spending_errors_keep_usage() {
         };
         let failure: Failure = serde_json::from_str(&code).unwrap();
         assert_eq!(failure.class, ErrorClass::SpendingLimit);
-        assert_eq!(retry_after, Some(2_000));
+        assert_eq!(retry_after, None);
+        assert_eq!(failure.retry_after.as_deref(), Some("2"));
         assert_eq!(usage.amount().unwrap(), Amount::new(8, 8));
         assert!(!code.contains("TEST-KEY"));
         assert_eq!(task.await.unwrap().len(), 1);

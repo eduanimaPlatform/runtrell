@@ -428,6 +428,22 @@ async fn provider_diagnostic_survives_postgres_reopen() {
     )
     .await;
 }
+#[tokio::test]
+async fn failed_unknown_retry_and_owner_recovery_postgres_reopen() {
+    let (_, schema, store) = open().await;
+    runtrell_testkit::recovery_contracts::failed_unknown_retry_and_owner_recovery(
+        store,
+        reopen(&schema).await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn abort_never_sent_retry_postgres_reopen() {
+    let (_, schema, store) = open().await;
+    runtrell_testkit::recovery_contracts::abort_never_sent_retry(store, reopen(&schema).await)
+        .await;
+}
 
 #[tokio::test]
 async fn final_catalog() {

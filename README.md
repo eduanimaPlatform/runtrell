@@ -62,7 +62,11 @@ settings) happen once at the boundary. Table and details:
 
 When an adapter's result is saved but its usage cannot be settled (unknown cost, missing
 counters), the reservation and unknown mark stay held. Once no lookup window is left the Run
-waits in `Waiting(OPERATOR_ACTION_WAIT)` and the driver stops asking; there is no retry count.
+normally waits in `Waiting(OPERATOR_ACTION_WAIT)` and the driver stops asking. An explicitly
+retryable failed model attempt can instead start a distinct bounded attempt if the host permits
+continuation with unknown usage and budget remains. A later successful attempt can finalize the
+business result while the failed attempt's charge remains unknown. See the
+[provider retry contract](docs/design/providers.md#explicit-transient-http-failures).
 `OperationStore::settle_recovered` lets the owner settle the original operation exactly once from
 the stored usage plus a documented rule and a price basis, recording old usage, new usage and
 basis, with no provider call. Evidence the rule cannot settle stays for the operator. The OpenAI

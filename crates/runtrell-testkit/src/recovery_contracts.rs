@@ -7,6 +7,278 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
+/// A deadline that expires after admission can discard only a never-sent intent.
+/// Reopening the store must not restore its reservation or operation slot.
+pub async fn abort_never_sent_retry<S: ControlStore>(first: Arc<S>, reopened: Arc<S>) {
+    let account = first
+        .create_account_with_policy(
+            "t",
+            Amount::new(100, 100),
+            None,
+            AccountPolicy {
+                quantity_limits: [("calls".into(), 2)].into(),
+                ..AccountPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+    let run = first
+        .start(RunSpec::new("t", "abort-retry", account.clone(), "answer"))
+        .await
+        .unwrap();
+    let claim = first.claim(&run, "worker", 0, 100_000).await.unwrap();
+    let mut request = DispatchRequest::new(
+        "model",
+        OperationKind::Model,
+        "fake",
+        json!({}),
+        Amount::new(10, 10),
+    );
+    request.quantities.insert("calls".into(), 1);
+    let prior = first.begin(&claim, request.clone(), 0).await.unwrap();
+    first.mark_sent(&claim, &prior.id, 0).await.unwrap();
+    let mut billed = Usage::measured(1, 1, 2);
+    billed.quantities.insert("calls".into(), 1);
+    first
+        .record(
+            &claim,
+            &prior.id,
+            ExternalResult::Failed {
+                repair_hint: None,
+                physical_evidence: None,
+                code: "TRANSIENT".into(),
+                usage: billed,
+                retry_after: Some(1),
+                provider_diagnostic: None,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    request.attempt = 2;
+    let op = first.begin(&claim, request, 1).await.unwrap();
+    assert_eq!(
+        first.account(&account).await.unwrap().reserved,
+        Amount::new(10, 10)
+    );
+    let mut wrong_generation = claim.clone();
+    wrong_generation.generation += 1;
+    assert_eq!(
+        first.abort_unsent(&wrong_generation, &op.id, 60_000).await,
+        Err(Error::OwnershipLost)
+    );
+    let result = first.abort_unsent(&claim, &op.id, 60_000).await.unwrap();
+    let ExternalResult::Failed {
+        code,
+        usage,
+        retry_after,
+        ..
+    } = result
+    else {
+        panic!("no-send failure")
+    };
+    assert_eq!(code, "RETRY_EXHAUSTED: total elapsed");
+    assert_eq!(
+        (usage.input, usage.output, usage.micro_usd, retry_after),
+        (Some(0), Some(0), Some(0), None)
+    );
+    let saved = reopened.list_operations(&run).await.unwrap();
+    assert_eq!(saved.len(), 2);
+    let aborted = saved.iter().find(|saved| saved.id == op.id).unwrap();
+    assert_eq!(
+        (aborted.state.clone(), aborted.send_count, aborted.settled),
+        (OperationState::Failed, 0, true)
+    );
+    let a = reopened.account(&account).await.unwrap();
+    assert_eq!(a.reserved, Amount::default());
+    assert_eq!(a.quantity_reserved.get("calls"), Some(&0));
+    assert_eq!(a.unknown, 0);
+    assert_eq!(
+        reopened.abort_unsent(&claim, &op.id, 60_001).await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        reopened.abort_unsent(&claim, &prior.id, 60_001).await,
+        Err(Error::Conflict)
+    );
+
+    let sent_run = first
+        .start(RunSpec::new("t", "sent-retry", account.clone(), "answer"))
+        .await
+        .unwrap();
+    let sent_claim = first.claim(&sent_run, "worker", 0, 100_000).await.unwrap();
+    let mut sent_request = DispatchRequest::new(
+        "model",
+        OperationKind::Model,
+        "fake",
+        json!({}),
+        Amount::new(5, 5),
+    );
+    let sent_prior = first
+        .begin(&sent_claim, sent_request.clone(), 0)
+        .await
+        .unwrap();
+    first
+        .mark_sent(&sent_claim, &sent_prior.id, 0)
+        .await
+        .unwrap();
+    first
+        .record(
+            &sent_claim,
+            &sent_prior.id,
+            ExternalResult::Failed {
+                repair_hint: None,
+                physical_evidence: None,
+                code: "TRANSIENT".into(),
+                usage: Usage::measured(1, 1, 2),
+                retry_after: Some(1),
+                provider_diagnostic: None,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    sent_request.attempt = 2;
+    let sent = first.begin(&sent_claim, sent_request, 1).await.unwrap();
+    first.mark_sent(&sent_claim, &sent.id, 1).await.unwrap();
+    assert_eq!(
+        first.abort_unsent(&sent_claim, &sent.id, 60_000).await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        reopened.account(&account).await.unwrap().reserved,
+        Amount::new(5, 5)
+    );
+}
+
+/// A received transient failure can be retried under a new reservation even when
+/// the first charge is unknown. Its original failed evidence survives recovery.
+pub async fn failed_unknown_retry_and_owner_recovery<S: ControlStore>(
+    first: Arc<S>,
+    reopened: Arc<S>,
+) {
+    let policy = AccountPolicy {
+        continue_with_unknown: true,
+        ..AccountPolicy::default()
+    };
+    let parent = first
+        .create_account_with_policy("t", Amount::new(100, 100), None, policy.clone())
+        .await
+        .unwrap();
+    let account = first
+        .create_account_with_policy("t", Amount::new(100, 100), Some(parent.clone()), policy)
+        .await
+        .unwrap();
+    let run = first
+        .start(RunSpec::new(
+            "t",
+            "failed-unknown-retry",
+            account.clone(),
+            "answer",
+        ))
+        .await
+        .unwrap();
+    let claim = first.claim(&run, "worker", 0, 100_000).await.unwrap();
+    let price = Price {
+        model: "fake".into(),
+        input: 1_000_000,
+        cached: 0,
+        output: 1_000_000,
+        reasoning: 1_000_000,
+        image_input: 1_000_000,
+        image_output: 1_000_000,
+        cached_image_input: 0,
+    };
+    let mut request = DispatchRequest::new(
+        "model",
+        OperationKind::Model,
+        "fake",
+        json!({}),
+        Amount::new(10, 10),
+    );
+    request.price = Some(price.clone());
+    let first_op = first.begin(&claim, request.clone(), 0).await.unwrap();
+    first.mark_sent(&claim, &first_op.id, 0).await.unwrap();
+    let mut unknown = Usage::measured(3, 1, 0);
+    unknown.micro_usd = None;
+    unknown.cached = Some(0);
+    unknown.model = "fake".into();
+    let diagnostic = ProviderDiagnostic {
+        phase: ProviderFailurePhase::HttpError,
+        send_certainty: ProviderSendCertainty::Sent,
+        http_status: Some(503),
+        provider_type: None,
+        provider_code: None,
+        provider_param: None,
+    };
+    assert_eq!(
+        first
+            .record(
+                &claim,
+                &first_op.id,
+                ExternalResult::Failed {
+                    physical_evidence: None,
+                    code: "provider-overloaded".into(),
+                    usage: unknown.clone(),
+                    retry_after: Some(6_000),
+                    repair_hint: None,
+                    provider_diagnostic: Some(diagnostic.clone()),
+                },
+                0
+            )
+            .await,
+        Err(Error::UsageUnknown)
+    );
+    request.attempt = 2;
+    let second_op = reopened.begin(&claim, request, 6_000).await.unwrap();
+    assert_eq!(second_op.request.attempt, 2);
+    assert_eq!(
+        reopened.account(&parent).await.unwrap().reserved,
+        Amount::new(20, 20)
+    );
+    assert_eq!(reopened.account(&parent).await.unwrap().unknown, 1);
+    let saved = reopened
+        .list_operations(&run)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|op| op.id == first_op.id)
+        .unwrap();
+    assert_eq!(saved.provider_diagnostic(), Some(&diagnostic));
+    assert!(matches!(saved.result, Some(ExternalResult::Failed { .. })));
+    let recovery = SettlementRecovery {
+        basis: "fake-provider-usage-receipt".into(),
+        usage: unknown,
+        price,
+    };
+    let command = crate::owner_contracts::command("failed-unknown-recovery");
+    let receipt = reopened
+        .settle_recovered(&run, &first_op.id, recovery.clone(), command.clone(), 6_001)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .settle_recovered(&run, &first_op.id, recovery, command, 6_002)
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        reopened.account(&parent).await.unwrap().reserved,
+        Amount::new(10, 10)
+    );
+    assert_eq!(reopened.account(&parent).await.unwrap().unknown, 0);
+    let saved = reopened
+        .list_operations(&run)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|op| op.id == first_op.id)
+        .unwrap();
+    assert!(matches!(saved.result, Some(ExternalResult::Failed { .. })));
+    assert_eq!(saved.provider_diagnostic(), Some(&diagnostic));
+}
+
 /// The same contract runs against memory and a reopened PostgreSQL client.
 pub async fn provider_diagnostic_survives_reopen<S: ControlStore>(first: Arc<S>, resumed: Arc<S>) {
     let account = first

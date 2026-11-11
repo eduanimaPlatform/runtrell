@@ -122,11 +122,15 @@ intersection `cached_image_input`) the lines are `i - cached - image + both`, `c
 
 A provider result that is present and complete but whose usage never settled keeps its reservation
 and unknown mark (`Operation::awaits_operator`). Asking again can only return the same evidence,
-so the Run enters `Waiting(OPERATOR_ACTION_WAIT)` once the operation has no lookup window left
+so the Run normally enters `Waiting(OPERATOR_ACTION_WAIT)` once the operation has no lookup window left
 (`Operation::stalled`: `now >= recovery_until` in Unix milliseconds, or never had one) and the
 same evidence was just confirmed: a Run that is not yet parked (new worker, or another wait) looks
 the unsettled operations up once and parks only if nothing changed; a parked Run asks nothing and
-sends nothing until the owner changes it.
+sends nothing until the owner changes it. An explicitly retryable Failed model or compaction
+attempt may instead start a distinct bounded attempt under the [provider retry
+contract](providers.md#explicit-transient-http-failures). Its unknown charge and slot remain held;
+a later successful attempt may finalize the business result while the failed attempt still needs
+owner settlement.
 
 A result that is **missing or incomplete** is not this case. A model reply flagged
 `complete: false`, or a model result with no input/output totals (for example a response lost in

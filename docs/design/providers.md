@@ -6,9 +6,53 @@ Each implements `ModelPort`; the driver contains no provider selection.
 The host supplies the complete endpoint URL, credential, model, limits, price,
 model capabilities, request/response byte bounds, input token upper bound, Run,
 and optional session. No discovery, credential loading, or price catalog is provided.
+The host also pins the model retry policy (`max_attempts`, `backoff`, `max_elapsed`,
+all durations in milliseconds). Its default is 3 attempts including the first,
+1,000 ms initial backoff and 60,000 ms total elapsed time (`RetryPolicy::default`).
+Zero policy values are refused at adapter construction. The host selects finite
+operational bounds and includes this policy
+in its saved configuration identity and supplies the same value on reconstruction.
 `ModelLimits.timeout` is the HTTP timeout in milliseconds, and `ToolContext.deadline`
 is an absolute Unix-millisecond deadline compared with the wall clock; the request
 timeout is the smaller of the two remaining durations.
+
+## Explicit transient HTTP failures
+
+OpenAI Responses retries only a received `429` with `error.type=rate_limit_error`
+and `error.code=slow_down`, or a received `503` with
+`error.type=service_unavailable_error` and `error.code=server_is_overloaded`.
+[OpenAI Rate limits](https://developers.openai.com/api/docs/guides/rate-limits#handle-rapid-traffic-increases-and-model-overload)
+documents these conditions and instructs callers to honor `Retry-After`. The
+adapter checks the actual HTTP status and body, not a JSON effective status or
+header alone. Billing, spend, quota and input errors do not enable retries.
+Other model adapters and error codes remain nonretryable until their official
+provider contract is documented here. A response lost after sending, including
+a stream interrupted after output, remains Unknown and is never automatically
+resent. Each model adapter sends at most once per runtime attempt.
+
+On a documented transient failure the adapter saves a `Failed` result and
+Provider diagnostic. Its retry marker is a nonnegative millisecond delay; `0`
+means no `Retry-After` was supplied, so the driver applies bounded exponential
+backoff and jitter. With a header, the driver waits at least its full delay.
+The driver creates a fresh attempt and reservation after the wait; it never
+settles an unknown previous attempt at zero. A failed attempt's unknown cost
+and operation slot remain held and count against the ancestor budgets and
+capacity. Retry needs the host's `continue_with_unknown` policy and available
+budget/capacity; otherwise it stops without sending. Attempts and total elapsed
+time, including in-flight retry sends, remain bounded across worker restarts, as do the original Run deadline and
+shared account. A header longer than the remaining time is not shortened to
+force an early send. A present but unprocessable `Retry-After`, including a
+numeric value too large for the duration type, also cannot authorize an early
+send. If the retry window expires after reservation but before sending, the
+driver settles that provably never-sent attempt at measured zero, keeps its
+failed no-send audit record, and releases only its reservation and slot. Sent
+or observed attempts cannot use that resolution.
+
+Owner recovery of an unsettled `Failed` attempt uses the same documented,
+evidence-bound `SettlementRecovery` path as an `Applied` attempt; it preserves
+the failed result, error and diagnostic. Merely knowing the HTTP status or a
+bill amount that does not establish the missing counters cannot settle it.
+Settlement never resumes a Run. See [budget](budget.md#price-lines-and-owner-settlement-recovery).
 
 Public OSS image support is separately provided by `ImagePort` adapters:
 
@@ -166,8 +210,10 @@ Explicit HTTP errors retain sanitized classification, status and Retry-After.
 Recognizable spending/balance codes
 are separate from transient rate limits; ambiguous quota errors remain rate limits
 or unclassified. Retry-After delta seconds and HTTP dates are converted to the
-runtime delay in milliseconds (`ExternalResult::Failed.retry_after`; seconds are
-multiplied with overflow checked). `ProviderDiagnostic` contains no header values;
+runtime delay in milliseconds only for documented retryable failures
+(`ExternalResult::Failed.retry_after`; seconds are multiplied with overflow
+checked, and an unrepresentable accepted header prevents an early retry).
+`ProviderDiagnostic` contains no header values;
 the existing serialized `Failure.retry_after` retains the validated Retry-After value.
 
 Capabilities contain host-overridable model limits, schema/tool/parallel support,

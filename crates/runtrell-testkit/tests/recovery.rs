@@ -23,6 +23,20 @@ fn provider_diagnostic_survives_memory_reopen() {
         recovery_contracts::provider_diagnostic_survives_reopen(store.clone(), store).await;
     });
 }
+#[test]
+fn failed_unknown_retry_and_owner_recovery_memory() {
+    runtrell_testkit::block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        recovery_contracts::failed_unknown_retry_and_owner_recovery(store.clone(), store).await;
+    });
+}
+#[test]
+fn abort_never_sent_retry_memory() {
+    runtrell_testkit::block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        recovery_contracts::abort_never_sent_retry(store.clone(), store).await;
+    });
+}
 struct RestartModel {
     case: &'static str,
     resumed: AtomicBool,

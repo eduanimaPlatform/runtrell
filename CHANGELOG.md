@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — explicit transient model retries (breaking)
+
+- Provider `Config` now requires a `retry_policy`; the default permits three total attempts,
+  1,000 ms initial backoff, and 60,000 ms total elapsed time. The policy is pinned in Run
+  checkpoints.
+- Only documented OpenAI Responses 429 `slow_down` and 503 `server_is_overloaded` failures
+  enable automatic retry. Each retry has its own reservation and attempt; unknown usage keeps
+  its reservation and slot until owner settlement, even if a later attempt succeeds.
+- A retry that expires after admission but before any send retains a settled no-send failure
+  record and releases only its own reservation and slot. An oversized `Retry-After` cannot
+  shorten the server delay.
+
 ## Unreleased — text-only model file reads (breaking)
 
 - `files.read` and `artifacts.read` return a UTF-8 `text` range to the model.

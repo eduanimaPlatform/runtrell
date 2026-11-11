@@ -103,6 +103,50 @@ async fn raw_server_at_least(
     });
     (url, task)
 }
+#[cfg(feature = "openai")]
+async fn sequence_server(
+    responses: Vec<(u16, &'static str, Value)>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/test", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (status, headers, body) in responses {
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut buf = [0; 4096];
+                let n = stream.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+                if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if bytes.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+            }
+            requests.push(String::from_utf8(bytes).unwrap());
+            let body = body.to_string();
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    (url, task)
+}
 fn config(endpoint: String) -> Config {
     Config {
         endpoint,
@@ -133,6 +177,11 @@ fn config(endpoint: String) -> Config {
                 image_output: true,
                 cached_image_input: true,
             },
+        },
+        retry_policy: RetryPolicy {
+            max_attempts: 3,
+            backoff: 1_000,
+            max_elapsed: 60_000,
         },
         run: RunHandle {
             tenant: "tenant".into(),
@@ -237,8 +286,340 @@ async fn provider_diagnostic_distinguishes_transport_and_effective_status() {
     let failure: Failure = serde_json::from_str(&code).unwrap();
     assert_eq!(failure.status, 429);
     assert_eq!(failure.class, ErrorClass::RateLimit);
-    assert_eq!(retry_after, Some(7_000));
+    assert_eq!(
+        retry_after, None,
+        "transport 400 must never authorize a retry"
+    );
     assert_eq!(server.await.unwrap().len(), 1);
+}
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn only_documented_openai_overload_and_slow_down_enable_runtime_retry() {
+    for (status, error_type, error_code, header, expected_delay) in [
+        (
+            503,
+            "service_unavailable_error",
+            "server_is_overloaded",
+            "Retry-After: 6\r\n",
+            Some(6_000),
+        ),
+        (
+            429,
+            "rate_limit_error",
+            "slow_down",
+            "Retry-After: 2\r\n",
+            Some(2_000),
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "server_is_overloaded",
+            "",
+            Some(0),
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "server_is_overloaded",
+            "Retry-After: 18446744073709551615\r\n",
+            Some(u64::MAX),
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "server_is_overloaded",
+            "Retry-After: 18446744073709551616\r\n",
+            Some(u64::MAX),
+        ),
+        (
+            400,
+            "rate_limit_error",
+            "slow_down",
+            "Retry-After: 3\r\n",
+            None,
+        ),
+        (
+            429,
+            "rate_limit_error",
+            "insufficient_quota",
+            "Retry-After: 3\r\n",
+            None,
+        ),
+        (
+            429,
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "Retry-After: 3\r\n",
+            None,
+        ),
+        (
+            503,
+            "service_unavailable_error",
+            "other_failure",
+            "Retry-After: 3\r\n",
+            None,
+        ),
+    ] {
+        let (url, server) = server(
+            status,
+            header,
+            json!({
+                "error": {"type": error_type, "code": error_code}
+            }),
+        )
+        .await;
+        let result = OpenAi::new(config(url))
+            .unwrap()
+            .invoke(&context(), text(request()))
+            .await
+            .unwrap();
+        let ExternalResult::Failed {
+            code,
+            retry_after,
+            usage,
+            ..
+        } = result
+        else {
+            panic!("saved failure")
+        };
+        assert_eq!(retry_after, expected_delay, "HTTP {status} {error_code}");
+        assert!(
+            usage.input.is_none() && usage.output.is_none(),
+            "unknown counters are retained"
+        );
+        let failure: Failure = serde_json::from_str(&code).unwrap();
+        assert_eq!(
+            failure.class == ErrorClass::Retryable,
+            expected_delay.is_some()
+        );
+        assert_eq!(server.await.unwrap().len(), 1, "adapter must send once");
+    }
+}
+
+#[cfg(feature = "openai")]
+#[test]
+fn model_retry_policy_is_host_selected_and_rejects_zero_bounds() {
+    let endpoint = "http://127.0.0.1:1/test".to_owned();
+    let default = OpenAi::new(config(endpoint.clone())).unwrap();
+    assert_eq!(default.retry_policy(), RetryPolicy::default());
+    let mut custom = config(endpoint.clone());
+    custom.retry_policy = RetryPolicy {
+        max_attempts: 2,
+        backoff: 200,
+        max_elapsed: 4_000,
+    };
+    assert_eq!(OpenAi::new(custom).unwrap().retry_policy().max_attempts, 2);
+    for invalid in [
+        RetryPolicy {
+            max_attempts: 0,
+            ..RetryPolicy::default()
+        },
+        RetryPolicy {
+            backoff: 0,
+            ..RetryPolicy::default()
+        },
+        RetryPolicy {
+            max_elapsed: 0,
+            ..RetryPolicy::default()
+        },
+    ] {
+        let mut config = config(endpoint.clone());
+        config.retry_policy = invalid;
+        assert!(OpenAi::new(config).is_err());
+    }
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge() {
+    use runtrell::memory::MemoryStore;
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+    use std::sync::Arc;
+    let overload =
+        json!({"error":{"type":"service_unavailable_error","code":"server_is_overloaded"}});
+    let success = json!({"id":"resp-1","status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"decision\":\"answered\"}"}]}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4,"input_tokens_details":{"cached_tokens":0,"image_tokens":0,"cached_image_tokens":0},"output_tokens_details":{"reasoning_tokens":0,"image_tokens":0}}});
+    let (url, server) = sequence_server(vec![
+        (503, "Retry-After: 6\r\n", overload),
+        (200, "", success),
+    ])
+    .await;
+    let store = Arc::new(MemoryStore::default());
+    let account = store
+        .create_account_with_policy(
+            "tenant",
+            Amount::new(10_000, 10_000),
+            None,
+            AccountPolicy {
+                continue_with_unknown: true,
+                ..AccountPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new(
+            "tenant",
+            "http-overload",
+            account.clone(),
+            "answer",
+        ))
+        .await
+        .unwrap();
+    let base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claim = store.claim(&run, "worker", base, 100_000).await.unwrap();
+    let mut config = config(url);
+    config.run = run.clone();
+    config.session = None;
+    config.capabilities.limits.price = Some(Price {
+        model: "host-model".into(),
+        input: 1_000_000,
+        cached: 0,
+        output: 1_000_000,
+        reasoning: 1_000_000,
+        image_input: 1_000_000,
+        image_output: 1_000_000,
+        cached_image_input: 0,
+    });
+    let clock = TestClock::default();
+    clock.set(base);
+    let runtime = Runtime {
+        store: store.clone(),
+        model: OpenAi::new(config).unwrap(),
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock: clock.clone(),
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    assert!(matches!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Waiting(_)
+    ));
+    let old = store.operations(&run).await.unwrap().remove(0);
+    assert!(old.unknown_usage);
+    assert!(
+        matches!(
+            old.result,
+            Some(ExternalResult::Failed {
+                retry_after: Some(6_000),
+                ..
+            })
+        ),
+        "actual saved result: {:?}",
+        old.result
+    );
+    clock.set(base + 5_999);
+    assert!(matches!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Waiting(_)
+    ));
+    clock.set(base + 6_000);
+    assert_eq!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Terminal(Terminal::Succeeded)
+    );
+    let attempts = store.operations(&run).await.unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].request.attempt, 1);
+    assert_eq!(attempts[1].request.attempt, 2);
+    assert_eq!(store.account(&account).await.unwrap().unknown, 1);
+    assert_eq!(server.await.unwrap().len(), 2);
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn repeated_overload_http_stops_after_three_attempts_with_all_unknowns_held() {
+    use runtrell::memory::MemoryStore;
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+    use std::sync::Arc;
+    let overload =
+        json!({"error":{"type":"service_unavailable_error","code":"server_is_overloaded"}});
+    let (url, server) = sequence_server(vec![
+        (503, "Retry-After: 6\r\n", overload.clone()),
+        (503, "Retry-After: 6\r\n", overload.clone()),
+        (503, "Retry-After: 6\r\n", overload),
+    ])
+    .await;
+    let store = Arc::new(MemoryStore::default());
+    let account = store
+        .create_account_with_policy(
+            "tenant",
+            Amount::new(10_000, 10_000),
+            None,
+            AccountPolicy {
+                continue_with_unknown: true,
+                ..AccountPolicy::default()
+            },
+        )
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new(
+            "tenant",
+            "http-overload-limit",
+            account.clone(),
+            "answer",
+        ))
+        .await
+        .unwrap();
+    let base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claim = store.claim(&run, "worker", base, 100_000).await.unwrap();
+    let mut config = config(url);
+    config.run = run.clone();
+    config.session = None;
+    config.capabilities.limits.price = Some(Price {
+        model: "host-model".into(),
+        input: 1_000_000,
+        cached: 0,
+        output: 1_000_000,
+        reasoning: 1_000_000,
+        image_input: 1_000_000,
+        image_output: 1_000_000,
+        cached_image_input: 0,
+    });
+    let clock = TestClock::default();
+    clock.set(base);
+    let runtime = Runtime {
+        store: store.clone(),
+        model: OpenAi::new(config).unwrap(),
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock: clock.clone(),
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    for time in [0, 6_000, 12_000] {
+        clock.set(base + time);
+        let state = runtime.drive(&claim).await.unwrap().state;
+        assert!(
+            matches!(state, RunState::Waiting(_)),
+            "state at {time}: {state:?}"
+        );
+    }
+    clock.set(base + 18_000);
+    assert!(matches!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Terminal(Terminal::Failed(_))
+    ));
+    let attempts = store.operations(&run).await.unwrap();
+    assert_eq!(attempts.len(), 3);
+    assert!(
+        attempts
+            .iter()
+            .all(|op| op.unknown_usage && matches!(op.result, Some(ExternalResult::Failed { .. })))
+    );
+    assert_eq!(store.account(&account).await.unwrap().unknown, 3);
+    assert_eq!(server.await.unwrap().len(), 3);
 }
 #[cfg(feature = "openai")]
 #[tokio::test]
@@ -512,7 +893,7 @@ async fn stops<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
     assert!(reply.calls.is_empty());
     assert_eq!(task.await.unwrap().len(), 1);
 }
-async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
+async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>, kind: &str) {
     let cases = [
         (401, json!({}), ErrorClass::Authentication),
         (400, json!({}), ErrorClass::InvalidRequest),
@@ -568,22 +949,33 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>) {
         let failure: Failure = serde_json::from_str(&code).unwrap();
         assert_eq!(failure.class, class);
         assert_eq!(failure.retry_after.as_deref(), Some("7"));
-        assert_eq!(retry_after, Some(7_000));
+        assert_eq!(
+            retry_after, None,
+            "header alone does not permit another attempt"
+        );
         assert_eq!(usage.input, None);
         assert_eq!(usage.output, None);
         assert_eq!(task.await.unwrap().len(), 1, "hidden retry");
     }
     let date = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(60));
-    let (url, task) = server(429, &format!("Retry-After: {date}\r\n"), json!({})).await;
+    let body = if kind == "openai" {
+        json!({"error":{"type":"rate_limit_error","code":"slow_down"}})
+    } else {
+        json!({})
+    };
+    let (url, task) = server(429, &format!("Retry-After: {date}\r\n"), body).await;
     let model = make(config(url)).unwrap();
     let ExternalResult::Failed {
-        retry_after: Some(delay),
-        ..
+        retry_after: delay, ..
     } = model.invoke(&context(), text(request())).await.unwrap()
     else {
         panic!("date delay")
     };
-    assert!((58_000..=60_000).contains(&delay));
+    if kind == "openai" {
+        assert!((58_000..=60_000).contains(&delay.unwrap()));
+    } else {
+        assert_eq!(delay, None);
+    }
     assert_eq!(task.await.unwrap().len(), 1);
     let (target, target_task) = server(200, "", json!({})).await;
     let (url, task) = server(307, &format!("Location: {target}\r\n"), json!({})).await;
@@ -720,7 +1112,7 @@ async fn continuation<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
         Lookup::Unknown
     );
     assert_eq!(model.recovery(), None);
-    assert_eq!(model.retry_policy().max_attempts, 1);
+    assert_eq!(model.retry_policy().max_attempts, 3);
     let sent = task.await.unwrap();
     assert_eq!(
         sent.len(),
@@ -983,7 +1375,7 @@ macro_rules! suites {
             }
             #[tokio::test]
             async fn error_retry_redirect_disconnect() {
-                errors($adapter::new).await;
+                errors($adapter::new, $kind).await;
             }
             #[tokio::test]
             async fn run_session_continuation() {

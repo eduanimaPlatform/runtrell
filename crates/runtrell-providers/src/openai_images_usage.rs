@@ -328,7 +328,7 @@ mod tests {
         ApiKey, Capabilities, CounterSupport, DocumentCapabilities, DocumentLimits,
         ImageCapabilities, ImageLimits,
     };
-    use runtrell::{ModelLimits, RunHandle};
+    use runtrell::{ModelLimits, RetryPolicy, RunHandle};
     use serde_json::json;
 
     const MODEL: &str = "gpt-image-2.5-sunburst";
@@ -371,6 +371,11 @@ mod tests {
                     image_output: true,
                     cached_image_input: false,
                 },
+            },
+            retry_policy: RetryPolicy {
+                max_attempts: 3,
+                backoff: 1_000,
+                max_elapsed: 60_000,
             },
             run: RunHandle {
                 tenant: "t".into(),

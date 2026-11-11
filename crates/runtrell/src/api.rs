@@ -1073,6 +1073,15 @@ pub struct RetryPolicy {
     /// Maximum time since the first attempt, in milliseconds.
     pub max_elapsed: u64,
 }
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            backoff: 1_000,
+            max_elapsed: 60_000,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub recovery_proof: Option<RecoveryProof>,
@@ -1266,11 +1275,7 @@ pub trait ModelPort: Send + Sync {
         async move { Ok(Progress::Unknown) }
     }
     fn retry_policy(&self) -> RetryPolicy {
-        RetryPolicy {
-            max_attempts: 3,
-            backoff: 1_000,
-            max_elapsed: 60_000,
-        }
+        RetryPolicy::default()
     }
     fn limits(&self) -> ModelLimits;
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
@@ -1561,6 +1566,16 @@ pub trait OperationStore: Send + Sync {
         scope: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+    /// Atomically settle a retry intent that expired before any send. Requires the
+    /// current claim and an Intent with no send, result, or usage evidence. Keeps
+    /// a failed no-send audit record and releases only this attempt's reservation
+    /// and slot; a sent or observed attempt can never be aborted this way.
+    fn abort_unsent(
+        &self,
+        claim: &Claim,
+        id: &str,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<ExternalResult>> + Send;
     /// Atomic reservation across all ancestors plus external intent; no I/O before
     /// success. ChildRun is rejected: internal children must use admit_child.
     fn begin(

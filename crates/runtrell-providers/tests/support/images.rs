@@ -310,7 +310,7 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
         assert!(code.contains(expected));
         assert!(!code.contains("TEST-KEY"));
         assert_eq!(usage.input, None);
-        assert_eq!(retry_after, Some(1_000));
+        assert_eq!(retry_after, None);
         assert_eq!(task.await.unwrap().len(), 1);
     }
     for (field, value) in [

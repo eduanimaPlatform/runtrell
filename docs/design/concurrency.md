@@ -9,6 +9,7 @@ ModelLimitsはcontext/max_output/min_max_output_tokensと価格snapshotを持つ
 queueは全体・tenant上限、待機deadline、SchedulingPolicy(priority, weight)を保存する。tenant巡回を最優先し、tenant内では高いpriorityを先にする。従来同様scheduler全体の連続優先選択を数え、weight（正の有限値）だけ連続優先した後は、最も古い低優先要求を選び飢餓を防ぐ。等priorityはFIFO。優先度をpurpose等の業務文字列から推測しない。MemoryとPostgresは同じqueue_indexを使い、巡回位置・連続選択数を保存する。期限切れはQueueTimeoutで除去、取消も除去する。slot不足でI/Oを始めず、呼出し元へ機械的Waitingを返す。lease切れだけでは外部停止と扱わず、照合確認前に再割当しない。
 
 障害retryはpolicyで最大attempt数、backoff、累積待機時間を設定し、provider rate limitを尊重する。Runのturn/tool回数の既定上限は置かない。hostの既定deadlineも設定しない。非同期jobはPendingを返しworker占有を解く。厳密なCPU/RAM/停止保証が必要なnative toolは適合ExecutionBackendへ配置する。
+モデルProviderの明示的な一時的失敗だけを新attemptで再試行する条件と既定値は[providers](providers.md#explicit-transient-http-failures)を正本とする。応答を失ったUnknownを同じ扱いにしない。Failedのusage Unknownは予約・operation slotに残り、次attemptの予算・容量を消費する。
 
 ## 参照adapterの配置
 
