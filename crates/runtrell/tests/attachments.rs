@@ -39,6 +39,75 @@ fn pdf_rejects_malformed_data_and_invalid_ranges() {
     assert!(PageRange { first: 2, last: 1 }.validate().is_err());
 }
 
+fn pdf_with_nested_catalog_array(depth: usize) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /X ");
+    pdf.extend(std::iter::repeat_n(b'[', depth));
+    pdf.extend(std::iter::repeat_n(b']', depth));
+    pdf.extend_from_slice(b" >>\nendobj\n");
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    offsets.push(pdf.len());
+    pdf.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n",
+    );
+    let xref = pdf.len();
+    pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    pdf
+}
+
+#[test]
+fn pdf_rejects_deeply_nested_objects_without_aborting() {
+    if std::env::var_os("RUNTRELL_NESTED_PDF_TEST_CHILD").is_some() {
+        let pdf = pdf_with_nested_catalog_array(10_380);
+        assert!(select_pdf(&pdf, None, 1, pdf.len()).is_err());
+        return;
+    }
+
+    let control = pdf_with_nested_catalog_array(1);
+    assert_eq!(select_pdf(&control, None, 1, control.len()).unwrap().0, 1);
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "pdf_rejects_deeply_nested_objects_without_aborting",
+        ])
+        .env("RUNTRELL_NESTED_PDF_TEST_CHILD", "1")
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("nested PDF parser child exceeded 30 seconds");
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("nested PDF parser child status failed: {error}");
+            }
+        }
+    };
+    assert!(
+        status.success(),
+        "nested PDF parser child exited with {status:?}"
+    );
+}
+
 #[test]
 fn selected_pdf_preserves_visible_annotations_and_form_appearance_without_actions() {
     use lopdf::{Document, Object, Stream, dictionary};
