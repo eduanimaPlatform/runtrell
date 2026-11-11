@@ -145,20 +145,40 @@ pub fn schema_diagnostics(value: &Value, schema: &Value) -> Result<Vec<Diagnosti
     let validator = compile_schema(schema)?;
     Ok(validator
         .iter_errors(value)
-        .map(|e| Diagnostic {
-            repair: DiagnosticRepair::Agent,
-            observation: None,
-            code: "SCHEMA_VALIDATION".into(),
-            severity: "error".into(),
-            path: e.instance_path().to_string(),
-            schema_path: Some(e.schema_path().to_string()),
-            field: None,
-            artifact: None,
-            file: None,
-            span: None,
-            position: None,
-            cause: e.to_string(),
-            hint: "Correct the candidate at the instance pointer".into(),
+        .map(|e| {
+            let (cause, hint) = match e.kind() {
+                jsonschema::error::ValidationErrorKind::Enum { options } => {
+                    let options = options.to_string();
+                    let hint = format!("Use one of these allowed values: {options}");
+                    (
+                        "Value is not in the allowed enum".into(),
+                        if hint.len() <= 1024 {
+                            hint
+                        } else {
+                            "Choose a value from the declared enum".into()
+                        },
+                    )
+                }
+                _ => (
+                    e.to_string(),
+                    "Correct the candidate at the instance pointer".into(),
+                ),
+            };
+            Diagnostic {
+                repair: DiagnosticRepair::Agent,
+                observation: None,
+                code: "SCHEMA_VALIDATION".into(),
+                severity: "error".into(),
+                path: e.instance_path().to_string(),
+                schema_path: Some(e.schema_path().to_string()),
+                field: None,
+                artifact: None,
+                file: None,
+                span: None,
+                position: None,
+                cause,
+                hint,
+            }
         })
         .collect())
 }

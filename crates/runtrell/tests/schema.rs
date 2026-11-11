@@ -52,6 +52,28 @@ fn schema_contract() {
 }
 
 #[test]
+fn bounded_enum_diagnostic_lists_every_allowed_image_size() {
+    let schema = json!({"type":"object","properties":{"size":{"enum":["1024x1024","1536x1024","1024x1536","auto",null]}},"required":["size"]});
+    let diagnostics = schema_diagnostics(&json!({"size":"384x384"}), &schema).unwrap();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].path, "/size");
+    let hint = &diagnostics[0].hint;
+    for size in ["1024x1024", "1536x1024", "1024x1536", "auto"] {
+        assert!(hint.contains(size), "missing {size}: {hint}");
+    }
+    assert!(hint.len() <= 1024);
+
+    let large_options = (0..200)
+        .map(|n| format!("long-option-{n:03}-xxxxxxxx"))
+        .collect::<Vec<_>>();
+    let large_schema = json!({"enum":large_options});
+    let large = schema_diagnostics(&json!("invalid"), &large_schema).unwrap();
+    assert_eq!(large.len(), 1);
+    assert_eq!(large[0].hint, "Choose a value from the declared enum");
+    assert!(large[0].cause.len() <= 1024);
+}
+
+#[test]
 fn checkpoint_json_hash_ignores_object_key_order() {
     let first = serde_json::from_str(r#"{"z":0,"a":{"y":1,"b":2}}"#).unwrap();
     let reopened = serde_json::from_str(r#"{"a":{"b":2,"y":1},"z":0}"#).unwrap();

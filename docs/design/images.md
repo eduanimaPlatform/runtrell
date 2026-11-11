@@ -64,9 +64,11 @@ The host declares a separate `ImageSizePolicy` for each enabled model action
 pixel, edge and aspect bounds. `auto` also permits omission; `Unsized` permits
 only omission for endpoints without a size option. Missing declarations fail
 closed before reservation or send. Tool schemas show exact choices or the
-dimension rule; rejected caller sizes become typed `InvalidToolInput` and the
-runtime sends `TOOL_INPUT_INVALID` with `/size` and a repair guide to the Agent.
-The same path covers tighter `ImageLimits` payload bounds. Sizes
+dimension rule. For `Values`, schema diagnostics list every allowed choice when
+the list fits the bounded hint. For `Dimensions`, rejected caller sizes become
+typed `InvalidToolInput`; the runtime sends `TOOL_INPUT_INVALID` with `/size`
+and a repair guide to the Agent. The same typed path covers tighter
+`ImageLimits` payload bounds. Sizes
 are not rounded or replaced. The host supplies constraints verified for the
 selected model and endpoint.
 Exactly one `data[0].b64_json` is required. Both adapters reject mask editing.

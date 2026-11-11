@@ -44,6 +44,7 @@ pub struct FakeImages {
     pub data: String,
     pub mime: String,
     pub usage: Usage,
+    pub size_policy: ImageSizePolicy,
 }
 impl Default for FakeImages {
     fn default() -> Self {
@@ -52,22 +53,23 @@ impl Default for FakeImages {
             data: STANDARD.encode(png()),
             mime: "image/png".into(),
             usage: Usage::measured(3, 5, 8),
+            size_policy: ImageSizePolicy::Dimensions {
+                multiple: 16,
+                min_pixels: 655_360,
+                max_pixels: 8_294_400,
+                max_edge: 3840,
+                max_aspect_ratio: 3,
+                auto: true,
+            },
         }
     }
 }
 impl ImagePort for FakeImages {
     fn size_policy(&self, _action: ImageAction) -> Option<ImageSizePolicy> {
-        Some(ImageSizePolicy::Dimensions {
-            multiple: 16,
-            min_pixels: 655_360,
-            max_pixels: 8_294_400,
-            max_edge: 3840,
-            max_aspect_ratio: 3,
-            auto: true,
-        })
+        Some(self.size_policy.clone())
     }
     fn identity(&self) -> String {
-        "fake-images-1".into()
+        format!("fake-images-1:{}", digest(&json!(self.size_policy)))
     }
     fn check(&self, r: &PreparedImageRequest) -> Result<()> {
         if r.action() == ImageAction::MaskEdit {
@@ -95,15 +97,38 @@ impl ImagePort for FakeImages {
 }
 
 pub async fn size_repair_returns_to_agent() {
-    for (bad_size, limits, expected_hint) in [
-        ("384x384", ImageLimits::default(), "655360"),
+    let dimensions = ImageSizePolicy::Dimensions {
+        multiple: 16,
+        min_pixels: 655_360,
+        max_pixels: 8_294_400,
+        max_edge: 3840,
+        max_aspect_ratio: 3,
+        auto: true,
+    };
+    for (bad_size, limits, policy, expected_hints) in [
+        (
+            "384x384",
+            ImageLimits::default(),
+            dimensions.clone(),
+            vec!["655360"],
+        ),
         (
             "1536x768",
             ImageLimits {
                 max_width: 1024,
                 ..ImageLimits::default()
             },
-            "1024x8192",
+            dimensions,
+            vec!["1024x8192"],
+        ),
+        (
+            "384x384",
+            ImageLimits::default(),
+            ImageSizePolicy::Values {
+                sizes: vec!["1024x1024".into(), "1536x1024".into(), "1024x1536".into()],
+                auto: true,
+            },
+            vec!["1024x1024", "1536x1024", "1024x1536", "auto"],
         ),
     ] {
         let store = Arc::new(runtrell::memory::MemoryStore::default());
@@ -125,7 +150,10 @@ pub async fn size_repair_returns_to_agent() {
             owner: handle.clone(),
             agent: "main".into(),
         });
-        let provider = FakeImages::default();
+        let provider = FakeImages {
+            size_policy: policy,
+            ..Default::default()
+        };
         let data = DataStore::memory(StoragePolicy::default());
         let tool = ImageTool {
             provider: provider.clone(),
@@ -186,12 +214,13 @@ pub async fn size_repair_returns_to_agent() {
                 .find(|m| m.role == "tool")
                 .unwrap();
             assert_eq!(feedback.data["diagnostics"][0]["path"], "/size");
-            assert!(
-                feedback.data["diagnostics"][0]["hint"]
-                    .as_str()
-                    .unwrap()
-                    .contains(expected_hint)
-            );
+            let hint = feedback.data["diagnostics"][0]["hint"].as_str().unwrap();
+            for expected_hint in expected_hints {
+                assert!(
+                    hint.contains(expected_hint),
+                    "missing {expected_hint}: {hint}"
+                );
+            }
         }
         let operations = store.list_operations(&handle).await.unwrap();
         assert_eq!(
