@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — bundled model catalog (breaking)
+## 0.2.0 — 2026-11-20 — bundled model catalog (breaking)
 
 - Select providers with `connect_model`, a catalog ID and `Connection`.
   The bundled catalog supplies the endpoint, capabilities, limits and pricing.
