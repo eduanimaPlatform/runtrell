@@ -123,6 +123,12 @@ pub struct Usage {
     /// only when they deliberately keep a value unknown; it never turns unknown into 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_reason: Option<UnknownReason>,
+    /// Billing evidence supplied by a trusted verifier for this provider receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_allowance: Option<Box<crate::models::ProviderAllowanceEvidence>>,
+    /// Confirmed provider expiry of the resource named by the Applied external ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_expires_at_ms: Option<u64>,
 }
 /// Independently computable primary model bill components. Each is rounded up
 /// separately and must not be summed to infer the complete bill, which rounds once.
@@ -764,9 +770,20 @@ impl PhysicalSendEvidence {
         Ok(())
     }
 }
+/// A single billable extension of a previously settled provider lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceExtension {
+    pub source_operation: String,
+    pub resource_id: String,
+    pub previous_expiry_ms: u64,
+    pub expires_at_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DispatchRequest {
     pub recovery_proof: Option<RecoveryProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<ResourceExtension>,
     pub key: String,
     pub kind: OperationKind,
     pub target: String,
@@ -804,6 +821,7 @@ impl DispatchRequest {
     ) -> Self {
         Self {
             recovery_proof: None,
+            extension: None,
             key: key.into(),
             kind,
             target: target.into(),
@@ -1030,11 +1048,13 @@ impl Operation {
         // This is a sufficiency probe. Malformed observations remain evidence,
         // but must not prevent lookup from supplying corrected measurements.
         // record still validates every new result before changing balances.
-        Ok(self
+        Ok((self
             .request
             .settlement_result(result)
             .is_ok_and(|amount| amount.is_some())
-            .then_some(result))
+            && self.settlement_allowance(result, u64::MAX).is_ok()
+            && self.validate_result_send().is_ok())
+        .then_some(result))
     }
 }
 // Keep lookup results inline: callers forward the receipt directly to atomic settlement.
@@ -1647,8 +1667,8 @@ pub trait OperationStore: Send + Sync {
         scope: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
-    /// Atomically settle a retry intent that expired before any send. Requires the
-    /// current claim and an Intent with no send, result, or usage evidence. Keeps
+    /// Atomically settle an unsent retry intent or an expired, unsent resource
+    /// extension intent. Requires the current claim and no result or usage evidence. Keeps
     /// a failed no-send audit record and releases only this attempt's reservation
     /// and slot; a sent or observed attempt can never be aborted this way.
     fn abort_unsent(
@@ -1659,6 +1679,8 @@ pub trait OperationStore: Send + Sync {
     ) -> impl std::future::Future<Output = Result<ExternalResult>> + Send;
     /// Atomic reservation across all ancestors plus external intent; no I/O before
     /// success. ChildRun is rejected: internal children must use admit_child.
+    /// A resource extension requires the matching settled lease and a single
+    /// successor per source operation, checked in the admission transaction.
     fn begin(
         &self,
         claim: &Claim,
@@ -1675,6 +1697,7 @@ pub trait OperationStore: Send + Sync {
         key: &str,
     ) -> impl std::future::Future<Output = Result<Option<Operation>>> + Send;
     /// Every send, including a proven-not-sent replay, requires a fresh fence.
+    /// A resource extension may only be sent before the previous lease expires.
     fn mark_sent(
         &self,
         claim: &Claim,
@@ -1719,6 +1742,8 @@ pub trait OperationStore: Send + Sync {
         key: &str,
     ) -> impl std::future::Future<Output = Result<Option<OwnerReceipt>>> + Send;
     /// Atomic result and settlement. Existing operations remain writable after cancellation.
+    /// A certified allowance debit commits with a new settlement. A resource
+    /// extension settles against its pinned resource and expiry.
     fn record(
         &self,
         claim: &Claim,

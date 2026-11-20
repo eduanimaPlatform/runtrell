@@ -40,35 +40,39 @@ struct AllowancePeriod {
 
 impl AllowanceLedger for MemoryStore {
     async fn consume_allowance(&self, debit: &AllowanceDebit) -> Result<u64> {
+        self.tx(|state| state.consume_allowance(debit, false))
+    }
+}
+
+impl Ledger {
+    fn consume_allowance(&mut self, debit: &AllowanceDebit, require_new: bool) -> Result<u64> {
         debit.validate()?;
         let key = serde_json::to_string(&(&debit.allowance, &debit.scope, &debit.period))
             .map_err(|_| Error::Storage)?;
-        self.tx(|state| {
-            let period = state
-                .allowances
-                .entry(key)
-                .or_insert_with(|| AllowancePeriod {
-                    limit: debit.limit,
-                    consumed: 0,
-                    receipts: BTreeMap::new(),
-                });
-            if period.limit != debit.limit {
-                return Err(Error::Conflict);
-            }
-            if let Some(&(quantity, included)) = period.receipts.get(&debit.receipt) {
-                return if quantity == debit.quantity {
-                    Ok(included)
-                } else {
-                    Err(Error::Conflict)
-                };
-            }
-            let included = debit.quantity.min(period.limit - period.consumed);
-            period.consumed += included;
-            period
-                .receipts
-                .insert(debit.receipt.clone(), (debit.quantity, included));
-            Ok(included)
-        })
+        let period = self
+            .allowances
+            .entry(key)
+            .or_insert_with(|| AllowancePeriod {
+                limit: debit.limit,
+                consumed: 0,
+                receipts: BTreeMap::new(),
+            });
+        if period.limit != debit.limit {
+            return Err(Error::Conflict);
+        }
+        if let Some(&(quantity, included)) = period.receipts.get(&debit.receipt) {
+            return if !require_new && quantity == debit.quantity {
+                Ok(included)
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        let included = debit.quantity.min(period.limit - period.consumed);
+        period.consumed += included;
+        period
+            .receipts
+            .insert(debit.receipt.clone(), (debit.quantity, included));
+        Ok(included)
     }
 }
 impl Default for MemoryStore {
@@ -890,6 +894,10 @@ impl OperationStore for MemoryStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
+            if !op.settled {
+                op.validate_result_send()?;
+                op.settlement_allowance(&result, now)?;
+            }
             if op.settled {
                 return if op.result.as_ref() == Some(&result) {
                     Ok(())
@@ -928,11 +936,13 @@ impl OperationStore for MemoryStore {
             if old.run != c.run {
                 return Err(Error::PermissionDenied);
             }
-            if old.request.attempt <= 1
-                || !matches!(
+            let expired_extension = old.request.extension_expired(now);
+            let retry = old.request.attempt > 1
+                && matches!(
                     old.request.kind,
                     OperationKind::Model | OperationKind::Compaction
-                )
+                );
+            if !(expired_extension || retry)
                 || old.state != OperationState::Intent
                 || old.send_count != 0
                 || old.send_generation.is_some()
@@ -964,7 +974,12 @@ impl OperationStore for MemoryStore {
             let result = ExternalResult::Failed {
                 repair_hint: None,
                 physical_evidence: None,
-                code: "RETRY_EXHAUSTED: total elapsed".into(),
+                code: if expired_extension {
+                    "RESOURCE_LEASE_EXPIRED"
+                } else {
+                    "RETRY_EXHAUSTED: total elapsed"
+                }
+                .into(),
                 usage,
                 retry_after: None,
                 provider_diagnostic: None,
@@ -1014,6 +1029,11 @@ impl OperationStore for MemoryStore {
                     Err(Error::Conflict)
                 };
             }
+            let source = request
+                .extension
+                .as_ref()
+                .and_then(|extension| s.operations.get(&extension.source_operation));
+            request.validate_extension_source(&c.run, source, now)?;
             if request.attempt == 0 {
                 return Err(Error::Invalid("attempt starts at one".into()));
             }
@@ -1116,6 +1136,7 @@ impl OperationStore for MemoryStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
+            op.request.validate_extension_send(now)?;
             if op.state != OperationState::Intent || op.saved_settlement_result()?.is_some() {
                 return Err(Error::Conflict);
             }
@@ -1168,6 +1189,8 @@ impl OperationStore for MemoryStore {
             if old.settled {
                 return Err(Error::Conflict);
             }
+            old.validate_result_send()?;
+            let allowance = old.settlement_allowance(&result, now)?;
             let usage = match &result {
                 ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
                     Some(usage)
@@ -1175,6 +1198,10 @@ impl OperationStore for MemoryStore {
                 _ => None,
             };
             let amount = old.request.settlement_result(&result)?;
+            if let Some(charge) = allowance {
+                let included = s.consume_allowance(&charge.debit, true)?;
+                charge.check_included(included)?;
+            }
             let incomplete = amount.is_none() && usage.is_some();
             let state = match &result {
                 ExternalResult::Applied { .. } => OperationState::Applied,

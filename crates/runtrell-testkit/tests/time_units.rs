@@ -76,3 +76,22 @@ fn shared_allowance_consumption_is_atomic_in_memory() {
     let second = first.clone();
     block_on(settlement_contracts::shared_allowance(&first, &second));
 }
+
+#[test]
+fn managed_allowance_settles_atomically_in_memory() {
+    let store = MemoryStore::default();
+    block_on(settlement_contracts::managed_allowance_settlement(
+        &store,
+        &store.clone(),
+        || store.fail_next_write(),
+    ));
+}
+
+#[test]
+fn dependent_resource_extension_in_memory() {
+    let store = Arc::new(MemoryStore::default());
+    block_on(settlement_contracts::dependent_resource_extension(
+        store.clone(),
+        store,
+    ));
+}

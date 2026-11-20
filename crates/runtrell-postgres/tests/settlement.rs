@@ -140,3 +140,22 @@ fn shared_allowance_consumption_is_durable_and_atomic() {
         assert_eq!(first.consume_allowance(&next).await, Err(Error::Conflict));
     });
 }
+
+#[test]
+fn managed_allowance_settles_atomically_across_pools() {
+    support::block_on(async {
+        let (first, second) = two_stores().await;
+        settlement_contracts::managed_allowance_settlement(first.as_ref(), second.as_ref(), || {
+            first.fail_next_write()
+        })
+        .await;
+    });
+}
+
+#[test]
+fn dependent_resource_extension_across_pools() {
+    support::block_on(async {
+        let (first, second) = two_stores().await;
+        settlement_contracts::dependent_resource_extension(first, second).await;
+    });
+}

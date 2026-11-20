@@ -5,7 +5,9 @@ mod pricing;
 mod snapshot;
 mod validate;
 
-pub use allowance::{AllowanceDebit, AllowanceLedger};
+#[doc(hidden)]
+pub use allowance::AllowanceCharge;
+pub use allowance::{AllowanceDebit, AllowanceLedger, ProviderAllowanceEvidence};
 pub use pricing::{BillOn, Measured, Scope, Unit};
 pub use snapshot::{CACHE_WRITE, CACHE_WRITE_12H, CACHE_WRITE_30M, PricingSnapshot};
 #[doc(hidden)]

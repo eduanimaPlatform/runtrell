@@ -658,6 +658,10 @@ impl OperationStore for PgStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
+            if !op.settled {
+                op.validate_result_send()?;
+                op.settlement_allowance(&result, now)?;
+            }
             if op.settled {
                 return if op.result.as_ref() == Some(&result) { Ok(()) } else { Err(Error::Conflict) };
             }
@@ -711,11 +715,13 @@ impl OperationStore for PgStore {
             if old.run != c.run {
                 return Err(Error::PermissionDenied);
             }
-            if old.request.attempt <= 1
-                || !matches!(
+            let expired_extension = old.request.extension_expired(now);
+            let retry = old.request.attempt > 1
+                && matches!(
                     old.request.kind,
                     OperationKind::Model | OperationKind::Compaction
-                )
+                );
+            if !(expired_extension || retry)
                 || old.state != OperationState::Intent
                 || old.send_count != 0
                 || old.send_generation.is_some()
@@ -747,7 +753,12 @@ impl OperationStore for PgStore {
             let result = ExternalResult::Failed {
                 repair_hint: None,
                 physical_evidence: None,
-                code: "RETRY_EXHAUSTED: total elapsed".into(),
+                code: if expired_extension {
+                    "RESOURCE_LEASE_EXPIRED"
+                } else {
+                    "RETRY_EXHAUSTED: total elapsed"
+                }
+                .into(),
                 usage,
                 retry_after: None,
                 provider_diagnostic: None,
@@ -799,6 +810,11 @@ impl OperationStore for PgStore {
                         Err(Error::Conflict)
                     };
                 }
+                let source = request
+                    .extension
+                    .as_ref()
+                    .and_then(|extension| s.operations.get(&extension.source_operation));
+                request.validate_extension_source(&c.run, source, now)?;
                 if request.attempt == 0 {
                     return Err(Error::Invalid("attempt starts at one".into()));
                 }
@@ -903,6 +919,7 @@ impl OperationStore for PgStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
+            op.request.validate_extension_send(now)?;
             if op.state != OperationState::Intent || op.saved_settlement_result()?.is_some() {
                 return Err(Error::Conflict);
             }
@@ -930,7 +947,7 @@ impl OperationStore for PgStore {
         result.validate_evidence()?;
         let observation = result.clone();
         let status = self
-            .tx(Scope::Attempt(&c.run, id, true), |s| {
+            .tx_record(Scope::Attempt(&c.run, id, true), |s| {
                 let r = fence(s, c, now, false)?;
                 let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
                 if old.run != c.run {
@@ -942,7 +959,7 @@ impl OperationStore for PgStore {
                     return Err(Error::Conflict);
                 }
                 if old.result.as_ref() == Some(&result) {
-                    return Ok(
+                    return Ok((
                         if old.unknown_usage
                             && matches!(
                                 result,
@@ -953,11 +970,14 @@ impl OperationStore for PgStore {
                         } else {
                             Ok(())
                         },
-                    );
+                        None,
+                    ));
                 }
                 if old.settled {
                     return Err(Error::Conflict);
                 }
+                old.validate_result_send()?;
+                let allowance = old.settlement_allowance(&result, now)?;
                 let usage = match &result {
                     ExternalResult::Applied { usage, .. }
                     | ExternalResult::Failed { usage, .. } => Some(usage),
@@ -1029,11 +1049,14 @@ impl OperationStore for PgStore {
                     get_mut(s, &c.run)?.delivery = Delivery::Confirmed(id);
                 }
                 refresh_settlement(s, &c.run);
-                Ok(if incomplete {
-                    Err(Error::UsageUnknown)
-                } else {
-                    Ok(())
-                })
+                Ok((
+                    if incomplete {
+                        Err(Error::UsageUnknown)
+                    } else {
+                        Ok(())
+                    },
+                    allowance,
+                ))
             })
             .await
             .and_then(std::convert::identity);

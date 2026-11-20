@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use super::allowance::{AllowanceCharge, ProviderAllowanceEvidence};
 use super::pricing::*;
 use super::{
     CachePolicy, CachePolicyKind, Effect, ImageReservation, Index, ResolvedModel, validate,
@@ -33,6 +34,8 @@ pub struct PricingSnapshot {
     additional_roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     additional_prices: Map<PriceProfile>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    allowances: Map<Allowance>,
     request_retention: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_reservation: Option<ImageReservation>,
@@ -64,6 +67,12 @@ impl PricingSnapshot {
                 additional_prices.insert(id, price);
             }
         }
+        let allowances = additional_prices
+            .values()
+            .flat_map(|profile| profile.fees.values())
+            .filter_map(|fee| fee.allowance.as_ref())
+            .map(|id| (id.clone(), index.catalog.allowances[id].clone()))
+            .collect();
         Self {
             catalog_revision: index.catalog.catalog_revision.clone(),
             catalog_digest: index.digest.clone(),
@@ -81,6 +90,7 @@ impl PricingSnapshot {
             price: index.catalog.price_profiles[price_id].clone(),
             additional_roots,
             additional_prices,
+            allowances,
             request_retention: resolved.cache_retention_seconds(),
             image_reservation: binding.image_reservation.clone(),
             cache_policy: binding.cache_policy.clone(),
@@ -94,9 +104,21 @@ impl PricingSnapshot {
         reserving: bool,
         roots: &[String],
     ) -> Result<u64> {
+        self.with_quote(cell, measured, |mut quote| {
+            quote.reserving = reserving;
+            quote.usd(roots)
+        })
+    }
+
+    fn with_quote<T>(
+        &self,
+        cell: Cell,
+        measured: &Map<Vec<Item>>,
+        evaluate: impl FnOnce(Quote<'_>) -> Result<T>,
+    ) -> Result<T> {
         let mut profiles = self.additional_prices.clone();
         profiles.insert(self.price_id.clone(), self.price.clone());
-        Quote {
+        evaluate(Quote {
             profiles: &profiles,
             cells: &profiles
                 .keys()
@@ -109,9 +131,8 @@ impl PricingSnapshot {
                 .collect(),
             remaining: Map::new(),
             activated: true,
-            reserving,
-        }
-        .usd(roots)
+            reserving: false,
+        })
     }
 
     fn reserve_roots(&self) -> Vec<String> {
@@ -365,7 +386,11 @@ impl PricingSnapshot {
 
     /// Recomputes the charge from the original snapshot and measured counters.
     pub fn cost(&self, usage: &Usage) -> Result<Amount> {
-        let route = if self.usage_rule == "openrouter.llama_chat@v1" {
+        self.measured_route(usage)?.cost_for_route(usage)
+    }
+
+    fn measured_route(&self, usage: &Usage) -> Result<&Self> {
+        if self.usage_rule == "openrouter.llama_chat@v1" {
             let index = usage
                 .quantities
                 .get("openrouter_route")
@@ -374,11 +399,57 @@ impl PricingSnapshot {
             std::iter::once(self)
                 .chain(&self.alternative_routes)
                 .nth(index)
-                .ok_or(Error::UsageUnknown)?
+                .ok_or(Error::UsageUnknown)
         } else {
-            self
+            Ok(self)
+        }
+    }
+
+    pub(crate) fn allowance_charge(
+        &self,
+        usage: &Usage,
+        evidence: &ProviderAllowanceEvidence,
+    ) -> Result<AllowanceCharge> {
+        let route = self.measured_route(usage)?;
+        if route.usage_rule != "openrouter.llama_chat@v1"
+            || route.fixed["mode"] != "byok"
+            || evidence.provider != "openrouter"
+        {
+            return Err(Error::Conflict);
+        }
+        // The verified BYOK binding has one fee over a list-price reference.
+        // Other component/fee or rounding shapes need a separate mapping.
+        let [root] = route.additional_roots.as_slice() else {
+            return Err(Error::Conflict);
         };
-        route.cost_for_route(usage)
+        let profile = route.additional_prices.get(root).ok_or(Error::Conflict)?;
+        let fee = profile.fees.get("platform").ok_or(Error::Conflict)?;
+        let id = fee.allowance.as_deref().ok_or(Error::Conflict)?;
+        let allowance = route.allowances.get(id).ok_or(Error::Conflict)?;
+        let (cell, measured, _) = route.token_measurements(usage)?;
+        if profile.billing_provider != evidence.provider
+            || profile.fees.len() != 1
+            || !profile.components.is_empty()
+            || profile.charge_rule.is_some()
+            || profile.time_window.is_some()
+            || !matches(&fee.applies, &cell)
+            || allowance.kind != "included_money"
+            || allowance.scope != "account"
+            || allowance.period != "month"
+        {
+            return Err(Error::Conflict);
+        }
+        let eligible = route.with_quote(cell, &measured, |mut quote| {
+            quote.profile(&fee.base_profile, &mut Map::new(), &mut Default::default())
+        })?;
+        Ok(AllowanceCharge {
+            debit: evidence.debit(id, &decimal(&allowance.amount)?, &eligible)?,
+            factor: decimal(&fee.factor)?,
+            reported_fee: *usage
+                .quantities
+                .get("openrouter_credit_micro_usd")
+                .ok_or(Error::UsageUnknown)?,
+        })
     }
 
     fn cost_for_route(&self, usage: &Usage) -> Result<Amount> {
@@ -393,6 +464,36 @@ impl PricingSnapshot {
         if self.image_reservation.is_some() {
             return self.image_cost(usage, input, output);
         }
+        let (cell, measured, tokens) = self.token_measurements(usage)?;
+        let mut charge = self.bill(
+            cell.clone(),
+            &measured,
+            false,
+            std::slice::from_ref(&self.price_id),
+        )?;
+        if self.usage_rule == "openrouter.llama_chat@v1" {
+            let credits = *usage
+                .quantities
+                .get("openrouter_credit_micro_usd")
+                .ok_or(Error::UsageUnknown)?;
+            if self.fixed["mode"] == "byok" {
+                let maximum = self.bill(cell, &measured, true, &self.additional_roots)?;
+                if usage.quantities.get("openrouter_upstream_micro_usd") != Some(&charge)
+                    || credits > maximum
+                {
+                    return Err(Error::UsageUnknown);
+                }
+                charge = charge.checked_add(credits).ok_or(Error::UsageUnknown)?;
+            } else if credits != charge {
+                return Err(Error::UsageUnknown);
+            }
+        }
+        Ok(Amount::new(tokens, charge))
+    }
+
+    fn token_measurements(&self, usage: &Usage) -> Result<(Cell, Map<Vec<Item>>, u64)> {
+        let input = usage.input.ok_or(Error::UsageUnknown)?;
+        let output = usage.output.ok_or(Error::UsageUnknown)?;
         let tokens = input.checked_add(output).ok_or(Error::UsageUnknown)?;
         let mut cell = self.fixed.clone();
         cell.insert("prompt_tokens".into(), json!(input));
@@ -455,30 +556,7 @@ impl PricingSnapshot {
             };
             measured.insert(id.clone(), vec![Item::measured(count)]);
         }
-        let mut charge = self.bill(
-            cell.clone(),
-            &measured,
-            false,
-            std::slice::from_ref(&self.price_id),
-        )?;
-        if self.usage_rule == "openrouter.llama_chat@v1" {
-            let credits = *usage
-                .quantities
-                .get("openrouter_credit_micro_usd")
-                .ok_or(Error::UsageUnknown)?;
-            if self.fixed["mode"] == "byok" {
-                let maximum = self.bill(cell, &measured, true, &self.additional_roots)?;
-                if usage.quantities.get("openrouter_upstream_micro_usd") != Some(&charge)
-                    || credits > maximum
-                {
-                    return Err(Error::UsageUnknown);
-                }
-                charge = charge.checked_add(credits).ok_or(Error::UsageUnknown)?;
-            } else if credits != charge {
-                return Err(Error::UsageUnknown);
-            }
-        }
-        Ok(Amount::new(tokens, charge))
+        Ok((cell, measured, tokens))
     }
 
     fn inherited_cache_zero(&self, usage: &Usage) -> bool {

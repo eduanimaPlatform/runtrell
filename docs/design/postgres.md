@@ -295,5 +295,7 @@ Rust 1.98.0、使い捨て PostgreSQL 18.6、`CARGO_INCREMENTAL=0`、固定 Rig 
 `allowance_periods` stores the initial quantity and consumption for each
 provider allowance, opaque scope and billing period. `allowance_receipts`
 stores the amount allocated per receipt. All consumption of a period locks its
-row and commits the balance and receipt together. The runtime role needs
-SELECT and INSERT on both tables and UPDATE on `allowance_periods`.
+row and commits the balance and receipt together. For certified provider
+settlement, the transaction locks the Run and budget accounts before debiting
+the allowance, then commits the new receipt with the attempt and account
+settlement. The runtime role needs SELECT and INSERT on both tables and UPDATE on `allowance_periods`.

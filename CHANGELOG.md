@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-11-20 — allowance settlement and resource extension (breaking)
+
+- Certified OpenRouter BYOK allowance evidence can settle together with the
+  attempt, persisted receipt and shared balance in Memory or PostgreSQL.
+- A provider adapter can separately reserve and settle a bounded lease
+  extension with `DispatchRequest::extend_resource`. Direct Images SVG stays
+  unavailable because its author request cannot enforce an output token cap.
+
 ## 0.2.0 — 2026-11-20 — bundled model catalog (breaking)
 
 - Select providers with `connect_model`, a catalog ID and `Connection`.
@@ -23,7 +31,7 @@
   credit charges. The FP8 credits binding prices both eligible routes before send.
 
 
-## Unreleased — text-only model file reads (breaking)
+## Included in 0.2.0 — text-only model file reads (breaking)
 
 - `files.read` and `artifacts.read` return a UTF-8 `text` range to the model.
   Binary artifacts return `BINARY_ARTIFACT` with bounded metadata and guidance;
@@ -34,7 +42,7 @@
   called on new tool calls and saved-result replay so a revoked grant cannot
   expose a stored failure hint.
 
-## Unreleased — configurable no-progress stop (breaking)
+## Included in 0.2.0 — configurable no-progress stop (breaking)
 
 - `RepairPolicy.max_no_progress` is now `Option<NonZeroU64>`: the default is
   `Some(3)`, an explicit `None` disables the repeated-failure count, and
@@ -46,7 +54,7 @@
   saved checkpoints without the field are not reopened; no migration is provided.
   Budget, deadline, cancellation and authorization gates remain in effect.
 
-## Unreleased — partial price evidence (breaking)
+## Included in 0.2.0 — partial price evidence (breaking)
 
 - Add `Price::cost_breakdown` and optional `Usage.price_evidence` with a pinned
   price and independently known input/output micro-USD components. Components
@@ -57,7 +65,7 @@
   Rust callers constructing `Usage` must initialize `price_evidence` or use
   `..Usage::default()`; no consumer revision or stored operation is changed here.
 
-## Unreleased — owner commands (breaking)
+## Included in 0.2.0 — owner commands (breaking)
 
 - `OperationStore::resume_held` now takes an expected Run revision, `OwnerCommand`
   (host key and request digest), and Unix-millisecond `now`; it returns an immutable

@@ -2,7 +2,7 @@
 use super::validate::TimeWindow;
 use crate::{Error, Result};
 use num_bigint::BigInt;
-use num_rational::BigRational as Money;
+pub(super) use num_rational::BigRational as Money;
 use num_traits::{ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -345,7 +345,21 @@ pub(super) fn reported_usd(value: &Value) -> Result<u64> {
     micro_usd(&amount).ok_or(Error::UsageUnknown)
 }
 
-fn micro_usd(value: &Money) -> Option<u64> {
+const PICOS_PER_USD: u64 = 1_000_000_000_000;
+
+pub(super) fn pico_usd(value: &Money) -> Result<u64> {
+    let scaled = value * BigInt::from(PICOS_PER_USD);
+    if !scaled.is_integer() {
+        return Err(Error::UsageUnknown);
+    }
+    scaled.to_integer().to_u64().ok_or(Error::UsageUnknown)
+}
+
+pub(super) fn pico_usd_amount(value: u64) -> Money {
+    Money::new(BigInt::from(value), BigInt::from(PICOS_PER_USD))
+}
+
+pub(super) fn micro_usd(value: &Money) -> Option<u64> {
     (value * BigInt::from(1_000_000u64))
         .ceil()
         .to_integer()
@@ -511,7 +525,7 @@ impl Quote<'_> {
         Ok(subtotal)
     }
 
-    fn profile(
+    pub(super) fn profile(
         &mut self,
         id: &str,
         evaluated: &mut Map<Money>,

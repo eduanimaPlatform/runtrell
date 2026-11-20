@@ -2,6 +2,7 @@
 //! Shared budget and queue policy evaluation, independent of persistence.
 use crate::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,14 +89,125 @@ impl ModelLimits {
         Ok((cap, amount))
     }
 }
+impl ResourceExtension {
+    fn key(source: &str) -> String {
+        format!("resource-extension:{:x}", Sha256::digest(source.as_bytes()))
+    }
+}
+
 impl DispatchRequest {
+    /// Build a distinct Tool attempt using the same provider target and account
+    /// binding as the source. Supply the incremental bound and a payload that
+    /// enforces it on the provider wire. Admission validates the source receipt.
+    pub fn extend_resource(
+        source: &Operation,
+        resource_id: &str,
+        previous_expiry_ms: u64,
+        expires_at_ms: u64,
+        input: serde_json::Value,
+        reserve: Amount,
+    ) -> Self {
+        let mut request = Self::new(
+            &ResourceExtension::key(&source.id),
+            OperationKind::Tool,
+            &source.request.target,
+            input,
+            reserve,
+        );
+        request.version = source.request.version.clone();
+        request.account_binding = source.request.account_binding.clone();
+        request.scope = source.request.scope.clone();
+        request.extension = Some(ResourceExtension {
+            source_operation: source.id.clone(),
+            resource_id: resource_id.into(),
+            previous_expiry_ms,
+            expires_at_ms,
+        });
+        request
+    }
+
+    #[doc(hidden)]
+    pub fn validate_extension_source(
+        &self,
+        run: &RunHandle,
+        source: Option<&Operation>,
+        now: u64,
+    ) -> Result<()> {
+        let Some(extension) = &self.extension else {
+            return Ok(());
+        };
+        let source = source.ok_or(Error::Conflict)?;
+        if source.run != *run
+            || !source.settled
+            || source.send_count == 0
+            || self.kind != OperationKind::Tool
+            || self.attempt != 1
+            || self.key != ResourceExtension::key(&source.id)
+            || self.target != source.request.target
+            || self.version != source.request.version
+            || self.account_binding != source.request.account_binding
+            || self.scope != source.request.scope
+            || self.price.is_some()
+            || self.pricing.is_some()
+            || extension.resource_id.is_empty()
+            || extension.resource_id.len() > 256
+            || !extension
+                .resource_id
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic())
+            || extension.expires_at_ms <= extension.previous_expiry_ms
+            || !matches!(&source.result, Some(ExternalResult::Applied {
+                external_id: Some(id), usage, ..
+            }) if id == &extension.resource_id
+                 && usage.resource_expires_at_ms == Some(extension.previous_expiry_ms))
+        {
+            return Err(Error::Conflict);
+        }
+        if self.extension_expired(now) {
+            return Err(Error::Deadline);
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn extension_expired(&self, now: u64) -> bool {
+        self.extension
+            .as_ref()
+            .is_some_and(|extension| now >= extension.previous_expiry_ms)
+    }
+
+    #[doc(hidden)]
+    pub fn validate_extension_send(&self, now: u64) -> Result<()> {
+        if self.extension_expired(now) {
+            return Err(Error::Deadline);
+        }
+        Ok(())
+    }
+
     pub fn managed_overrun(&self, actual: Amount) -> bool {
-        self.pricing.is_some()
+        (self.pricing.is_some() || self.extension.is_some())
             && (actual.tokens > self.reserve.tokens || actual.micro_usd > self.reserve.micro_usd)
     }
 
     /// A local preflight failure can release the reservation with explicit no-send evidence.
     pub fn settlement_result(&self, result: &ExternalResult) -> Result<Option<Amount>> {
+        if let Some(extension) = &self.extension {
+            match result {
+                ExternalResult::Applied {
+                    external_id: Some(id),
+                    usage,
+                    ..
+                } if id == &extension.resource_id
+                    && usage.resource_expires_at_ms == Some(extension.expires_at_ms) => {}
+                ExternalResult::Failed {
+                    provider_diagnostic: Some(diagnostic),
+                    usage,
+                    ..
+                } if diagnostic.send_certainty == ProviderSendCertainty::DefinitelyNotSent
+                    && usage.amount() == Ok(Amount::default()) => {}
+                _ => return Ok(None),
+            }
+        }
         match result {
             ExternalResult::Failed {
                 usage,
@@ -333,6 +445,44 @@ pub struct SettlementRecord {
     pub at: u64,
 }
 impl Operation {
+    #[doc(hidden)]
+    pub fn validate_result_send(&self) -> Result<()> {
+        if self.request.extension.is_some() && self.send_count == 0 {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn settlement_allowance(
+        &self,
+        result: &ExternalResult,
+        now: u64,
+    ) -> Result<Option<models::AllowanceCharge>> {
+        let (usage, id) = match result {
+            ExternalResult::Applied {
+                usage, external_id, ..
+            } => (usage, external_id.as_deref()),
+            ExternalResult::Failed { usage, .. } => (usage, None),
+            _ => return Ok(None),
+        };
+        let Some(evidence) = &usage.provider_allowance else {
+            return Ok(None);
+        };
+        if self.send_count == 0
+            || id != Some(evidence.receipt.as_str())
+            || evidence.charged_at_ms < self.created_at
+            || evidence.charged_at_ms > now
+        {
+            return Err(Error::Conflict);
+        }
+        let snapshot = self.request.pricing.as_ref().ok_or(Error::Conflict)?;
+        if self.request.settlement_result(result)?.is_none() {
+            return Ok(None);
+        }
+        snapshot.allowance_charge(usage, evidence).map(Some)
+    }
+
     /// True when the provider result is present and complete but its usage never settled,
     /// so looking the operation up again can only return the same evidence.
     ///
@@ -425,6 +575,10 @@ impl Operation {
             _ => return Err(Error::Conflict),
         };
         let new = &recovery.usage;
+        if stored.provider_allowance.is_some() || new.provider_allowance.is_some() {
+            // Only the fenced record path can debit and settle together.
+            return Err(Error::Conflict);
+        }
         let keeps = |old: Option<u64>, new: Option<u64>| old.is_none() || old == new;
         if self.request.pricing.is_some()
             && stored.unknown_reason.as_deref() == Some("MANAGED_ROUTE_MISMATCH")
@@ -462,6 +616,7 @@ impl Operation {
             || !keeps(stored.image_input, new.image_input)
             || !keeps(stored.image_output, new.image_output)
             || !keeps(stored.cached_image_input, new.cached_image_input)
+            || stored.resource_expires_at_ms != new.resource_expires_at_ms
         {
             return Err(Error::Invalid(
                 "recovery must only fill unknown counters".into(),
@@ -502,6 +657,11 @@ impl Operation {
                 *usage = settled.clone();
             }
             _ => return Err(Error::Conflict),
+        }
+        if self.request.extension.is_some()
+            && self.request.settlement_result(&result)? != Some(amount)
+        {
+            return Err(Error::UsageUnknown);
         }
         Ok(Some((
             result,

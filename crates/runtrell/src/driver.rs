@@ -80,7 +80,14 @@ impl<
         id: &str,
         result: ExternalResult,
     ) -> Result<ExternalResult> {
-        match bx(|| self.store.record(c, id, result.clone(), self.clock.now())).await {
+        let now = self.clock.now();
+        if matches!(&result, ExternalResult::Applied { usage, .. } if usage.provider_allowance.is_some())
+        {
+            // Retain the receipt for reconciliation if the allowance settlement
+            // cannot commit yet. A successor can retry without provider I/O.
+            bx(|| self.store.observe_result(c, id, result.clone(), now)).await?;
+        }
+        match bx(|| self.store.record(c, id, result.clone(), now)).await {
             Ok(()) => {}
             Err(Error::UsageUnknown) => return Ok(ExternalResult::Unknown),
             Err(e) => return Err(e),
@@ -447,6 +454,12 @@ impl<
         {
             return bx(|| self.store.abort_unsent(c, &op.id, self.clock.now())).await;
         }
+        if op.state == OperationState::Intent
+            && op.send_count == 0
+            && op.request.extension_expired(self.clock.now())
+        {
+            return bx(|| self.store.abort_unsent(c, &op.id, self.clock.now())).await;
+        }
         let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         if op.settled {
@@ -547,7 +560,11 @@ impl<
             }
             deadline = Some(deadline.map_or(retry_deadline, |current| current.min(retry_deadline)));
         }
-        bx(|| self.store.mark_sent(c, &op.id, self.clock.now())).await?;
+        let now = self.clock.now();
+        if op.request.extension_expired(now) && !recovery {
+            return bx(|| self.store.abort_unsent(c, &op.id, now)).await;
+        }
+        bx(|| self.store.mark_sent(c, &op.id, now)).await?;
         let mut ctx = ctx;
         ctx.deadline = deadline;
         ctx.managed_send = ManagedSend::new(c, &op);

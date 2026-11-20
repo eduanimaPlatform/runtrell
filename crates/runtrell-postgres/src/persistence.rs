@@ -35,6 +35,7 @@ enum Selection<'a> {
     Exact(&'a str),
     Outstanding(&'a str),
     Logical(&'a str),
+    Extension(&'a str, &'a str),
 }
 
 impl PgStore {
@@ -77,6 +78,31 @@ impl PgStore {
         scope: Scope<'_>,
         f: impl FnOnce(&mut Ledger) -> Result<R>,
     ) -> Result<R> {
+        self.tx_in_with_allowance(outer, scope, |state| f(state).map(|value| (value, None)))
+            .await
+    }
+
+    pub(crate) async fn tx_record<R>(
+        &self,
+        scope: Scope<'_>,
+        f: impl FnOnce(&mut Ledger) -> Result<(R, Option<models::AllowanceCharge>)>,
+    ) -> Result<R> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage("PgStore::tx_record", e))?;
+        let result = self.tx_in_with_allowance(&mut tx, scope, f).await?;
+        self.commit(tx).await?;
+        Ok(result)
+    }
+
+    async fn tx_in_with_allowance<R>(
+        &self,
+        outer: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        scope: Scope<'_>,
+        f: impl FnOnce(&mut Ledger) -> Result<(R, Option<models::AllowanceCharge>)>,
+    ) -> Result<R> {
         // A failed call must not leave partial permits or writes in a host transaction.
         let mut tx = sqlx::Acquire::begin(&mut *outer)
             .await
@@ -86,7 +112,11 @@ impl PgStore {
                 .await.map_err(|e| storage("PgStore::tx_in", e))?;
             let mut state = self.load(&mut tx, scope, true).await?;
             let before = state.clone();
-            let value = f(&mut state)?;
+            let (value, allowance) = f(&mut state)?;
+            if let Some(charge) = allowance {
+                let included = self.consume_allowance_in(&mut tx, &charge.debit, true).await?;
+                charge.check_included(included)?;
+            }
             self.save(&mut tx, &before, &state).await?;
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 sqlx::query("SELECT 1/0").execute(&mut *tx).await.map_err(|e| storage("PgStore::tx_in", e))?;
@@ -304,7 +334,12 @@ impl PgStore {
             ),
             Scope::Begin(h, request) => (
                 Scope::Run(h, Mode::Work),
-                Selection::Logical(&request.key),
+                match &request.extension {
+                    Some(extension) => {
+                        Selection::Extension(&request.key, &extension.source_operation)
+                    }
+                    None => Selection::Logical(&request.key),
+                },
                 Some(format!("{}:{}:{}", key(h), request.key, request.attempt)),
             ),
             Scope::Logical(h, k) => (Scope::Run(h, Mode::Ops), Selection::Logical(k), None),
@@ -480,6 +515,11 @@ impl PgStore {
                             Selection::Outstanding(id) => {
                                 args.push(id);
                                 "(tenant=$1 AND run_id=$2 AND NOT settled) OR id=$3"
+                            }
+                            Selection::Extension(k, id) => {
+                                args.push(k);
+                                args.push(id);
+                                "tenant=$1 AND run_id=$2 AND (operation_key=$3 OR id=$4)"
                             }
                             Selection::Logical(k) => {
                                 args.push(k);

@@ -936,3 +936,339 @@ pub async fn shared_allowance(
     b.scope = "provider-account-2".into();
     assert_eq!(first.consume_allowance(&b).await, Ok(80));
 }
+
+/// Certified account-wide BYOK evidence settles with the same provider receipt.
+pub async fn managed_allowance_settlement(
+    first: &impl ControlStore,
+    second: &impl ControlStore,
+    fail_next: impl FnOnce(),
+) {
+    let model = models::resolve_binding(
+        "openrouter/meta-llama/llama-3.1-8b-instruct",
+        models::OperationKind::Completion,
+        Some("deepinfra-byok"),
+    )
+    .unwrap();
+    let pricing = model.pricing();
+    let account = first
+        .create_account("tenant", Amount::new(100_000, 1_000), None)
+        .await
+        .unwrap();
+    let run = first
+        .start(RunSpec::new(
+            "tenant",
+            "byok-settlement",
+            account.clone(),
+            "",
+        ))
+        .await
+        .unwrap();
+    let claim = first.claim(&run, "worker", 1, 1000).await.unwrap();
+    let mut request = DispatchRequest::new(
+        "generation-1",
+        OperationKind::Model,
+        model.id(),
+        json!({}),
+        pricing.estimate(1000, 100).unwrap(),
+    );
+    request.pricing = Some(Box::new(pricing.clone()));
+    let reserve = request.reserve;
+    let op = first.begin(&claim, request.clone(), 2).await.unwrap();
+    let mut usage = Usage {
+        model: model.wire_model().into(),
+        input: Some(1000),
+        output: Some(100),
+        ..Usage::default()
+    };
+    // $0.000024 at the list price, $0.000012 of certified available
+    // allowance, and a 5% fee on the remainder rounds to one micro-USD.
+    pricing
+        .record_openrouter_charge(
+            &mut usage,
+            "DeepInfra",
+            &json!({
+                "is_byok": true, "cost": 0.0000006,
+                "cost_details": {"upstream_inference_cost": 0.000024}
+            }),
+        )
+        .unwrap();
+    pricing.record_cost(&mut usage);
+    usage.provider_allowance = Some(Box::new(models::ProviderAllowanceEvidence {
+        provider: "openrouter".into(),
+        account: "provider-account".into(),
+        receipt: "gen-first".into(),
+        period_start_ms: 0,
+        period_end_ms: 30 * DAY,
+        charged_at_ms: 4,
+        initial_pico_usd: 12_000_000,
+    }));
+    let completed = |usage: Usage| ExternalResult::Applied {
+        output: json!({}),
+        usage,
+        external_id: Some("gen-first".into()),
+        physical_evidence: None,
+    };
+    assert_eq!(
+        first
+            .record(&claim, &op.id, completed(usage.clone()), 4)
+            .await,
+        Err(Error::Conflict)
+    );
+    first.mark_sent(&claim, &op.id, 3).await.unwrap();
+
+    let mut invalid = usage.clone();
+    invalid.provider_allowance.as_mut().unwrap().charged_at_ms = 30 * DAY;
+    assert_eq!(
+        first.record(&claim, &op.id, completed(invalid), 4).await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(second.account(&account).await.unwrap().reserved, reserve);
+
+    first
+        .observe_result(&claim, &op.id, completed(usage.clone()), 4)
+        .await
+        .unwrap();
+    fail_next();
+    assert_eq!(
+        first
+            .record(&claim, &op.id, completed(usage.clone()), 4)
+            .await,
+        Err(Error::Storage)
+    );
+    assert_eq!(second.account(&account).await.unwrap().reserved, reserve);
+    let observed = second.operation(&run, &request.key).await.unwrap().unwrap();
+    let saved = observed.saved_settlement_result().unwrap().unwrap().clone();
+    assert_eq!(saved, completed(usage.clone()));
+    second.record(&claim, &op.id, saved, 5).await.unwrap();
+    first
+        .record(&claim, &op.id, completed(usage.clone()), 6)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.account(&account).await.unwrap().used,
+        Amount::new(1100, 25)
+    );
+    assert_eq!(
+        first.account(&account).await.unwrap().reserved,
+        Amount::default()
+    );
+
+    request.key = "generation-2".into();
+    let next = second.begin(&claim, request.clone(), 7).await.unwrap();
+    second.mark_sent(&claim, &next.id, 8).await.unwrap();
+    usage.provider_allowance.as_mut().unwrap().charged_at_ms = 9;
+    assert_eq!(
+        second
+            .record(&claim, &next.id, completed(usage.clone()), 9)
+            .await,
+        Err(Error::Conflict)
+    );
+    usage.provider_allowance.as_mut().unwrap().receipt = "gen-second".into();
+    let next_result = |usage| ExternalResult::Applied {
+        output: json!({}),
+        usage,
+        external_id: Some("gen-second".into()),
+        physical_evidence: None,
+    };
+    // The allowance is exhausted, so a second attestation with the lower fee
+    // conflicts and rolls back, including the new receipt.
+    assert_eq!(
+        second
+            .record(&claim, &next.id, next_result(usage.clone()), 9)
+            .await,
+        Err(Error::Conflict)
+    );
+    pricing
+        .record_openrouter_charge(
+            &mut usage,
+            "DeepInfra",
+            &json!({
+                "is_byok": true, "cost": 0.0000012,
+                "cost_details": {"upstream_inference_cost": 0.000024}
+            }),
+        )
+        .unwrap();
+    pricing.record_cost(&mut usage);
+    second
+        .record(&claim, &next.id, next_result(usage), 9)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.account(&account).await.unwrap().used,
+        Amount::new(2200, 51)
+    );
+}
+
+/// An extension holds only its incremental reservation and has one successor
+/// per confirmed lease, even across reopened stores.
+pub async fn dependent_resource_extension<S: ControlStore>(first: Arc<S>, second: Arc<S>) {
+    let clock = TestClock::default();
+    let runtime = Runtime {
+        store: second.clone(),
+        model: FakeModel::scripted(vec![]),
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock: clock.clone(),
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let account = first
+        .create_account("tenant", Amount::new(1000, 100), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new("tenant", "resource-extension", account.clone(), "");
+    spec.budget = ReservationPolicy::EndRun;
+    let run = first.start(spec).await.unwrap();
+    let claim = first.claim(&run, "worker", 1, 1000).await.unwrap();
+    let base = DispatchRequest::new(
+        "create",
+        OperationKind::Tool,
+        "provider-cache",
+        json!({}),
+        Amount::new(0, 30),
+    );
+    let base = first.begin(&claim, base, 2).await.unwrap();
+    first.mark_sent(&claim, &base.id, 3).await.unwrap();
+    let receipt = |id: &str, expiry, cost| ExternalResult::Applied {
+        output: json!({}),
+        usage: Usage {
+            resource_expires_at_ms: Some(expiry),
+            ..Usage::measured(0, 0, cost)
+        },
+        external_id: Some(id.into()),
+        physical_evidence: None,
+    };
+    first
+        .record(&claim, &base.id, receipt("cache-a", 25, 30), 4)
+        .await
+        .unwrap();
+
+    let make_request = |cost| {
+        DispatchRequest::extend_resource(&base, "cache-a", 25, 50, json!({}), Amount::new(0, cost))
+    };
+    let over_budget = make_request(71);
+    clock.set(5);
+    assert_eq!(
+        runtime
+            .dispatch(
+                &claim,
+                over_budget.clone(),
+                "extend",
+                |_| async { panic!("extension sent after reservation denial") },
+                |_| async { panic!("extension looked up after reservation denial") },
+            )
+            .await,
+        Err(Error::ReservationDenied)
+    );
+    assert_eq!(
+        second.operation(&run, &over_budget.key).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        second.account(&account).await.unwrap().reserved,
+        Amount::default()
+    );
+    let request = make_request(40);
+    let mut wrong = request.clone();
+    wrong.extension.as_mut().unwrap().resource_id = "cache-b".into();
+    assert_eq!(first.begin(&claim, wrong, 6).await, Err(Error::Conflict));
+
+    let op = second.begin(&claim, request.clone(), 6).await.unwrap();
+    assert_eq!(first.begin(&claim, request.clone(), 7).await.unwrap(), op);
+    assert_eq!(
+        first.account(&account).await.unwrap().reserved,
+        Amount::new(0, 40)
+    );
+    assert_eq!(
+        first.begin(&claim, make_request(20), 7).await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        second
+            .record(&claim, &op.id, receipt("cache-a", 50, 39), 7)
+            .await,
+        Err(Error::Conflict)
+    );
+    clock.set(8);
+    let result = runtime
+        .dispatch(
+            &claim,
+            request.clone(),
+            "extend",
+            |context| {
+                let (id, first, account) = (&op.id, &first, &account);
+                async move {
+                    assert_eq!(&context.operation, id);
+                    assert_eq!(
+                        first.account(account).await.unwrap().reserved,
+                        Amount::new(0, 40)
+                    );
+                    Ok(receipt("cache-b", 50, 39))
+                }
+            },
+            |_| async { panic!("first send looked up the extension") },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, ExternalResult::Unknown);
+    assert_eq!(
+        second.mark_sent(&claim, &op.id, 8).await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        first.account(&account).await.unwrap().reserved,
+        Amount::new(0, 40)
+    );
+    let confirmed = receipt("cache-a", 50, 39);
+    clock.set(10);
+    assert_eq!(
+        runtime
+            .dispatch(
+                &claim,
+                request,
+                "extend",
+                |_| async { panic!("recovery resent the extension") },
+                |_| async { Ok(Lookup::Found(confirmed.clone())) },
+            )
+            .await,
+        Ok(confirmed.clone())
+    );
+    first.record(&claim, &op.id, confirmed, 11).await.unwrap();
+    assert_eq!(
+        first.account(&account).await.unwrap().used,
+        Amount::new(0, 69)
+    );
+    assert_eq!(
+        first.account(&account).await.unwrap().reserved,
+        Amount::default()
+    );
+
+    let updated = first
+        .operation(&run, &op.request.key)
+        .await
+        .unwrap()
+        .unwrap();
+    let next = DispatchRequest::extend_resource(
+        &updated,
+        "cache-a",
+        50,
+        60,
+        json!({}),
+        Amount::new(0, 10),
+    );
+    let next = first.begin(&claim, next, 12).await.unwrap();
+    assert_eq!(
+        second.mark_sent(&claim, &next.id, 50).await,
+        Err(Error::Deadline)
+    );
+    clock.set(50);
+    assert!(matches!(runtime.dispatch(
+        &claim, next.request, "extend",
+        |_| async { panic!("expired extension sent") },
+        |_| async { panic!("unsent extension looked up") },
+    ).await.unwrap(), ExternalResult::Failed { code, .. } if code == "RESOURCE_LEASE_EXPIRED"));
+    assert_eq!(
+        second.account(&account).await.unwrap().reserved,
+        Amount::default()
+    );
+}

@@ -219,7 +219,8 @@ does not charge a second time.
 The opt-in `standard-background` binding for GPT-6.1 Terra sends
 `background: true` with the default completion window and reserves the
 full Standard request before submitting. OpenAI temporarily stores the
-response for polling. The driver stores the accepted response ID with its
+response for polling. The background API exposes retrieval and cancellation for
+that response ID. Polling does not extend the request or buy more output. The driver stores the accepted response ID with its
 attempt. Reconciliation retrieves that ID on the same binding without
 submitting again. Polling errors keep the accepted ID and reservation.
 This binding accepts text and function calls with text results. Attachments
@@ -299,9 +300,9 @@ The attempt's saved pricing snapshot carries the policy used for settlement.
 
 The direct SVG operation is unavailable before credential resolution. The
 Images API accepts an author model and reasoning effort but has no field
-for the author request's `max_output_tokens`. An executable SVG binding
-needs that cap on the author wire and must reserve the bounded prompt and
-reference using the author model's catalog rates and cache rules.
+for the author request's `max_output_tokens`. The catalog keeps direct SVG `documented`. A separately implemented SVG flow
+would need its own catalog completion attempt with a wire-enforced output cap,
+a bounded input, and local validation of the returned SVG.
 [SVG request and usage](https://developers.openai.com/api/reference/resources/images/methods/generate) ·
 [SVG billing](https://developers.openai.com/api/docs/guides/image-generation#cost-and-latency).
 
@@ -322,6 +323,9 @@ fee, charged through a separate router profile. Reservation assumes none of
 the monthly allowance is available. Settlement checks the upstream cost
 against the upstream profile and uses the reported credit fee within the
 allowance-independent ceiling, so zero and partially discounted fees settle.
+A trusted billing verifier can additionally certify the shared period for
+[atomic allowance settlement](budget.md#shared-provider-allowances). The
+generation response alone provides no certified opening balance or period bounds.
 
 `fp8-standard` is a credits binding with DeepInfra and Cloudflare candidates.
 The request supplies both exact tags through `provider.only` and disables

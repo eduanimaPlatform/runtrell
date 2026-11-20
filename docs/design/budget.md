@@ -132,12 +132,43 @@ or limit is rejected. PostgreSQL serializes writers on the period row and commit
 consumption together with its receipt. Memory provides the same atomic behavior
 within a shared store instance.
 
-Use this ledger only when every consumer of the allowance uses the same ledger,
-with a confirmed initial balance and period boundary. The current OpenRouter
-BYOK binding uses provider-reported billing evidence because its allowance
-period boundary and external consumption are unknown. A dependent extension
-requires its own reserved physical attempt before any more billable work
-begins.
+A trusted billing verifier can attach `ProviderAllowanceEvidence` to a completed
+OpenRouter BYOK result. It certifies the provider account, exact billing period
+and charge time, generation receipt and initial available balance in pico-USD.
+The pricing snapshot pins the allowance and reference rates. Admission still
+reserves the full fee. Settlement derives the eligible list-price charge from
+the pinned measurements, consumes the shared balance, checks the resulting fee
+against the provider-reported fee, and commits both ledgers and the result in
+one transaction. A duplicate generation on another attempt or a conflicting
+fee rolls back the transaction. The driver retains certified evidence under the
+current claim so it can retry settlement without making a new provider call.
+Retrying a settled attempt returns its previous result. All consumers must share the ledger and the same certified boundaries
+for that account. The bundled OpenRouter adapter does not attach this evidence
+from the generation response. That response has billing amounts, and settlement
+without optional allowance evidence continues using those amounts.
+
+## Dependent resource extensions
+
+A provider adapter can settle a resource operation with the provider's resource
+ID in `ExternalResult::Applied.external_id` and its confirmed absolute expiry
+in `Usage.resource_expires_at_ms`. `DispatchRequest::extend_resource` makes one
+distinct extension attempt per settled source lease. Admission checks the source
+receipt, Run, provider target and account binding, then reserves the incremental
+charge across all ancestor accounts. The adapter sends one operation for that
+resource with the pinned absolute expiry and a provider-enforceable bound for
+the newly billable work. Driver dispatch applies the normal send fence; a lease
+that expired before the first send can be aborted and its unused reservation
+released. Local timeout alone cannot release a sent attempt's reservation.
+
+The extension settles once when the result confirms the same resource ID and
+requested expiry with measured incremental usage. Its settled receipt can serve
+as the source for the next extension. Unknown receipts keep the incremental
+reservation. OpenAI Responses background polling retrieves an already reserved
+response, and needs no extension. OpenAI container retrieval refreshes
+`last_active_at`, so it cannot use the read-only background polling path.
+The bundled provider adapters currently have no verified mutable cache,
+container or session binding.
+[OpenAI container expiration](https://developers.openai.com/api/docs/guides/tools-code-interpreter#expiration).
 
 ## Price lines and owner settlement recovery
 
