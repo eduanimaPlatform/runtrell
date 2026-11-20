@@ -89,6 +89,30 @@ impl ModelLimits {
     }
 }
 impl DispatchRequest {
+    pub fn managed_overrun(&self, actual: Amount) -> bool {
+        self.pricing.is_some()
+            && (actual.tokens > self.reserve.tokens || actual.micro_usd > self.reserve.micro_usd)
+    }
+
+    /// A local preflight failure can release the reservation with explicit no-send evidence.
+    pub fn settlement_result(&self, result: &ExternalResult) -> Result<Option<Amount>> {
+        match result {
+            ExternalResult::Failed {
+                usage,
+                provider_diagnostic: Some(diagnostic),
+                ..
+            } if self.pricing.is_some()
+                && diagnostic.send_certainty == crate::ProviderSendCertainty::DefinitelyNotSent
+                && usage.amount() == Ok(Amount::default()) =>
+            {
+                Ok(Some(Amount::default()))
+            }
+            ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
+                self.settlement_amount(usage)
+            }
+            _ => Ok(None),
+        }
+    }
     /// None means incomplete evidence, never measured zero.
     pub fn settlement_amount(&self, usage: &Usage) -> Result<Option<Amount>> {
         let mut amount = match usage.amount() {
@@ -102,6 +126,16 @@ impl DispatchRequest {
             .all(|k| usage.quantities.contains_key(k))
         {
             amount = None;
+        }
+        if let Some(snapshot) = &self.pricing {
+            if self.price.is_some() {
+                return Err(Error::Conflict);
+            }
+            return match snapshot.cost(usage) {
+                Ok(reference) if amount == Some(reference) => Ok(amount),
+                Ok(_) | Err(Error::UsageUnknown | Error::Invalid(_)) => Ok(None),
+                Err(e) => Err(e),
+            };
         }
         if let Some(price) = &self.price {
             if !usage.model.is_empty() && price.model != usage.model {
@@ -282,17 +316,16 @@ pub struct SettlementRecovery {
     pub basis: String,
     /// The stored usage refined by the documented rule. It may only fill counters the
     /// stored usage left unknown (`None`); `micro_usd` must be `None` because the
-    /// store computes it from `price`.
+    /// store recomputes it from the original attempt.
     pub usage: Usage,
-    /// Price basis for the amount. `price.model` must equal `usage.model` and the
-    /// operation's pinned price model.
-    pub price: Price,
+    /// External metering only. Catalog-backed recoveries use the stored snapshot.
+    pub price: Option<Price>,
 }
 /// Audit of one recovery: the old usage, the price basis and the new usage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementRecord {
     pub basis: String,
-    pub price: Price,
+    pub price: Option<Price>,
     pub previous: Usage,
     pub settled: Usage,
     pub amount: Amount,
@@ -371,8 +404,7 @@ impl Operation {
         }
         if let Some(done) = self.recovery.as_deref() {
             let mut requested = recovery.usage.clone();
-            requested.micro_usd = done.settled.micro_usd;
-            requested.price_evidence = Some(Box::new(recovery.price.cost_breakdown(&requested)?));
+            self.price_recovery(recovery, &mut requested)?;
             return if done.basis == recovery.basis
                 && done.price == recovery.price
                 && requested == done.settled
@@ -394,9 +426,30 @@ impl Operation {
         };
         let new = &recovery.usage;
         let keeps = |old: Option<u64>, new: Option<u64>| old.is_none() || old == new;
+        if self.request.pricing.is_some()
+            && stored.unknown_reason.as_deref() == Some("MANAGED_ROUTE_MISMATCH")
+        {
+            return Err(Error::UsageUnknown);
+        }
         if stored.amount().is_ok()
             || stored.model != new.model
-            || stored.quantities != new.quantities
+            || if self.request.pricing.is_some() {
+                stored
+                    .quantities
+                    .iter()
+                    .any(|(name, count)| new.quantities.get(name) != Some(count))
+                    || new.quantities.keys().any(|name| {
+                        !stored.quantities.contains_key(name)
+                            && !matches!(
+                                name.as_str(),
+                                crate::models::CACHE_WRITE
+                                    | crate::models::CACHE_WRITE_30M
+                                    | crate::models::CACHE_WRITE_12H
+                            )
+                    })
+            } else {
+                stored.quantities != new.quantities
+            }
             || match (&stored.svg_usage, &new.svg_usage) {
                 (None, None) => false,
                 (Some(old), Some(new)) => !new.refines(old),
@@ -414,37 +467,27 @@ impl Operation {
                 "recovery must only fill unknown counters".into(),
             ));
         }
-        if new.model.is_empty()
-            || recovery.price.model != new.model
-            || self
-                .request
-                .price
-                .as_ref()
-                .is_some_and(|pinned| pinned.model != new.model)
-        {
-            return Err(Error::Invalid("recovery price/model mismatch".into()));
-        }
-        let cost = recovery.price.cost(new)?;
-        if stored.micro_usd.is_some_and(|known| known != cost) {
-            return Err(Error::Invalid(
-                "recovery must preserve known image cost".into(),
-            ));
-        }
         let mut settled = new.clone();
-        settled.micro_usd = Some(cost);
-        let evidence = recovery.price.cost_breakdown(&settled)?;
+        self.price_recovery(recovery, &mut settled)?;
+        if stored
+            .micro_usd
+            .is_some_and(|known| Some(known) != settled.micro_usd)
+        {
+            return Err(Error::Invalid("recovery must preserve known cost".into()));
+        }
         if stored.price_evidence.as_ref().is_some_and(|old| {
-            old.input_micro_usd
-                .is_some_and(|value| evidence.input_micro_usd != Some(value))
-                || old
-                    .output_micro_usd
-                    .is_some_and(|value| evidence.output_micro_usd != Some(value))
+            settled.price_evidence.as_ref().is_none_or(|evidence| {
+                old.input_micro_usd
+                    .is_some_and(|value| evidence.input_micro_usd != Some(value))
+                    || old
+                        .output_micro_usd
+                        .is_some_and(|value| evidence.output_micro_usd != Some(value))
+            })
         }) {
             return Err(Error::Invalid(
                 "recovery must preserve known price evidence".into(),
             ));
         }
-        settled.price_evidence = Some(Box::new(evidence));
         if !self
             .request
             .quantities
@@ -471,5 +514,31 @@ impl Operation {
                 at: now,
             },
         )))
+    }
+
+    fn price_recovery(&self, recovery: &SettlementRecovery, usage: &mut Usage) -> Result<()> {
+        if let Some(snapshot) = &self.request.pricing {
+            if recovery.price.is_some() {
+                return Err(Error::Invalid(
+                    "catalog price is pinned to the original attempt".into(),
+                ));
+            }
+            usage.micro_usd = Some(snapshot.cost(usage)?.micro_usd);
+            return Ok(());
+        }
+        let price = recovery.price.as_ref().ok_or(Error::PriceNotConfigured)?;
+        if usage.model.is_empty()
+            || price.model != usage.model
+            || self
+                .request
+                .price
+                .as_ref()
+                .is_some_and(|pinned| pinned.model != usage.model)
+        {
+            return Err(Error::Invalid("recovery price/model mismatch".into()));
+        }
+        usage.micro_usd = Some(price.cost(usage)?);
+        usage.price_evidence = Some(Box::new(price.cost_breakdown(usage)?));
+        Ok(())
     }
 }

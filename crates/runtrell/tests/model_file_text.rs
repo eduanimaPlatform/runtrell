@@ -23,6 +23,7 @@ async fn setup(action: FileAction, policy: StoragePolicy) -> (FileTool, ToolCont
     };
     let descriptor = tool.descriptor();
     let context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim,
         principal: control.get(&run).await.unwrap().spec.principal,

@@ -212,6 +212,7 @@ impl<
         self.policy.authorize(&run, &op.request.target, "cancel")?;
         self.store.cancel(&c.run, "execution cancelled").await?;
         let ctx = ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: c.clone(),
             principal: run.spec.principal,

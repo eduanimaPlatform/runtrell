@@ -1,5 +1,6 @@
 [package]
 name = "runtrell-providers"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +14,7 @@ gemini = ["dep:reqwest", "dep:httpdate"]
 openrouter = ["dep:reqwest", "dep:httpdate"]
 
 [dependencies]
+thiserror = "2"
 runtrell = { path = "../runtrell", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,3 +31,9 @@ runtrell-testkit = { path = "../runtrell-testkit", version = "0.1.0" }
 runtrell-postgres = { path = "../runtrell-postgres", version = "0.1.0" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+
+# These wire fixtures live inside the adapter crate so they can use private
+# loopback constructors.
+[[test]]
+name = "managed_models"
+path = "tests/managed_models.rs"

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Included only in the OpenAI image acceptance module.
-use crate::still_images::encoded_output;
+use super::still_images::encoded_output;
 
 #[tokio::test]
 async fn img26_optional_raster_fields_reach_the_wire() {

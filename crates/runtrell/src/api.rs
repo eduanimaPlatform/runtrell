@@ -776,6 +776,8 @@ pub struct DispatchRequest {
     pub reserve: Amount,
     pub quantities: BTreeMap<String, u64>,
     pub price: Option<Price>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<Box<crate::models::PricingSnapshot>>,
     pub scope: Option<String>,
     /// Absolute Unix milliseconds until which recovery may replay or look up this operation.
     pub recovery_until: Option<u64>,
@@ -811,6 +813,7 @@ impl DispatchRequest {
             reserve,
             quantities: BTreeMap::new(),
             price: None,
+            pricing: None,
             scope: None,
             recovery_until: None,
             attempt: 1,
@@ -1024,16 +1027,12 @@ impl Operation {
             return Ok(None);
         };
         result.validate_evidence()?;
-        let usage = match result {
-            ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => usage,
-            _ => return Ok(None),
-        };
         // This is a sufficiency probe. Malformed observations remain evidence,
         // but must not prevent lookup from supplying corrected measurements.
         // record still validates every new result before changing balances.
         Ok(self
             .request
-            .settlement_amount(usage)
+            .settlement_result(result)
             .is_ok_and(|amount| amount.is_some())
             .then_some(result))
     }
@@ -1082,8 +1081,84 @@ impl Default for RetryPolicy {
         }
     }
 }
+/// Authorization bound to a stored attempt and its pinned price.
+#[derive(Clone, Debug)]
+pub struct ManagedSend {
+    claim: Claim,
+    operation: String,
+    attempt: u32,
+    pricing: Box<crate::models::PricingSnapshot>,
+    reserve: Amount,
+    used: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    poll_id: Option<String>,
+}
+
+impl ManagedSend {
+    pub(crate) fn new(claim: &Claim, op: &Operation) -> Option<Self> {
+        Some(Self {
+            claim: claim.clone(),
+            operation: op.id.clone(),
+            attempt: op.request.attempt,
+            pricing: op.request.pricing.clone()?,
+            reserve: op.request.reserve,
+            used: Default::default(),
+            poll_id: None,
+        })
+    }
+
+    pub(crate) fn for_lookup(claim: &Claim, op: &Operation) -> Option<Self> {
+        if op.settled {
+            return None;
+        }
+        let Some(ExternalResult::Accepted { external_id }) = &op.result else {
+            return None;
+        };
+        let mut grant = Self::new(claim, op)?;
+        grant.poll_id = Some(external_id.clone());
+        Some(grant)
+    }
+
+    fn matches(&self, context: &ToolContext, pricing: &crate::models::PricingSnapshot) -> bool {
+        self.claim == context.claim
+            && self.operation == context.operation
+            && self.attempt == context.attempt
+            && self.pricing.as_ref() == pricing
+    }
+
+    /// The persisted remote ID of an accepted operation on this binding.
+    pub fn poll_id(
+        &self,
+        context: &ToolContext,
+        pricing: &crate::models::PricingSnapshot,
+    ) -> Option<&str> {
+        self.poll_id
+            .as_deref()
+            .filter(|_| self.matches(context, pricing))
+    }
+
+    /// Consume the grant immediately before resolving credentials for a send.
+    pub fn authorize(
+        &self,
+        context: &ToolContext,
+        pricing: &crate::models::PricingSnapshot,
+        required: Amount,
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if !self.matches(context, pricing)
+            || self.poll_id.is_some()
+            || self.reserve.tokens < required.tokens
+            || self.reserve.micro_usd < required.micro_usd
+            || self.used.swap(true, Ordering::AcqRel)
+        {
+            return Err(Error::ReservationDenied);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolContext {
+    pub managed_send: Option<ManagedSend>,
     pub recovery_proof: Option<RecoveryProof>,
     pub claim: Claim,
     pub principal: String,
@@ -1278,6 +1353,9 @@ pub trait ModelPort: Send + Sync {
         RetryPolicy::default()
     }
     fn limits(&self) -> ModelLimits;
+    fn pricing_snapshot(&self, _model: &str) -> Option<crate::models::PricingSnapshot> {
+        None
+    }
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
     /// Recovery scope and retention in milliseconds; the driver pins
     /// `recovery_until = Clock::now() + retention` (checked).
@@ -1296,6 +1374,9 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
+        None
+    }
     /// Recheck live authorization for this exact model input before either a new
     /// invocation or replaying a settled result into model history. This hook
     /// must not acquire or expose the referenced content.

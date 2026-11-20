@@ -93,6 +93,7 @@ async fn contract(open: impl Fn() -> DataStore) {
     };
     let descriptor = tool.descriptor();
     let context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim,
         principal: run.spec.principal.clone(),

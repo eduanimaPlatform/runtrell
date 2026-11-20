@@ -87,7 +87,7 @@ pub fn recovery() -> SettlementRecovery {
     SettlementRecovery {
         basis: "test-images-rule-1".into(),
         usage: refined(stored_usage()),
-        price: rates(),
+        price: Some(rates()),
     }
 }
 /// ceil((343 * 5 + 601 * 30) micro-USD).
@@ -163,12 +163,12 @@ pub async fn partial_price_evidence_recovery<S: ControlStore + 'static>(
     let recovery = SettlementRecovery {
         basis: "verified-explicit-cache-zero".into(),
         usage: refined,
-        price,
+        price: Some(price),
     };
     let mut rewrites_known_output = recovery.clone();
-    rewrites_known_output.price.output = 29_000_000;
-    rewrites_known_output.price.image_output = 29_000_000;
-    rewrites_known_output.price.reasoning = 29_000_000;
+    rewrites_known_output.price.as_mut().unwrap().output = 29_000_000;
+    rewrites_known_output.price.as_mut().unwrap().image_output = 29_000_000;
+    rewrites_known_output.price.as_mut().unwrap().reasoning = 29_000_000;
     assert!(matches!(
         settle(
             &*restarted,
@@ -353,7 +353,7 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
     let mut changes_known_counter = recovery();
     changes_known_counter.usage.input = Some(344);
     let mut other_model = recovery();
-    other_model.price.model = "other".into();
+    other_model.price.as_mut().unwrap().model = "other".into();
     let mut drops_counter = recovery();
     drops_counter.usage.output = None;
     let mut keeps_priced = recovery();
@@ -422,7 +422,7 @@ pub async fn image_usage_operator_recovery<S: ControlStore + 'static>(
     assert!(records.windows(2).all(|pair| pair[0] == pair[1]));
     let record = records.remove(0);
     assert_eq!(record.basis, "test-images-rule-1");
-    assert_eq!(record.price, rates());
+    assert_eq!(record.price, Some(rates()));
     assert_eq!(record.previous, stored_usage());
     assert_eq!(record.settled.micro_usd, Some(EXPECTED_MICRO_USD));
     assert_eq!(record.settled.cached, Some(0));
@@ -627,7 +627,7 @@ pub async fn wait_follows_the_lookup_window<S: ControlStore + 'static>(store: Ar
         SettlementRecovery {
             basis: "test-measured-elsewhere".into(),
             usage,
-            price: FakeModel::default().limits().price.unwrap(),
+            price: Some(FakeModel::default().limits().price.unwrap()),
         },
         start + DAY,
     )
@@ -901,4 +901,38 @@ pub async fn settle_never_resumes<S: ControlStore + 'static>(store: Arc<S>, rest
 }
 async fn f_drive<S: ControlStore + 'static>(rt: &Rt<S>, c: &Claim) -> Result<RunRecord> {
     rt.drive(c).await
+}
+
+pub async fn shared_allowance(
+    first: &impl models::AllowanceLedger,
+    second: &impl models::AllowanceLedger,
+) {
+    use models::AllowanceDebit;
+    let mut a = AllowanceDebit {
+        allowance: "fixture-monthly-quota".into(),
+        scope: "provider-account-1".into(),
+        period: "2026-11".into(),
+        receipt: "first-attempt".into(),
+        limit: 100,
+        quantity: 80,
+    };
+    let mut b = AllowanceDebit {
+        receipt: "second-attempt".into(),
+        ..a.clone()
+    };
+    let (used_a, used_b) = tokio::join!(first.consume_allowance(&a), second.consume_allowance(&b),);
+    let (used_a, used_b) = (used_a.unwrap(), used_b.unwrap());
+    assert!(matches!((used_a, used_b), (80, 20) | (20, 80)));
+    assert_eq!(second.consume_allowance(&a).await, Ok(used_a));
+    assert_eq!(first.consume_allowance(&b).await, Ok(used_b));
+    a.quantity += 1;
+    assert_eq!(first.consume_allowance(&a).await, Err(Error::Conflict));
+    a.quantity -= 1;
+    a.limit += 1;
+    assert_eq!(first.consume_allowance(&a).await, Err(Error::Conflict));
+    a.limit -= 1;
+    a.period = "2026-12".into();
+    assert_eq!(second.consume_allowance(&a).await, Ok(80));
+    b.scope = "provider-account-2".into();
+    assert_eq!(first.consume_allowance(&b).await, Ok(80));
 }

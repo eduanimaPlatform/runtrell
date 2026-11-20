@@ -113,3 +113,30 @@ fn settle_never_resumes() {
         settlement_contracts::settle_never_resumes(store, restarted).await;
     });
 }
+
+#[test]
+fn shared_allowance_consumption_is_durable_and_atomic() {
+    support::block_on(async {
+        let (first, second) = two_stores().await;
+        settlement_contracts::shared_allowance(first.as_ref(), second.as_ref()).await;
+        use models::{AllowanceDebit, AllowanceLedger};
+        let debit = AllowanceDebit {
+            allowance: "fixture-money-quota".into(),
+            scope: "account".into(),
+            period: "2026-11".into(),
+            receipt: "attempt".into(),
+            quantity: u64::MAX,
+            limit: u64::MAX,
+        };
+        first.fail_next_write();
+        assert_eq!(first.consume_allowance(&debit).await, Err(Error::Storage));
+        let mut next = AllowanceDebit {
+            receipt: "successor".into(),
+            ..debit.clone()
+        };
+        assert_eq!(second.consume_allowance(&next).await, Ok(u64::MAX));
+        assert_eq!(first.consume_allowance(&debit).await, Ok(0));
+        next.quantity = 1;
+        assert_eq!(first.consume_allowance(&next).await, Err(Error::Conflict));
+    });
+}

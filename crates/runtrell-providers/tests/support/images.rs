@@ -92,6 +92,7 @@ async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) 
         },
     };
     let context = ToolContext {
+        managed_send: None,
         claim,
         permission: tool.descriptor().permission,
         account_binding: "images".into(),

@@ -12,6 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+mod allowance;
 mod engine;
 mod erasure;
 mod execution;
@@ -65,12 +66,14 @@ pub struct LateResult {
 }
 
 /// Tables the schema-4 migration creates; `connect` requires every one.
-const SCHEMA_TABLES: [&str; 14] = [
+const SCHEMA_TABLES: [&str; 16] = [
     "owner_receipts",
     "schema_config",
     "runs",
     "sessions",
     "budget_accounts",
+    "allowance_periods",
+    "allowance_receipts",
     "attempts",
     "attempt_accounts",
     "slots",
@@ -147,6 +150,14 @@ impl PgStore {
         sqlx::Executor::execute(
             &mut *tx,
             include_str!("../migrations/0003_erasure.sql")
+                .replace("{{schema}}", &store.schema)
+                .as_str(),
+        )
+        .await
+        .map_err(|e| storage("PgStore::initialize", e))?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            include_str!("../migrations/0004_allowances.sql")
                 .replace("{{schema}}", &store.schema)
                 .as_str(),
         )

@@ -134,6 +134,7 @@ async fn erases_all_database_bodies_and_payloads_preserving_accounting_and_refus
             .unwrap();
     }
     let execution_context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: c.clone(),
         principal: "host".into(),
@@ -265,6 +266,7 @@ async fn erases_all_database_bodies_and_payloads_preserving_accounting_and_refus
         Err(Error::Closed)
     );
     let context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: c,
         principal: "host".into(),
@@ -326,6 +328,7 @@ async fn active_reserved_unknown_and_live_owner_runs_are_unchanged_on_refusal() 
         }
         if mode == "execution" {
             let context = ToolContext {
+                managed_send: None,
                 recovery_proof: None,
                 claim: c.clone(),
                 principal: "host".into(),
@@ -782,7 +785,7 @@ async fn erases_raw_svg_usage_from_recovered_attempts_and_owner_receipts_only() 
             SettlementRecovery {
                 basis: "svg-accounting-rule".into(),
                 usage: refined(usage),
-                price: rates(),
+                price: Some(rates()),
             },
             OwnerCommand {
                 key: "svg-recovery-command".into(),

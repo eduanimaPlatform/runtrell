@@ -20,6 +20,16 @@ account creation. Unknown reservations and slots remain held until settlement;
 continuation never means release. Finalization still requires settled operations,
 current owner, current revisions, and a trusted receipt.
 
+For a bundled provider, the driver records the catalog revision, digest,
+binding, usage rules and price snapshots with the reservation. A binding with
+several reachable OpenRouter endpoints pins each price, reserves the highest
+eligible charge and settles at the proven endpoint. A BYOK attempt includes
+its upstream charge and the ceiling for its OpenRouter fee. Missing allowance
+balance leaves the reservation priced at the full fee. The reported fee can
+resolve the actual charge. The adapter can use the attempt's send authorization once. Missing result or cost evidence
+keeps the reservation pending. An actual charge above the reserved bound is
+recorded and closes admission on the affected accounts.
+
 Usage distinguishes missing measurements from measured zero. Image input is a
 subset of input; cached image input is the intersection of cached and image
 input, with max(0,cached+image-input) <= intersection <= min(cached,image).
@@ -28,7 +38,7 @@ sum may exceed output because providers do not promise they are disjoint and do
 not report the overlap. A category billed at the plain output rate cannot change
 the cost and is folded into ordinary output; when both carry their own rate and
 both are nonzero, the overlap decides the price, so settlement is refused as
-unknown and the reservation is kept (tests `reasoning_and_image_output_*`). Price snapshots use
+unknown and the reservation is kept (tests `reasoning_and_image_output_*`). The external metering `Price` type uses
 integer micro-USD per million tokens. The billing unit is one billed attempt
 (one settlement of one operation attempt). Its cost is
 `ceil( sum_k(tokens_k * rate_k) / 1_000_000 )` over the disjoint categories
@@ -62,8 +72,9 @@ quotes an input upper bound plus an output allowance at the highest applicable
 input/output category rates, with the same single ceiling and overflow checks as
 actual billing. ModelLimits.estimate also validates the model/price identity and
 technical request bounds (including context). ModelLimits.cap selects the largest
-affordable allowance using that same quote. No built-in model prices or provider
-formats are part of this API; hosts supply snapshots and normalized measurements.
+affordable allowance using that same quote. The bundled catalog provides the
+pricing basis for official adapters. Custom Tool and ModelPort implementations
+supply their own metering evidence.
 
 An operation key identifies logical work; attempt identifies a billed attempt.
 Lookup/replay of one result settles that attempt once. Separately charged retry
@@ -110,6 +121,24 @@ Incomplete observations retain reservations; late results from stale owners
 require independent host verification and are never automatically adopted. After
 settlement, result is authoritative and temporary observation copies are cleared.
 
+## Shared provider allowances
+
+`AllowanceLedger::consume_allowance` records the included quantity against an
+authoritatively identified provider allowance, scope and period. The host supplies
+opaque scope and period IDs and a stable receipt ID for the consumption. Each
+scope/period has one fixed limit. Consumption is capped at the remaining
+balance, and replaying a receipt returns the same result. A conflicting receipt
+or limit is rejected. PostgreSQL serializes writers on the period row and commits
+consumption together with its receipt. Memory provides the same atomic behavior
+within a shared store instance.
+
+Use this ledger only when every consumer of the allowance uses the same ledger,
+with a confirmed initial balance and period boundary. The current OpenRouter
+BYOK binding uses provider-reported billing evidence because its allowance
+period boundary and external consumption are unknown. A dependent extension
+requires its own reserved physical attempt before any more billable work
+begins.
+
 ## Price lines and owner settlement recovery
 
 `Price` rates are integer micro-USD per million tokens and the input side is a partition of four
@@ -152,13 +181,12 @@ pass. Remaining capacity is not a quote or a promise that the next call can rese
 complete result awaits the operator independently refuse resume with `Conflict`.
 
 `OperationStore::settle_recovered(run, operation, SettlementRecovery, command, now)` is the owner path
-out. The request carries a fixed `basis` string, the stored usage refined by a documented rule
-and the price basis. The store accepts it only if the operation is Applied/Failed, unsettled and
-unknown, the new usage only fills counters that were `None` (model and quantities equal,
-`micro_usd` still `None`), `price.model` equals the usage and pinned price model, and
-`Price::cost` can compute the primary bill; otherwise nothing changes (`UsageUnknown` stays for the
-operator). It recomputes `price_evidence` from the recovery price, preserving any
-previously known component amount; the original evidence remains in the audit.
+out. The request carries a fixed `basis` and refined usage with `micro_usd`
+unset. A bundled operation uses its original catalog snapshot and requires
+`price: None`. Recovery may supply missing cache counters while preserving
+every measured counter and model identity. A custom metering operation
+supplies its evidence-based `Price` and preserves any known component amounts.
+The original usage remains in the audit.
 It then settles the original operation in one transaction: releases the reservation
 and unknown mark, charges the corrected amount to every ancestor account, replaces the saved
 result's usage, and stores `Operation.recovery` with the old usage, price basis, new usage,

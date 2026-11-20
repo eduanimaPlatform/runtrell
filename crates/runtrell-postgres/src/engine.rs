@@ -963,10 +963,7 @@ impl OperationStore for PgStore {
                     | ExternalResult::Failed { usage, .. } => Some(usage),
                     _ => None,
                 };
-                let amount = usage
-                    .map(|u| old.request.settlement_amount(u))
-                    .transpose()?
-                    .flatten();
+                let amount = old.request.settlement_result(&result)?;
                 let incomplete = amount.is_none() && usage.is_some();
                 let state = match &result {
                     ExternalResult::Applied { .. } => OperationState::Applied,
@@ -992,7 +989,7 @@ impl OperationStore for PgStore {
                         a.reserved = a.reserved.subtract(old.request.reserve);
                         a.used = a.used.checked_add(actual)?;
                         a.settle_quantities(&old.request, usage.unwrap())?;
-                        if a.reached() {
+                        if a.reached() || old.request.managed_overrun(actual) {
                             a.exhausted = true;
                         }
                     } else if unknown {

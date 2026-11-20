@@ -4,7 +4,7 @@ use reqwest::{Client, Url, header::HeaderValue};
 use runtrell::*;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Wire {
@@ -15,9 +15,26 @@ pub(crate) enum Wire {
 #[derive(Debug)]
 pub(crate) struct Adapter {
     pub(crate) config: Config,
+    pub(crate) managed: Option<Managed>,
+
     client: Client,
     pub(crate) wire: Wire,
 }
+pub(crate) struct Managed {
+    pub(crate) model: models::ResolvedModel,
+    pub(crate) pricing: models::PricingSnapshot,
+    credentials: CredentialResolver,
+    reasoning: Option<String>,
+}
+
+impl std::fmt::Debug for Managed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Managed")
+            .field("model", &self.model.id())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
@@ -132,7 +149,37 @@ impl ToolNames {
     }
 }
 impl Adapter {
+    #[cfg(test)]
     pub(crate) fn new(config: Config, wire: Wire) -> Result<Self> {
+        if config.key.0.is_empty()
+            || config.endpoint.contains(&config.key.0)
+            || HeaderValue::from_str(&config.key.0).is_err()
+        {
+            return Err(invalid());
+        }
+        Self::build(config, wire, None)
+    }
+
+    pub(crate) fn managed(
+        config: Config,
+        wire: Wire,
+        model: models::ResolvedModel,
+        credentials: CredentialResolver,
+        reasoning: Option<String>,
+    ) -> Result<Self> {
+        Self::build(
+            config,
+            wire,
+            Some(Managed {
+                pricing: model.pricing(),
+                model,
+                credentials,
+                reasoning,
+            }),
+        )
+    }
+
+    fn build(config: Config, wire: Wire, managed: Option<Managed>) -> Result<Self> {
         config.image_limits.validate()?;
         let url = Url::parse(&config.endpoint).map_err(|_| invalid())?;
         let l = &config.capabilities.limits;
@@ -143,9 +190,6 @@ impl Adapter {
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
-            || config.key.0.is_empty()
-            || config.endpoint.contains(&config.key.0)
-            || HeaderValue::from_str(&config.key.0).is_err()
             || l.model.is_empty()
             || l.context == 0
             || l.max_output == 0
@@ -160,7 +204,8 @@ impl Adapter {
             || config.max_request_bytes == 0
             || config.max_response_bytes == 0
             || config.input_token_upper_bound == 0
-            || config.input_token_upper_bound >= l.context
+            || config.input_token_upper_bound > l.context
+            || (managed.is_none() && config.input_token_upper_bound == l.context)
             || (config.capabilities.parallel_tool_calls && !config.capabilities.tool_calling)
         {
             return Err(invalid());
@@ -175,6 +220,7 @@ impl Adapter {
             .map_err(|_| invalid())?;
         Ok(Self {
             config,
+            managed,
             client,
             wire,
         })
@@ -197,11 +243,35 @@ impl Adapter {
         {
             return Err(Error::PermissionDenied);
         }
+        if self.managed.is_some()
+            && self.wire == Wire::Responses
+            && !state.content.as_array().is_some_and(|items| {
+                items.iter().all(|item| {
+                    matches!(
+                        item["type"].as_str(),
+                        Some("message" | "function_call" | "reasoning")
+                    )
+                })
+            })
+        {
+            return Err(Error::PermissionDenied);
+        }
         Ok(state)
     }
-    fn body(&self, run: &RunHandle, request: &PreparedModelRequest) -> Result<Value> {
+    fn background(&self) -> bool {
+        self.managed
+            .as_ref()
+            .is_some_and(|managed| managed.model.background())
+    }
+
+    pub(crate) fn body(&self, run: &RunHandle, request: &PreparedModelRequest) -> Result<Value> {
         if *run != self.config.run {
             return Err(Error::PermissionDenied);
+        }
+        if self.background() && (!request.images.is_empty() || !request.attachments.is_empty()) {
+            return Err(Error::Unsupported(
+                "attachments on background responses".into(),
+            ));
         }
         self.document_bound(request)?;
         let names = ToolNames::new(request, self.wire)?;
@@ -210,11 +280,12 @@ impl Adapter {
         if request.model != l.model
             || request.max_output < l.min_max_output_tokens
             || request.max_output > l.max_output
-            || self
-                .config
-                .input_token_upper_bound
-                .checked_add(request.max_output)
-                .is_none_or(|n| n > l.context)
+            || (self.managed.is_none()
+                && self
+                    .config
+                    .input_token_upper_bound
+                    .checked_add(request.max_output)
+                    .is_none_or(|n| n > l.context))
             || (!request.tools.is_empty() && !c.tool_calling)
         {
             return Err(invalid());
@@ -332,6 +403,31 @@ impl Adapter {
                 json!({"contents":messages,"generationConfig":{"maxOutputTokens":request.max_output,"candidateCount":1}})
             }
         };
+        if let Some(managed) = &self.managed {
+            if self.wire == Wire::Responses {
+                body["service_tier"] = json!("default");
+                body["truncation"] = json!("disabled");
+                if managed.model.background() {
+                    body["background"] = json!(true);
+                }
+                let ttl = match managed.model.cache_retention_seconds() {
+                    Some(1800) => "30m",
+                    Some(43200) => "12h",
+                    _ => return Err(Error::ReservationDenied),
+                };
+                body["prompt_cache_options"] = json!({"mode":"implicit","ttl":ttl});
+                if let Some(mode) = &managed.reasoning {
+                    body["reasoning"] = json!({"effort":mode});
+                }
+            }
+            if self.wire == Wire::GenerateContent {
+                body["serviceTier"] = json!("standard");
+                body["generationConfig"]["thinkingConfig"] = json!({"thinkingBudget":0});
+            }
+            if self.wire == Wire::Chat {
+                body["provider"] = json!({"only":managed.model.endpoint_tags(),"allow_fallbacks":false,"require_parameters":true});
+            }
+        }
         if !functions.is_empty() {
             body["tools"] = match self.wire {
                 Wire::GenerateContent => json!([{"functionDeclarations":functions}]),
@@ -395,7 +491,7 @@ impl Adapter {
             HttpResult::Json {
                 value: parsed,
                 status,
-            } => Ok(self.reply(&parsed, &request).unwrap_or_else(|_| {
+            } => Ok(self.submit_result(&parsed, &request).unwrap_or_else(|_| {
                 ExternalResult::UnknownDiagnostic(diagnostic(
                     ProviderFailurePhase::ResponseDecode,
                     ProviderSendCertainty::Sent,
@@ -410,6 +506,123 @@ impl Adapter {
             }
         }
     }
+    fn submit_result(
+        &self,
+        value: &Value,
+        request: &PreparedModelRequest,
+    ) -> Result<ExternalResult> {
+        if !self.background() {
+            return self.reply(value, request);
+        }
+        let id = self.background_id(value).ok_or_else(invalid)?;
+        if matches!(value["status"].as_str(), Some("queued" | "in_progress")) {
+            return Ok(ExternalResult::Accepted {
+                external_id: id.into(),
+            });
+        }
+        self.background_terminal(value, request)
+    }
+
+    fn background_id<'a>(&self, value: &'a Value) -> Option<&'a str> {
+        let id = value["id"].as_str()?;
+        if !id.starts_with("resp_")
+            || id.len() <= "resp_".len()
+            || id.len() > 256
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            || value["object"] != "response"
+            || value["background"] != true
+            || value["model"] != self.config.capabilities.limits.model
+            || value["service_tier"] != "default"
+        {
+            return None;
+        }
+        Some(id)
+    }
+
+    fn background_terminal(
+        &self,
+        value: &Value,
+        request: &PreparedModelRequest,
+    ) -> Result<ExternalResult> {
+        match value["status"].as_str() {
+            Some("completed" | "incomplete") => self.reply(value, request),
+            Some("failed" | "cancelled") => Ok(ExternalResult::Failed {
+                code: "BACKGROUND_RESPONSE_FAILED".into(),
+                usage: self.usage(value)?,
+                repair_hint: None,
+                physical_evidence: None,
+                retry_after: None,
+                provider_diagnostic: None,
+            }),
+            _ => Err(invalid()),
+        }
+    }
+
+    async fn lookup(&self, context: &ToolContext, request: PreparedModelRequest) -> Result<Lookup> {
+        let body = self.body(&context.claim.run, &request)?;
+        self.check_document_wire_bound(&request, &body)?;
+        self.authorize_attachments(context, &request)?;
+        let Some(managed) = self.managed.as_ref().filter(|_| self.background()) else {
+            return Ok(Lookup::Unknown);
+        };
+        let Some(id) = context
+            .managed_send
+            .as_ref()
+            .and_then(|grant| grant.poll_id(context, &managed.pricing))
+        else {
+            return Ok(Lookup::Unknown);
+        };
+        let Some(value) = self.poll_response(context, managed, id).await else {
+            return Ok(Lookup::Pending);
+        };
+        if self.background_id(&value) != Some(id) {
+            return Ok(Lookup::Pending);
+        }
+        Ok(self
+            .background_terminal(&value, &request)
+            .map_or(Lookup::Pending, Lookup::Found))
+    }
+
+    async fn poll_response(
+        &self,
+        context: &ToolContext,
+        managed: &Managed,
+        id: &str,
+    ) -> Option<Value> {
+        let (ApiKey(key, _), timeout) = (
+            (managed.credentials)(managed.model.id()).ok()?,
+            self.request_timeout(context).ok()?,
+        );
+        if key.is_empty() || self.config.endpoint.contains(&key) || id.contains(&key) {
+            return None;
+        }
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {key}")).ok()?;
+        authorization.set_sensitive(true);
+        // Use a single validated path segment even when recovering a stored ID.
+        let mut url = Url::parse(&self.config.endpoint).ok()?;
+        url.path_segments_mut().ok()?.push(id);
+        let mut response = self
+            .client
+            .get(url)
+            .timeout(timeout)
+            .header("authorization", authorization)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if bytes.len().checked_add(chunk.len())? > self.config.max_response_bytes {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).ok()
+    }
+
     pub(crate) async fn send(
         &self,
         context: &ToolContext,
@@ -434,6 +647,125 @@ impl Adapter {
         })
         .await
     }
+    pub(crate) fn managed_quote(&self, body: &Value) -> Result<Amount> {
+        let managed = self.managed.as_ref().ok_or(Error::ReservationDenied)?;
+        if managed.model.image_reservation().is_some() {
+            return managed.pricing.estimate_image(
+                body["size"].as_str().ok_or(Error::ReservationDenied)?,
+                body["quality"].as_str().ok_or(Error::ReservationDenied)?,
+                body["prompt"]
+                    .as_str()
+                    .ok_or(Error::ReservationDenied)?
+                    .len(),
+                body["images"]
+                    .as_array()
+                    .map_or(0, |refs| refs.len() as u64),
+            );
+        }
+        let output = body["max_output_tokens"]
+            .as_u64()
+            .or_else(|| body["generationConfig"]["maxOutputTokens"].as_u64())
+            .or_else(|| body["max_tokens"].as_u64())
+            .unwrap_or(self.config.capabilities.limits.max_output);
+        managed
+            .pricing
+            .estimate(self.config.input_token_upper_bound, output)
+    }
+
+    fn needs_input_count(&self) -> bool {
+        self.managed.as_ref().is_some_and(|managed| {
+            managed.model.api_family() == "openai_responses"
+                && managed
+                    .model
+                    .limits()
+                    .max_input_tokens
+                    .or(managed.model.limits().context_tokens)
+                    .is_some_and(|limit| self.config.input_token_upper_bound < limit)
+        })
+    }
+
+    /// Free Responses preflight over the same complete input. The supported
+    /// fields below include the output schema and the tool/message framing.
+    async fn count_responses_input(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        authorization: HeaderValue,
+        timeout: Duration,
+    ) -> Option<u64> {
+        let fields = [
+            "model",
+            "input",
+            "tools",
+            "text",
+            "parallel_tool_calls",
+            "truncation",
+        ];
+        let input: serde_json::Map<_, _> = fields
+            .into_iter()
+            .filter_map(|key| Some((key.into(), body.get(key)?.clone())))
+            .collect();
+        let mut response = self
+            .client
+            .post(format!("{endpoint}/input_tokens"))
+            .timeout(timeout)
+            .header("authorization", authorization)
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&input).ok()?)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if bytes.len().checked_add(chunk.len())? > 4096 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: Value = serde_json::from_slice(&bytes).ok()?;
+        (value["object"] == "response.input_tokens").then_some(())?;
+        value["input_tokens"].as_u64()
+    }
+
+    fn unsent(&self, code: &str) -> HttpResult {
+        HttpResult::Failure(ExternalResult::Failed {
+            repair_hint: None,
+            physical_evidence: None,
+            code: code.into(),
+            usage: Usage {
+                model: self.config.capabilities.limits.model.clone(),
+                ..Usage::measured(0, 0, 0)
+            },
+            retry_after: None,
+            provider_diagnostic: Some(diagnostic(
+                ProviderFailurePhase::PreSend,
+                ProviderSendCertainty::DefinitelyNotSent,
+                None,
+                &Value::Null,
+                self.wire,
+            )),
+        })
+    }
+
+    fn request_timeout(&self, context: &ToolContext) -> Result<Duration> {
+        let mut timeout = Duration::from_millis(self.config.capabilities.limits.timeout);
+        if let Some(deadline) = context.deadline {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|_| Error::Deadline)?
+                .as_millis();
+            // `deadline` is Unix milliseconds (Clock epoch).
+            let now = u64::try_from(now).map_err(|_| Error::Deadline)?;
+            if deadline <= now {
+                return Err(Error::Deadline);
+            }
+            timeout = timeout.min(Duration::from_millis(deadline - now));
+        }
+        Ok(timeout)
+    }
+
     pub(crate) async fn send_at_with_usage<F: Fn(&Value) -> Usage + Send>(
         &self,
         context: &ToolContext,
@@ -449,26 +781,63 @@ impl Adapter {
         if bytes.len() > self.config.max_request_bytes {
             return Err(invalid());
         }
-        let mut timeout = Duration::from_millis(self.config.capabilities.limits.timeout);
-        if let Some(deadline) = context.deadline {
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_err(|_| Error::Deadline)?
-                .as_millis();
-            // `deadline` is Unix milliseconds (Clock epoch).
-            let now = u64::try_from(now).map_err(|_| Error::Deadline)?;
-            if deadline <= now {
-                return Err(Error::Deadline);
+        let mut timeout = self.request_timeout(context)?;
+        let key = if let Some(managed) = &self.managed {
+            let quote = self.managed_quote(&body)?;
+            context
+                .managed_send
+                .as_ref()
+                .ok_or(Error::ReservationDenied)?
+                .authorize(context, &managed.pricing, quote)?;
+            let key = (managed.credentials)(managed.model.id())?;
+            if self.wire == Wire::Chat {
+                let payer = match managed.model.billing_mode() {
+                    Some("routed") => OpenRouterPayer::Credits,
+                    Some("byok") => OpenRouterPayer::Byok,
+                    _ => return Err(Error::ReservationDenied),
+                };
+                if key.1 != Some(payer) {
+                    return Ok(self.unsent("OPENROUTER_CREDENTIAL_PAYER_MISMATCH"));
+                }
             }
-            timeout = timeout.min(Duration::from_millis(deadline - now));
+            key
+        } else {
+            #[cfg(test)]
+            {
+                self.config.key.clone()
+            }
+            #[cfg(not(test))]
+            {
+                return Err(Error::ReservationDenied);
+            }
+        };
+        if key.0.is_empty() || endpoint.contains(&key.0) {
+            return Err(invalid());
         }
         let (header, secret) = if self.wire == Wire::GenerateContent {
-            ("x-goog-api-key", self.config.key.0.clone())
+            ("x-goog-api-key", key.0)
         } else {
-            ("authorization", format!("Bearer {}", self.config.key.0))
+            ("authorization", format!("Bearer {}", key.0))
         };
         let mut value = HeaderValue::from_str(&secret).map_err(|_| invalid())?;
         value.set_sensitive(true);
+        if self.needs_input_count() {
+            let start = Instant::now();
+            let count = self
+                .count_responses_input(endpoint, &body, value.clone(), timeout)
+                .await;
+            timeout = timeout.saturating_sub(start.elapsed());
+            let code = match count {
+                Some(count) if count > self.config.input_token_upper_bound => {
+                    Some("CONTEXT_CAP_EXCEEDED")
+                }
+                Some(_) if !timeout.is_zero() => None,
+                _ => Some("INPUT_TOKEN_COUNT_UNAVAILABLE"),
+            };
+            if let Some(code) = code {
+                return Ok(self.unsent(code));
+            }
+        }
         let response = self
             .client
             .post(endpoint)
@@ -807,15 +1176,16 @@ impl Adapter {
         })
     }
     pub(crate) fn usage(&self, v: &Value) -> Result<Usage> {
+        let model_field = if self.wire == Wire::GenerateContent {
+            "modelVersion"
+        } else {
+            "model"
+        };
+        let reported_model = v[model_field].as_str();
         let mut u = Usage {
-            model: v[if self.wire == Wire::GenerateContent {
-                "modelVersion"
-            } else {
-                "model"
-            }]
-            .as_str()
-            .unwrap_or(&self.config.capabilities.limits.model)
-            .into(),
+            model: reported_model
+                .unwrap_or(&self.config.capabilities.limits.model)
+                .into(),
             ..Usage::default()
         };
         let n = |path: &str| -> Result<Option<u64>> {
@@ -833,6 +1203,26 @@ impl Adapter {
                 u.image_input = n("/usage/input_tokens_details/image_tokens")?;
                 u.image_output = n("/usage/output_tokens_details/image_tokens")?;
                 u.cached_image_input = n("/usage/input_tokens_details/cached_image_tokens")?;
+                if self.managed.is_some() {
+                    for (name, path) in [
+                        (
+                            models::CACHE_WRITE,
+                            "/usage/input_tokens_details/cache_write_tokens",
+                        ),
+                        (
+                            models::CACHE_WRITE_30M,
+                            "/usage/input_tokens_details/cache_write_tokens_details/ttl_30m_tokens",
+                        ),
+                        (
+                            models::CACHE_WRITE_12H,
+                            "/usage/input_tokens_details/cache_write_tokens_details/ttl_12h_tokens",
+                        ),
+                    ] {
+                        if let Some(count) = n(path)? {
+                            u.quantities.insert(name.into(), count);
+                        }
+                    }
+                }
                 for (name, path) in [
                     (
                         "text_input_tokens",
@@ -861,6 +1251,15 @@ impl Adapter {
                 u.input = n("/usageMetadata/promptTokenCount")?;
                 u.cached = n("/usageMetadata/cachedContentTokenCount")?;
                 u.reasoning = n("/usageMetadata/thoughtsTokenCount")?;
+                if self.managed.is_some() {
+                    // The cataloged Gemini wire disables thinking.
+                    u.reasoning = u.reasoning.or(Some(0));
+                    if u.reasoning.is_some_and(|n| n > 0)
+                        || n("/usageMetadata/toolUsePromptTokenCount")?.is_some_and(|n| n > 0)
+                    {
+                        u.unknown_reason = Some("MANAGED_ROUTE_MISMATCH".into());
+                    }
+                }
                 let candidates = n("/usageMetadata/candidatesTokenCount")?;
                 u.output = match (candidates, u.reasoning) {
                     (Some(c), Some(r)) => Some(c.checked_add(r).ok_or_else(invalid)?),
@@ -877,7 +1276,49 @@ impl Adapter {
         if let (Some(i), Some(o)) = (u.input, u.output) {
             u.validate_subsets(i, o)?;
         }
-        if let Some(price) = &self.config.capabilities.limits.price
+        if self.managed.is_some() {
+            let total_path = match self.wire {
+                Wire::Responses | Wire::Chat => "/usage/total_tokens",
+                Wire::GenerateContent => "/usageMetadata/totalTokenCount",
+            };
+            if let (Some(total), Some(input), Some(output)) = (n(total_path)?, u.input, u.output)
+                && input.checked_add(output) != Some(total)
+            {
+                return Err(invalid());
+            }
+        }
+        if let Some(managed) = &self.managed {
+            let route_mismatch = match self.wire {
+                Wire::Responses => {
+                    v["service_tier"] != "default"
+                        || (self.needs_input_count()
+                            && u.input
+                                .is_some_and(|n| n > self.config.input_token_upper_bound))
+                }
+                Wire::GenerateContent => {
+                    v["usageMetadata"]["serviceTier"]
+                        .as_str()
+                        .is_some_and(|tier| !matches!(tier, "standard" | "unspecified"))
+                        || v["candidates"].as_array().is_some_and(|c| c.len() > 1)
+                }
+                Wire::Chat => {
+                    v["service_tier"]
+                        .as_str()
+                        .is_some_and(|tier| tier != "default")
+                        || v["provider"].as_str().is_none_or(|provider| {
+                            managed
+                                .pricing
+                                .record_openrouter_charge(&mut u, provider, &v["usage"])
+                                .is_err()
+                        })
+                }
+            };
+            if reported_model.is_none() || route_mismatch || u.unknown_reason.is_some() {
+                u.unknown_reason = Some("MANAGED_ROUTE_MISMATCH".into());
+            } else {
+                managed.pricing.record_cost(&mut u);
+            }
+        } else if let Some(price) = &self.config.capabilities.limits.price
             && price.model == u.model
         {
             u.micro_usd = match price.cost(&u) {
@@ -993,21 +1434,17 @@ fn classify(status: u16, value: &Value) -> ErrorClass {
         _ => ErrorClass::Unclassified,
     }
 }
+#[derive(Debug)]
+pub struct ManagedModel(pub(crate) Adapter);
+
+impl ManagedModel {
+    pub fn model(&self) -> &models::ResolvedModel {
+        &self.0.managed.as_ref().expect("catalog connection").model
+    }
+}
+
 macro_rules! adapter {
-    ($name:ident, $feature:literal, $wire:ident) => {
-        #[cfg(feature = $feature)]
-        #[derive(Debug)]
-        pub struct $name(Adapter);
-        #[cfg(feature = $feature)]
-        impl $name {
-            pub fn new(config: Config) -> Result<Self> {
-                Adapter::new(config, Wire::$wire).map(Self)
-            }
-            pub fn capabilities(&self) -> &Capabilities {
-                &self.0.config.capabilities
-            }
-        }
-        #[cfg(feature = $feature)]
+    ($name:ident) => {
         impl ModelPort for $name {
             fn check_input_attachments(
                 &self,
@@ -1019,16 +1456,27 @@ macro_rules! adapter {
             fn limits(&self) -> ModelLimits {
                 self.0.config.capabilities.limits.clone()
             }
+            fn pricing_snapshot(&self, model: &str) -> Option<models::PricingSnapshot> {
+                self.0
+                    .managed
+                    .as_ref()
+                    .filter(|connection| connection.model.wire_model() == model)
+                    .map(|connection| connection.pricing.clone())
+            }
             fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
                 request.validate_for_send()?;
                 // Size the largest feasible cap too: its decimal wire encoding
                 // must fit before reservation, even when the prototype cap is 0.
                 let limits = self.limits();
-                let ceiling = limits.max_output.min(
-                    limits
-                        .context
-                        .saturating_sub(self.0.config.input_token_upper_bound),
-                );
+                let ceiling = if self.0.managed.is_some() {
+                    limits.max_output
+                } else {
+                    limits.max_output.min(
+                        limits
+                            .context
+                            .saturating_sub(self.0.config.input_token_upper_bound),
+                    )
+                };
                 let body = self.0.body(
                     &self.0.config.run,
                     &request
@@ -1053,17 +1501,36 @@ macro_rules! adapter {
                 context: &ToolContext,
                 request: PreparedModelRequest,
             ) -> Result<Lookup> {
-                let body = self.0.body(&context.claim.run, &request)?;
-                self.0.check_document_wire_bound(&request, &body)?;
-                self.0.authorize_attachments(context, &request)?;
-                Ok(Lookup::Unknown)
+                self.0.lookup(context, request).await
             }
         }
     };
 }
-adapter!(OpenAi, "openai", Responses);
-adapter!(Gemini, "gemini", GenerateContent);
-adapter!(OpenRouter, "openrouter", Chat);
+
+adapter!(ManagedModel);
+
+#[cfg(test)]
+macro_rules! fixture_adapter {
+    ($name:ident, $feature:literal, $wire:ident) => {
+        #[cfg(feature = $feature)]
+        #[derive(Debug)]
+        pub(crate) struct $name(Adapter);
+        #[cfg(feature = $feature)]
+        impl $name {
+            pub(crate) fn new(config: Config) -> Result<Self> {
+                Adapter::new(config, Wire::$wire).map(Self)
+            }
+        }
+        #[cfg(feature = $feature)]
+        adapter!($name);
+    };
+}
+#[cfg(test)]
+fixture_adapter!(OpenAi, "openai", Responses);
+#[cfg(test)]
+fixture_adapter!(Gemini, "gemini", GenerateContent);
+#[cfg(test)]
+fixture_adapter!(OpenRouter, "openrouter", Chat);
 
 #[cfg(test)]
 mod tool_name_tests;

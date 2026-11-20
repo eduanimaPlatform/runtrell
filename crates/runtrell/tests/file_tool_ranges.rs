@@ -259,6 +259,7 @@ async fn invoke(tool: &FileTool, mut input: Value) -> ExternalResult {
     }
     let d = tool.descriptor();
     let context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim,
         principal: control.get(&run).await.unwrap().spec.principal,

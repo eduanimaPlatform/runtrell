@@ -167,7 +167,7 @@ fn settle(
         a.reserved = a.reserved.subtract(old.request.reserve);
         a.used = a.used.checked_add(record.amount)?;
         a.settle_quantities(&old.request, &record.settled)?;
-        if a.reached() {
+        if a.reached() || old.request.managed_overrun(record.amount) {
             a.exhausted = true;
         }
     }

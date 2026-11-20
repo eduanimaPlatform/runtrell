@@ -603,18 +603,16 @@ async fn pg_page_window(continuation: bool) {
         .as_millis() as u64;
     let spawn = |endpoint: String, phase: &str, time: u64| {
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-        cmd.args([
-            "--exact",
-            "attachment_window::process_worker",
-            "--nocapture",
-        ])
-        .env("RT_WINDOW_SCHEMA", &schema)
-        .env("RT_WINDOW_ROOT", &root)
-        .env("RT_WINDOW_HANDLE", serde_json::to_string(&handle).unwrap())
-        .env("RT_WINDOW_ENDPOINT", endpoint)
-        .env("RT_WINDOW_PHASE", phase)
-        .env("RT_WINDOW_CONTINUATION", continuation.to_string())
-        .env("RT_WINDOW_NOW", time.to_string());
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let worker = format!("{module}::process_worker");
+        cmd.args(["--exact", &worker, "--nocapture"])
+            .env("RT_WINDOW_SCHEMA", &schema)
+            .env("RT_WINDOW_ROOT", &root)
+            .env("RT_WINDOW_HANDLE", serde_json::to_string(&handle).unwrap())
+            .env("RT_WINDOW_ENDPOINT", endpoint)
+            .env("RT_WINDOW_PHASE", phase)
+            .env("RT_WINDOW_CONTINUATION", continuation.to_string())
+            .env("RT_WINDOW_NOW", time.to_string());
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
     };
     let first = spawn(endpoint.clone(), "stop", now).await.unwrap();

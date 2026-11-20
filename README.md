@@ -67,12 +67,10 @@ retryable failed model attempt can instead start a distinct bounded attempt if t
 continuation with unknown usage and budget remains. A later successful attempt can finalize the
 business result while the failed attempt's charge remains unknown. See the
 [provider retry contract](docs/design/providers.md#explicit-transient-http-failures).
-`OperationStore::settle_recovered` lets the owner settle the original operation exactly once from
-the stored usage plus a documented rule and a price basis, recording old usage, new usage and
-basis, with no provider call. Evidence the rule cannot settle stays for the operator. The OpenAI
-Images adapter normalizes its own `usage` object, with cached counters 0 only where the vendor
-documents it; see [docs/design/providers.md](docs/design/providers.md#openai-images-usage) and
-[docs/design/budget.md](docs/design/budget.md#price-lines-and-owner-settlement-recovery).
+`OperationStore::settle_recovered` settles the original attempt exactly once.
+For bundled adapters it uses the attempt's saved catalog snapshot. The owner
+provides the refined counters and evidence basis. See the
+[owner settlement contract](docs/design/budget.md#price-lines-and-owner-settlement-recovery).
 
 ## PostgreSQL initialization and least-privilege connect
 
@@ -119,48 +117,18 @@ durable. A failed call rolls back its savepoint. See [transaction scope](docs/de
 
 ## Optional provider adapters
 
-`runtrell-providers` implements `ModelPort` with opt-in `openai` (Responses),
-`gemini` (Developer API generateContent), and `openrouter` (chat completions)
-features. The crate has no default features. Hosts supply endpoint, credentials,
-model limits/capabilities, prices and Run/session binding; adapters perform one
-bounded HTTP send without automatic retry or redirect. Usage preserves missing
-counters and subset relationships. Saved continuation state is checked against
-the owning Run/session before sending. Public OSS image adapters `OpenAiImages`
-(`openai`) and `GeminiImages` (`gemini`) supply optional generation and reference
-editing through the same standard image tools. Models are host supplied.
-Remote lookup/idempotency are not claimed.
-OpenAI Responses and chat completions (including OpenRouter) translate tool names
-to deterministic wire names matching `[a-zA-Z0-9_-]{1,64}` and restore logical
-names in returned calls. Definitions and function-call history use the same table;
-collisions fail before sending. Gemini names are unchanged. See the
-[tool-name contract](docs/design/providers.md#contract) for mapping and replay details.
-Optional [attachments](docs/design/attachments.md) support fixed external
-URL/bytes and authorized Workspace/Artifact versions. `DocumentView` inspects PDF
-page count and attaches selected pages; PNG/JPEG/WebP use ordinary image input
-(host MIME allowlist applies). PDF visible annotations and form appearances stay
-visible while active actions are removed. Tool references remain in history,
-but only the latest tool exchange contributes binary attachments to each request.
-Reopen fixed saved references when needed; compaction retains older references
-as text. Oversized tool attachments return feedback asking for a narrower view.
-Lookup does not fetch originals or issue URLs. See [provider contracts](docs/design/providers.md)
-and [images](docs/design/images.md).
+`runtrell-providers` has opt-in features for OpenAI Responses, Gemini
+GenerateContent and OpenRouter Chat. Connect with `connect_model` and a
+`provider/model-name` from the [bundled catalog](catalog/README.md).
+The `Connection` value supplies credentials, Run/session, timeout and lower
+limits. The catalog pins wire requests, capabilities and pricing. Verified
+bindings may reserve and send through the driver. Documented bindings are
+listed for inspection.
 
-| Adapter | Image input | Generation | Reference editing | Mask editing |
-|---|---|---|---|---|
-| OpenAI / Gemini / OpenRouter ModelPort | Host-declared, authorized references (PNG default) | — | — | — |
-| OpenAiImages (`openai`) | Authorized references | Host-declared | Host-declared | Unsupported |
-| GeminiImages | Reference images | Host-declared | Host-declared | Unsupported |
+The runtime supports bounded image references and document attachments. See
+[provider contracts](docs/design/providers.md), [attachments](docs/design/attachments.md)
+and [image contracts](docs/design/images.md).
 
-The default image MIME is PNG. Hosts can opt into inspected still JPEG/WebP in
-`ImageLimits.allowed_mime`. OpenAI forwards `size` when requested and
-`output_format` (`png` by default, also `jpeg`/`webp` when enabled), always `n=1`,
-without quality. GeminiImages supports PNG output and rejects size/other format
-options. Image limits and authorization also apply to saved-result retrieval.
-
-```sh
-RUNTRELL_TEST_DATABASE_URL=postgres://postgres:runtrell@127.0.0.1:55433/postgres \
-  cargo test -p runtrell-providers --locked --features openai,gemini,openrouter
-```
 
 ## Standard tools chosen by the host
 
@@ -234,8 +202,7 @@ cargo build -p runtrell-postgres --locked --example test_db_runner
 cargo test -p runtrell-postgres --locked --example test_db_runner
 # Point RIG_SNAPSHOT at a checkout of the pinned Rig commit listed below.
 export RIG_SNAPSHOT=/path/to/rig-snapshot
-# Formal local validation: 18 commands. Run the two test commands twice in a row
-# when checking resource stability (20 executions, not 20 distinct commands).
+# Run the two test commands twice when checking resource stability.
 cargo fmt --check
 cargo clippy --workspace --locked --all-targets -- -D warnings
 cargo clippy --workspace --locked --all-targets --features runtrell/python,runtrell-testkit/python,runtrell-providers/openai,runtrell-providers/gemini,runtrell-providers/openrouter -- -D warnings
@@ -251,11 +218,12 @@ cargo check -p runtrell-providers --locked --no-default-features --features open
 cargo check -p runtrell-providers --locked --no-default-features --features gemini
 cargo check -p runtrell-providers --locked --no-default-features --features openrouter
 cargo run -p xtask --locked -- api-doc
+cargo run -p xtask --locked -- models check
 cargo run -p xtask --locked -- trace
 cargo run -p xtask --locked -- hashes
 git diff --check
 # Optional package inventory:
-cargo package --workspace --list --allow-dirty
+cargo package --workspace --list --locked --allow-dirty
 ```
 
 PostgreSQL tests require `RUNTRELL_TEST_DATABASE_URL`; they fail rather than skip

@@ -86,6 +86,7 @@ async fn jpeg_webp_document_views_reach_each_image_adapter_and_invalid_bytes_are
                 limits: DocumentViewLimits::default(),
             };
             let ctx = ToolContext {
+                managed_send: None,
                 claim,
                 principal: "worker".into(),
                 operation: "view".into(),

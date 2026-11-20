@@ -89,12 +89,24 @@ impl<
     }
     async fn model_budget(&self, c: &Claim, input: u64) -> Result<(u64, Amount)> {
         let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
-        self.model.limits().cap_for_policy(
-            input,
-            bx(|| self.store.remaining(c, self.clock.now())).await?,
-            &r.spec.budget,
-        )
+        self.model_cap(c, input, &self.model.limits(), &r.spec.budget)
+            .await
     }
+    async fn model_cap(
+        &self,
+        claim: &Claim,
+        input: u64,
+        limits: &ModelLimits,
+        policy: &ReservationPolicy,
+    ) -> Result<(u64, Amount)> {
+        let remaining = bx(|| self.store.remaining(claim, self.clock.now())).await?;
+        if let Some(pricing) = self.model.pricing_snapshot(&limits.model) {
+            pricing.cap(limits, input, remaining, policy)
+        } else {
+            limits.cap_for_policy(input, remaining, policy)
+        }
+    }
+
     /// Cancellation, external stop and resource reclamation have separate receipts.
     pub async fn cancel(&self, c: &Claim, reason: &str) -> Result<RunRecord> {
         bx(|| self.store.check(c, self.clock.now(), false)).await?;
@@ -290,6 +302,7 @@ impl<
     }
     fn context(&self, c: &Claim, r: &RunRecord, op: &Operation, permission: &str) -> ToolContext {
         ToolContext {
+            managed_send: ManagedSend::for_lookup(c, op),
             recovery_proof: op.request.recovery_proof.clone(),
             claim: c.clone(),
             principal: r.spec.principal.clone(),
@@ -537,6 +550,7 @@ impl<
         bx(|| self.store.mark_sent(c, &op.id, self.clock.now())).await?;
         let mut ctx = ctx;
         ctx.deadline = deadline;
+        ctx.managed_send = ManagedSend::new(c, &op);
         let result = Box::pin(self.bounded(invoke(ctx), deadline))
             .await
             .unwrap_or(Ok(ExternalResult::Unknown))
@@ -1164,6 +1178,7 @@ impl<
                 serde_json::to_value(&request).unwrap(),
                 reserve,
             );
+            d.pricing = self.model.pricing_snapshot(&d.target).map(Box::new);
             d.price = self.model.limits().price;
             let repair_policy = self.checked_repair_policy(&current)?;
             let repair_remaining = repair_started(&current).and_then(|started| {
@@ -1539,6 +1554,7 @@ impl<
                     descriptor.reserve
                 },
             );
+            d.pricing = tool.pricing_snapshot().map(Box::new);
             d.quantities = descriptor.quantities.clone();
             d.version = descriptor.version.clone();
             d.scope = Some(file_tools::catalog_digest(&descriptor));
@@ -1854,11 +1870,9 @@ impl<
             if dispatch.attempt != op.request.attempt {
                 let prepared = bx(|| self.model.prepare_request(&current, request.clone())).await?;
                 let input = self.model.input_upper_bound(&prepared)?;
-                let (cap, reserve) = limits.cap_for_policy(
-                    input,
-                    bx(|| self.store.remaining(c, self.clock.now())).await?,
-                    &current.spec.budget,
-                )?;
+                let (cap, reserve) = self
+                    .model_cap(c, input, &limits, &current.spec.budget)
+                    .await?;
                 let next = prepared.with_max_output(cap);
                 dispatch.reserve = reserve;
                 dispatch.input =
@@ -1868,11 +1882,9 @@ impl<
         } else {
             let prepared = bx(|| self.model.prepare_request(&current, request)).await?;
             let input = self.model.input_upper_bound(&prepared)?;
-            let (cap, reserve) = limits.cap_for_policy(
-                input,
-                bx(|| self.store.remaining(c, self.clock.now())).await?,
-                &current.spec.budget,
-            )?;
+            let (cap, reserve) = self
+                .model_cap(c, input, &limits, &current.spec.budget)
+                .await?;
             let request = prepared.with_max_output(cap);
             let mut d = DispatchRequest::new(
                 key,
@@ -1882,6 +1894,7 @@ impl<
                 reserve,
             );
             d.version = "context-summary-1".into();
+            d.pricing = self.model.pricing_snapshot(&limits.model).map(Box::new);
             d.price = limits.price;
             d.timeout = Some(limits.timeout);
             d

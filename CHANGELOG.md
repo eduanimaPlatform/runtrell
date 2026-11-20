@@ -1,16 +1,27 @@
 # Changelog
 
-## Unreleased — explicit transient model retries (breaking)
+## Unreleased — bundled model catalog (breaking)
 
-- Provider `Config` now requires a `retry_policy`; the default permits three total attempts,
-  1,000 ms initial backoff, and 60,000 ms total elapsed time. The policy is pinned in Run
-  checkpoints.
-- Only documented OpenAI Responses 429 `slow_down` and 503 `server_is_overloaded` failures
-  enable automatic retry. Each retry has its own reservation and attempt; unknown usage keeps
-  its reservation and slot until owner settlement, even if a later attempt succeeds.
-- A retry that expires after admission but before any send retains a settled no-send failure
-  record and releases only its own reservation and slot. An oversized `Retry-After` cannot
-  shorten the server delay.
+- Select providers with `connect_model`, a catalog ID and `Connection`.
+  The bundled catalog supplies the endpoint, capabilities, limits and pricing.
+- Managed sends require an outstanding reservation and use the original
+  attempt's price snapshot for settlement. Use `SettlementRecovery.price: None`
+  for bundled attempts.
+- The connection settings include the retry policy. Documented transient
+  Responses errors can create separately reserved attempts.
+- OpenAI Responses connections can enforce a lower prompt or context ceiling
+  with the provider's free input count before inference.
+- Bundled Sunburst and Flare bindings support one bounded PNG generation or edit
+  per attempt. Direct GPT-Image-2.6 uses the catalog's inherited Images 2/2.5
+  policy to settle fully unreported cache counters as zero.
+- GPT-6.1 Terra offers an opt-in Standard background Responses binding.
+  The runtime persists its response ID and polls it against the original reservation.
+- The Memory and PostgreSQL allowance ledgers support atomic, receipt-idempotent
+  consumption of a certified shared provider allowance.
+- OpenRouter credits and BYOK bindings require a payer-specific credential and
+  match billed costs to the selected route. BYOK pins the separate upstream and
+  credit charges. The FP8 credits binding prices both eligible routes before send.
+
 
 ## Unreleased — text-only model file reads (breaking)
 

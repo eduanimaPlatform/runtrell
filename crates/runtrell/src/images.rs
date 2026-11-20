@@ -637,6 +637,9 @@ pub struct ImageModel<M, S, P, R> {
 impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
     for ImageModel<M, S, P, R>
 {
+    fn pricing_snapshot(&self, model: &str) -> Option<crate::models::PricingSnapshot> {
+        self.inner.pricing_snapshot(model)
+    }
     fn compaction_limits(&self) -> ModelLimits {
         self.inner.compaction_limits()
     }
@@ -1032,6 +1035,10 @@ pub enum ImageResponse {
     UnknownDiagnostic(ProviderDiagnostic),
 }
 pub trait ImagePort: Send + Sync {
+    fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
+        None
+    }
+
     /// Model/endpoint/limits identity; credentials must never be included.
     fn identity(&self) -> String;
     fn size_policy(&self, _action: ImageAction) -> Option<ImageSizePolicy> {
@@ -1266,6 +1273,9 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 max_elapsed: self.config.timeout,
             },
         }
+    }
+    fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
+        self.provider.pricing_snapshot()
     }
     async fn quote(&self, run: &RunRecord, input: &Value) -> Result<Amount> {
         let request = self.prepare(run, input).await?;

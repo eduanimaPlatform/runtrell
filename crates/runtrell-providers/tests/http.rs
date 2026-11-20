@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
+use crate::*;
 use runtrell::*;
-use runtrell_providers::*;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::{
@@ -61,6 +61,22 @@ async fn raw_server_at_least(
     response: String,
     minimum: usize,
 ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    raw_server_replies(vec![response], minimum).await
+}
+#[cfg(feature = "openai")]
+async fn raw_server_with_replies(
+    replies: Vec<Value>,
+    minimum: usize,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    raw_server_replies(replies.into_iter().map(|body| {
+        let body = body.to_string();
+        format!("HTTP/1.1 200 Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }).collect(), minimum).await
+}
+async fn raw_server_replies(
+    responses: Vec<String>,
+    minimum: usize,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/test", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -88,15 +104,14 @@ async fn raw_server_at_least(
                     let len: usize = head
                         .lines()
                         .find_map(|line| line.strip_prefix("content-length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
+                        .map_or(0, |value| value.parse().unwrap());
                     if bytes.len() >= end + 4 + len {
                         break;
                     }
                 }
             }
             requests.push(String::from_utf8(bytes).unwrap());
+            let response = &responses[(requests.len() - 1).min(responses.len() - 1)];
             let _ = stream.write_all(response.as_bytes()).await;
         }
         requests
@@ -198,6 +213,7 @@ fn config(endpoint: String) -> Config {
 }
 fn context() -> ToolContext {
     ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: Claim {
             run: config(String::new()).run,
@@ -1684,4 +1700,739 @@ async fn chat_tool_names() {
 #[tokio::test]
 async fn gemini_tool_names() {
     tool_name_contract(Gemini::new, "gemini").await;
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn bundled_model_requires_reservation_and_settles_once() {
+    use runtrell::memory::MemoryStore;
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A temporary catalog build can exercise this same caller with a synthetic model.
+    let id = std::env::var("RUNTRELL_CATALOG_DEMO_MODEL")
+        .unwrap_or_else(|_| "openai/gpt-6.2-sol".into());
+    let expect_unknown = std::env::var_os("RUNTRELL_CATALOG_DEMO_UNKNOWN").is_some();
+    let wire_id = id.split_once('/').unwrap().1;
+    let (url, server) = server(200, "", json!({
+        "id": "resp-local",
+        "model": wire_id,
+        "status": "completed",
+        "service_tier": "default",
+        "output": [{"type": "message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"decision\":\"answered\"}"}]}],
+        "usage": {"input_tokens":100,"input_tokens_details":
+            {"cached_tokens":20,"cache_write_tokens":0,"cache_write_tokens_details":
+             {"ttl_30m_tokens":0,"ttl_12h_tokens":0}},
+            "output_tokens":50,"output_tokens_details":{"reasoning_tokens":10},
+            "total_tokens":150}
+    })).await;
+    let store = Arc::new(MemoryStore::default());
+    let account = store
+        .create_account("tenant", Amount::new(2_000_000, 10_000_000), None)
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new(
+            "tenant",
+            "catalog-http",
+            account.clone(),
+            "answer",
+        ))
+        .await
+        .unwrap();
+    let base = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claim = store.claim(&run, "worker", base, 100_000).await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let connection = Connection {
+        run: run.clone(),
+        session: None,
+        timeout_ms: 10_000,
+        retry_policy: RetryPolicy::default(),
+        attachment_resolver: None,
+        credentials: Arc::new({
+            let calls = calls.clone();
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ApiKey::new("FIXTURE-KEY"))
+            }
+        }),
+        context_cap: None,
+        input_token_cap: None,
+        max_output_tokens: Some(64),
+        reasoning: Some("low".into()),
+    };
+    let configured = connect_model(&id, None, connection.clone());
+    if expect_unknown {
+        assert!(matches!(
+            configured,
+            Err(ConnectError::Resolve(models::ResolveError::UnknownModel))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!server.is_finished());
+        server.abort();
+        return;
+    }
+    let mut raised = connection.clone();
+    raised.max_output_tokens = Some(u64::MAX);
+    assert!(matches!(
+        connect_model(&id, None, raised),
+        Err(ConnectError::Configuration(_))
+    ));
+    let mut invalid_reasoning = connection;
+    invalid_reasoning.reasoning = Some("none".into());
+    assert!(matches!(
+        connect_model(&id, None, invalid_reasoning),
+        Err(ConnectError::Configuration(_))
+    ));
+
+    let mut model = configured.unwrap();
+    // The endpoint is writable by wire fixtures only. The catalog snapshot and
+    // ModelPort accounting path are unchanged.
+    model.0.config.endpoint = url;
+    assert_eq!(model.limits().max_output, 64);
+    let mut request = request();
+    request.model = wire_id.into();
+    request.max_output = 64;
+    let mut unreserved = context();
+    unreserved.claim = claim.clone();
+    assert!(matches!(
+        model.invoke(&unreserved, text(request)).await,
+        Err(Error::ReservationDenied)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let clock = TestClock::default();
+    clock.set(base);
+    let runtime = Runtime {
+        store: store.clone(),
+        model,
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock,
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    assert_eq!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Terminal(Terminal::Succeeded)
+    );
+    let op = store.operations(&run).await.unwrap().remove(0);
+    assert!(op.settled);
+    assert!(op.request.pricing.is_some());
+    assert_eq!(op.send_count, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.account(&account).await.unwrap().used,
+        Amount::new(150, 662)
+    );
+    store
+        .record(&claim, &op.id, op.result.unwrap(), base)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.account(&account).await.unwrap().used,
+        Amount::new(150, 662)
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let payload: Value =
+        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(payload["max_output_tokens"], 64);
+    assert_eq!(payload["service_tier"], "default");
+    assert_eq!(payload["prompt_cache_options"]["ttl"], "30m");
+    println!("catalog digest {}", runtime.model.model().catalog_digest());
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn managed_context_cap_counts_final_input_and_blocks_long_context() {
+    use runtrell::memory::MemoryStore;
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+
+    for (count, input_only, allowed) in [
+        (271_936, false, true),
+        (271_937, false, false),
+        (272_000, true, true),
+        (272_001, true, false),
+    ] {
+        let (url, server) = raw_server_with_replies(vec![
+            json!({"object":"response.input_tokens","input_tokens":count}),
+            json!({"id":"resp-cap","model":"gpt-6.2-sol","status":"completed","service_tier":"default",
+                "output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"decision\":\"answered\"}"}]}],
+                "usage":{"input_tokens":count,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},
+                         "output_tokens":32,"total_tokens":count + 32}}),
+        ], 1).await;
+        let store = Arc::new(MemoryStore::default());
+        let account = store
+            .create_account("tenant", Amount::new(272_064, 700_000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new(
+                "tenant",
+                "bounded-context",
+                account.clone(),
+                "answer",
+            ))
+            .await
+            .unwrap();
+        let base = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let claim = store.claim(&run, "worker", base, 100_000).await.unwrap();
+        let clock = TestClock::default();
+        clock.set(base);
+        let mut model = connect_model(
+            "openai/gpt-6.2-sol",
+            None,
+            Connection {
+                run,
+                session: None,
+                credentials: Arc::new(|_| Ok(ApiKey::new("FIXTURE-KEY"))),
+                attachment_resolver: None,
+                retry_policy: RetryPolicy::default(),
+                timeout_ms: 10_000,
+                context_cap: (!input_only).then_some(272_000),
+                input_token_cap: input_only.then_some(272_000),
+                max_output_tokens: Some(64),
+                reasoning: Some("low".into()),
+            },
+        )
+        .unwrap();
+        model.0.config.endpoint = url;
+        let runtime = Runtime {
+            store: store.clone(),
+            model,
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock,
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let result = runtime.drive(&claim).await;
+        let calls = server.await.unwrap();
+        assert!(calls[0].starts_with("POST /test/input_tokens "));
+        assert_eq!(calls.len(), if allowed { 2 } else { 1 });
+        let usage = store.account(&account).await.unwrap().used;
+        if allowed {
+            assert_eq!(
+                result.unwrap().state,
+                RunState::Terminal(Terminal::Succeeded)
+            );
+            let counted: Value =
+                serde_json::from_str(calls[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+            let sent: Value =
+                serde_json::from_str(calls[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(counted["input"], sent["input"]);
+            assert_eq!(sent["max_output_tokens"], 64);
+            assert_eq!(usage, Amount::new(count + 32, count * 2 + 32 * 10));
+        } else {
+            assert_eq!(usage, Amount::new(0, 0));
+            let op = store.operations(&claim.run).await.unwrap().remove(0);
+            assert!(op.settled);
+            assert!(
+                matches!(op.result, Some(ExternalResult::Failed { code, .. }) if code == "CONTEXT_CAP_EXCEEDED")
+            );
+        }
+    }
+}
+
+#[cfg(feature = "openrouter")]
+#[tokio::test]
+async fn managed_openrouter_requires_the_bound_payer_and_checks_the_charge() {
+    use runtrell::memory::MemoryStore;
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+    let id = "openrouter/meta-llama/llama-3.1-8b-instruct";
+    for (binding, payer, is_byok, cost, upstream, expected) in [
+        (
+            "fp8-standard",
+            OpenRouterPayer::Credits,
+            false,
+            0.0001807,
+            None,
+            Some(181),
+        ),
+        (
+            "deepinfra-standard",
+            OpenRouterPayer::Credits,
+            false,
+            0.000024,
+            None,
+            Some(24),
+        ),
+        (
+            "deepinfra-standard",
+            OpenRouterPayer::Credits,
+            false,
+            0.000056,
+            None,
+            None,
+        ),
+        (
+            "deepinfra-standard",
+            OpenRouterPayer::Credits,
+            true,
+            0.000024,
+            None,
+            None,
+        ),
+        (
+            "deepinfra-standard",
+            OpenRouterPayer::Byok,
+            false,
+            0.000024,
+            None,
+            None,
+        ),
+        (
+            "deepinfra-byok",
+            OpenRouterPayer::Byok,
+            true,
+            0.0,
+            Some(0.000024),
+            Some(24),
+        ),
+        (
+            "deepinfra-byok",
+            OpenRouterPayer::Byok,
+            true,
+            0.0000012,
+            Some(0.000024),
+            Some(26),
+        ),
+        (
+            "deepinfra-byok",
+            OpenRouterPayer::Byok,
+            true,
+            0.0000200,
+            Some(0.000024),
+            None,
+        ),
+        (
+            "deepinfra-byok",
+            OpenRouterPayer::Byok,
+            true,
+            0.0,
+            None,
+            None,
+        ),
+    ] {
+        let multi_route = binding == "fp8-standard";
+        let provider = if multi_route {
+            "Cloudflare"
+        } else {
+            "DeepInfra"
+        };
+        let (url, http) = server(200, "", json!({
+            "id":"gen-fixture", "model":"meta-llama/llama-3.1-8b-instruct", "provider":provider, "service_tier":"default",
+            "choices":[{"message":{"role":"assistant","content":"{\"decision\":\"answered\"}"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":1000,"completion_tokens":100,"total_tokens":1100,"is_byok":is_byok,"cost":cost,
+                "cost_details":{"upstream_inference_cost":upstream}}
+        })).await;
+        let store = Arc::new(MemoryStore::default());
+        let account = store
+            .create_account("tenant", Amount::new(200_000, 100_000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new("tenant", "router", account.clone(), "answer"))
+            .await
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let claim = store.claim(&run, "worker", now, 100_000).await.unwrap();
+        let clock = TestClock::default();
+        clock.set(now);
+        let mut model = connect_model(
+            id,
+            Some(binding),
+            Connection {
+                run: run.clone(),
+                session: None,
+                credentials: Arc::new(move |_| Ok(ApiKey::openrouter("FIXTURE-KEY", payer))),
+                attachment_resolver: None,
+                retry_policy: RetryPolicy::default(),
+                timeout_ms: 10_000,
+                context_cap: None,
+                input_token_cap: None,
+                max_output_tokens: Some(128),
+                reasoning: None,
+            },
+        )
+        .unwrap();
+        model.0.config.endpoint = url;
+        let runtime = Runtime {
+            store: store.clone(),
+            model,
+            tools: Vec::<BusinessTool>::new(),
+            policy: FakePolicy::default(),
+            clock,
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let _ = runtime.drive(&claim).await;
+        let op = store.operations(&run).await.unwrap().remove(0);
+        let account = store.account(&account).await.unwrap();
+        if payer == OpenRouterPayer::Byok && binding == "deepinfra-standard" {
+            assert!(
+                matches!(op.result, Some(ExternalResult::Failed { code, .. }) if code == "OPENROUTER_CREDENTIAL_PAYER_MISMATCH")
+            );
+            assert_eq!(account.reserved, Amount::default());
+            http.abort();
+        } else {
+            let requests = http.await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body: Value =
+                serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+            let tags = if multi_route {
+                vec!["cloudflare/fp8", "deepinfra/fp8"]
+            } else {
+                vec!["deepinfra/fp8"]
+            };
+            assert_eq!(
+                body["provider"],
+                json!({"only":tags,"allow_fallbacks":false,"require_parameters":true})
+            );
+            if multi_route {
+                assert_eq!(op.request.reserve, Amount::new(32_128, 4_901));
+            }
+            assert_eq!(op.settled, expected.is_some());
+            assert_eq!(
+                account.used,
+                expected.map_or(Amount::default(), |cost| Amount::new(1100, cost))
+            );
+        }
+    }
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn managed_background_reserves_before_submit_and_settles_only_once() {
+    let store = Arc::new(runtrell::memory::MemoryStore::default());
+    managed_background_contract(store.clone(), std::future::ready(store)).await;
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn managed_background_resumes_on_an_independent_postgres_pool() {
+    use runtrell_postgres::PgStore;
+    use sqlx::postgres::PgPoolOptions;
+    let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated test DB");
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let schema = format!("background_{}", tick.as_nanos());
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    let first = Arc::new(
+        PgStore::initialize(pool, &schema, Capacity::default())
+            .await
+            .unwrap(),
+    );
+    managed_background_contract(first, async {
+        let other_pool = PgPoolOptions::new().connect(&url).await.unwrap();
+        Arc::new(
+            PgStore::connect(other_pool, &schema, Capacity::default())
+                .await
+                .unwrap(),
+        )
+    })
+    .await;
+}
+
+#[cfg(feature = "openai")]
+async fn managed_background_contract<S: ControlStore>(
+    store: Arc<S>,
+    reopen: impl std::future::Future<Output = Arc<S>>,
+) {
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+
+    let pending = |status| {
+        json!({"id":"resp_fixture","object":"response","background":true,
+        "model":"gpt-6.1-terra","status":status,"service_tier":"default"})
+    };
+    let mut terminal = pending("completed");
+    terminal["output"] = json!([{"type":"message","role":"assistant","status":"completed",
+        "content":[{"type":"output_text","text":"{\"decision\":\"answered\"}"}]}]);
+    terminal["usage"] = json!({"input_tokens":100,"input_tokens_details":{"cached_tokens":0,
+        "cache_write_tokens":0},"output_tokens":32,"total_tokens":132});
+    let (url, http) = raw_server_with_replies(
+        vec![
+            pending("queued"),
+            pending("in_progress"),
+            pending("in_progress"),
+            terminal,
+        ],
+        4,
+    )
+    .await;
+
+    let account = store
+        .create_account("tenant", Amount::new(10_000_000, 100_000_000), None)
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new(
+            "tenant",
+            "background",
+            account.clone(),
+            "answer",
+        ))
+        .await
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claim = store.claim(&run, "worker", now, 100_000).await.unwrap();
+    let clock = TestClock::default();
+    clock.set(now);
+    let mut model = connect_model(
+        "openai/gpt-6.1-terra",
+        Some("standard-background"),
+        Connection {
+            run: run.clone(),
+            session: None,
+            credentials: Arc::new(|_| Ok(ApiKey::new("FIXTURE-KEY"))),
+            attachment_resolver: None,
+            retry_policy: RetryPolicy::default(),
+            timeout_ms: 10_000,
+            context_cap: None,
+            input_token_cap: None,
+            max_output_tokens: Some(64),
+            reasoning: None,
+        },
+    )
+    .unwrap();
+    model.0.config.endpoint = url;
+    let runtime = Runtime {
+        store: store.clone(),
+        model,
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock,
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    runtime.drive(&claim).await.unwrap();
+    let operation = store.list_operations(&run).await.unwrap().remove(0);
+    assert!(
+        matches!(operation.result, Some(ExternalResult::Accepted { ref external_id }) if external_id == "resp_fixture")
+    );
+    assert_eq!(
+        store.account(&account).await.unwrap().reserved,
+        operation.request.reserve
+    );
+    assert!(operation.request.reserve.tokens > 64);
+    assert_eq!(operation.send_count, 1);
+    let store = reopen.await;
+    let runtime = Runtime {
+        store: store.clone(),
+        ..runtime
+    };
+    for _ in 0..3 {
+        if runtime.drive(&claim).await.unwrap().state == RunState::Terminal(Terminal::Succeeded) {
+            break;
+        }
+    }
+    let operation = store.list_operations(&run).await.unwrap().remove(0);
+    assert!(operation.settled);
+    assert_eq!(operation.send_count, 1);
+    let receipt = operation.result.unwrap();
+    let ExternalResult::Applied { ref usage, .. } = receipt else {
+        panic!("terminal provider response")
+    };
+    let amount = usage.amount().unwrap();
+    assert!(amount.micro_usd > 0);
+    assert_eq!(amount.tokens, 132);
+    store
+        .record(&claim, &operation.id, receipt, now)
+        .await
+        .unwrap();
+    let totals = store.account(&account).await.unwrap();
+    assert_eq!(totals.used, amount);
+    assert_eq!(totals.reserved, Amount::default());
+
+    let requests = http.await.unwrap();
+    assert!((2..=4).contains(&requests.len()));
+    assert!(requests[0].starts_with("POST /test "));
+    let sent: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(sent["background"], true);
+    assert_eq!(sent["max_output_tokens"], 64);
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|req| req.starts_with("GET /test/resp_fixture "))
+    );
+}
+
+#[cfg(feature = "openai")]
+#[test]
+fn managed_responses_verifies_model_cache_ttl_and_price() {
+    let context = context();
+    for (name, cost_30m, cost_12h) in [
+        ("gpt-6.2-sol", 667, 692),
+        ("gpt-6.1-sol", 667, 692),
+        ("gpt-6.1-terra", 334, 346),
+        ("gpt-6-luna", 34, 35),
+    ] {
+        for (binding, ttl, expected) in [
+            ("standard", "30m", cost_30m),
+            ("standard-cache-12h", "12h", cost_12h),
+        ] {
+            let model = connect_model(
+                &format!("openai/{name}"),
+                Some(binding),
+                Connection {
+                    run: context.claim.run.clone(),
+                    session: None,
+                    credentials: Arc::new(|_| panic!("fixture resolved credential")),
+                    attachment_resolver: None,
+                    retry_policy: RetryPolicy::default(),
+                    timeout_ms: 10_000,
+                    context_cap: None,
+                    input_token_cap: None,
+                    max_output_tokens: Some(64),
+                    reasoning: None,
+                },
+            )
+            .unwrap();
+            let mut request = request();
+            request.model = name.into();
+            request.max_output = 64;
+            let body = model.0.body(&context.claim.run, &text(request)).unwrap();
+            assert_eq!(body["model"], name);
+            assert_eq!(body["max_output_tokens"], 64);
+            assert_eq!(body["prompt_cache_options"]["ttl"], ttl);
+            let mut receipt = json!({"model": name,"service_tier":"default","usage":{"input_tokens":100,
+                "input_tokens_details":{"cached_tokens":20,"cache_write_tokens":10},
+                "output_tokens":50,"total_tokens":150}});
+            assert_eq!(
+                model.0.usage(&receipt).unwrap().amount(),
+                Ok(Amount::new(150, expected))
+            );
+            receipt["usage"]["input_tokens_details"]["cache_write_tokens_details"]
+                [format!("ttl_{}_tokens", if ttl == "30m" { "12h" } else { "30m" })] = json!(10);
+            assert_eq!(
+                model.0.usage(&receipt).unwrap().amount(),
+                Err(Error::UsageUnknown)
+            );
+            receipt["usage"]["input_tokens_details"]["cache_write_tokens_details"] = Value::Null;
+            for sku in [Value::Null, json!("other-model")] {
+                receipt["model"] = sku;
+                assert_eq!(
+                    model.0.usage(&receipt).unwrap().amount(),
+                    Err(Error::UsageUnknown)
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "gemini")]
+#[tokio::test]
+async fn managed_gemini_wire_binds_the_thinking_budget_and_verifies_the_sku() {
+    use runtrell::memory::MemoryStore;
+    use runtrell_testkit::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
+    };
+
+    let wire_id = "gemini-2.5-flash-lite";
+    let receipt = json!({"modelVersion":wire_id,
+        "candidates":[{"content":{"role":"model","parts":[{"text":"{\"decision\":\"answered\"}"}]},"finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":20,
+            "candidatesTokenCount":30,"totalTokenCount":130}});
+    let (url, http) = server(200, "", receipt.clone()).await;
+    let store = Arc::new(MemoryStore::default());
+    let account = store
+        .create_account("tenant", Amount::new(2_000_000, 1_000_000), None)
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new("tenant", "gemini", account.clone(), "answer"))
+        .await
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claim = store.claim(&run, "worker", now, 100_000).await.unwrap();
+    let clock = TestClock::default();
+    clock.set(now);
+    let mut model = connect_model(
+        "gemini/gemini-2.5-flash-lite",
+        None,
+        Connection {
+            run: run.clone(),
+            session: None,
+            credentials: Arc::new(|_| Ok(ApiKey::new("FIXTURE-KEY"))),
+            attachment_resolver: None,
+            retry_policy: RetryPolicy::default(),
+            timeout_ms: 10_000,
+            context_cap: None,
+            input_token_cap: None,
+            max_output_tokens: Some(64),
+            reasoning: None,
+        },
+    )
+    .unwrap();
+    for (field, value) in [
+        ("/modelVersion", json!("different-sku")),
+        ("/modelVersion", Value::Null),
+    ] {
+        let mut invalid = receipt.clone();
+        *invalid.pointer_mut(field).unwrap() = value;
+        assert_eq!(
+            model.0.usage(&invalid).unwrap().amount(),
+            Err(Error::UsageUnknown)
+        );
+    }
+    let mut thinking = receipt;
+    thinking["usageMetadata"]["thoughtsTokenCount"] = json!(1);
+    thinking["usageMetadata"]["totalTokenCount"] = json!(131);
+    assert_eq!(
+        model.0.usage(&thinking).unwrap().amount(),
+        Err(Error::UsageUnknown)
+    );
+
+    model.0.config.endpoint = url;
+    let runtime = Runtime {
+        store: store.clone(),
+        model,
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock,
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    assert_eq!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Terminal(Terminal::Succeeded)
+    );
+    assert_eq!(
+        store.account(&account).await.unwrap().used,
+        Amount::new(130, 21)
+    );
+    let requests = http.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let sent: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(sent["generationConfig"]["maxOutputTokens"], 64);
+    assert_eq!(
+        sent["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        0
+    );
+    assert_eq!(sent["generationConfig"]["candidateCount"], 1);
 }

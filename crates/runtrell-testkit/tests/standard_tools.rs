@@ -361,6 +361,7 @@ fn cancellation_during_acquisition_never_starts_payload() {
                 let pending = l.pending().await.unwrap();
                 if let Some(row) = pending.first() {
                     let ctx = ToolContext {
+                        managed_send: None,
                         recovery_proof: None,
                         claim: c.clone(),
                         principal: "host".into(),
@@ -629,6 +630,7 @@ fn argument_policy_is_pinned_in_definition_and_enforced_per_call() {
                 .is_empty()
         );
         let ctx = ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: c,
             principal: "host".into(),

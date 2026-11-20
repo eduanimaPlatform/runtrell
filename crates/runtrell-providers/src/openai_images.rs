@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+#[cfg(test)]
+use crate::adapter::Wire;
 use crate::{
-    adapter::{Adapter, HttpResult, Wire},
+    adapter::{Adapter, HttpResult},
     *,
 };
 use runtrell::{images::*, *};
@@ -14,7 +16,8 @@ pub struct OpenAiImages {
     edits_endpoint: String,
 }
 impl OpenAiImages {
-    pub fn new(mut config: Config) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn new(mut config: Config) -> Result<Self> {
         if config.capabilities.images.mask_edit {
             return Err(Error::Unsupported("mask_edit".into()));
         }
@@ -37,6 +40,17 @@ impl OpenAiImages {
             adapter,
             edits_endpoint: edits.into(),
         })
+    }
+    pub(crate) fn from_catalog(adapter: Adapter) -> Self {
+        Self {
+            edits_endpoint: adapter.config.endpoint.clone(),
+            adapter,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_fixture_endpoint(&mut self, endpoint: String) {
+        self.edits_endpoint = endpoint.clone();
+        self.adapter.config.endpoint = endpoint;
     }
     pub fn capabilities(&self) -> &Capabilities {
         &self.adapter.config.capabilities
@@ -121,6 +135,12 @@ impl OpenAiImages {
             }
             body["images"] = json!(images);
         }
+        if self.adapter.managed.is_some() {
+            if request.quality().is_none() {
+                body["quality"] = json!("low");
+            }
+            self.adapter.managed_quote(&body)?;
+        }
         if serde_json::to_vec(&body).map_err(|_| Error::Storage)?.len() > config.max_request_bytes {
             return Err(Error::Invalid("IMAGE_REQUEST_BYTES_LIMIT".into()));
         }
@@ -128,6 +148,12 @@ impl OpenAiImages {
     }
 }
 impl ImagePort for OpenAiImages {
+    fn pricing_snapshot(&self) -> Option<models::PricingSnapshot> {
+        self.adapter
+            .managed
+            .as_ref()
+            .map(|managed| managed.pricing.clone())
+    }
     fn size_policy(&self, action: ImageAction) -> Option<ImageSizePolicy> {
         self.adapter.config.capabilities.images.size_policy(action)
     }
@@ -142,14 +168,18 @@ impl ImagePort for OpenAiImages {
             c.image_limits,
             c.input_token_upper_bound,
             c.max_request_bytes,
-            c.max_response_bytes
+            c.max_response_bytes,
+            self.pricing_snapshot()
         ]))
     }
     fn check(&self, request: &PreparedImageRequest) -> Result<()> {
         self.body(request).map(|_| ())
     }
     fn quote(&self, request: &PreparedImageRequest) -> Result<Amount> {
-        self.check(request)?;
+        let body = self.body(request)?;
+        if self.adapter.managed.is_some() {
+            return self.adapter.managed_quote(&body);
+        }
         self.adapter.config.capabilities.limits.estimate(
             self.adapter.config.input_token_upper_bound,
             self.adapter.config.capabilities.limits.max_output,
@@ -167,11 +197,19 @@ impl ImagePort for OpenAiImages {
             &self.edits_endpoint
         };
         let normalize = |response: &Value| {
-            crate::openai_images_usage::normalize_with_svg(
+            let mut usage = crate::openai_images_usage::normalize_with_svg(
                 &self.adapter.config,
                 response,
                 request.action() == ImageAction::SvgGenerate,
-            )
+            );
+            if let Some(managed) = &self.adapter.managed
+                && usage.unknown_reason.as_deref()
+                    == Some(crate::openai_images_usage::REASON_NO_PRICE)
+            {
+                usage.unknown_reason = None;
+                managed.pricing.record_cost(&mut usage);
+            }
+            usage
         };
         let parsed = match self
             .adapter

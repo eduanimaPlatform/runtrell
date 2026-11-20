@@ -357,7 +357,7 @@ fn retryable_failed_unknown_usage_keeps_reservation_then_recovers_original_attem
             let recovery = SettlementRecovery {
                 basis: "fake-provider-usage-receipt".into(),
                 usage: recovered,
-                price: first.request.price.clone().unwrap(),
+                price: Some(first.request.price.clone().unwrap()),
             };
             let command = owner_contracts::command(&format!("recover-{index}"));
             let receipt = store

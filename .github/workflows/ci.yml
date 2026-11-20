@@ -91,6 +91,7 @@ jobs:
           cargo run -p runtrell-postgres --locked ${{ matrix.example_args }} --example chat_host
       - name: Trace and pinned source hashes
         run: |
+          cargo run -p xtask --locked -- models check
           cargo run -p xtask --locked -- trace
           cargo run -p xtask --locked -- hashes
           git diff --exit-code -- README.md docs/design/requirements-trace.md

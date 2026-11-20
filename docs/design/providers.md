@@ -3,9 +3,29 @@
 `runtrell-providers` has no default features. `openai`, `gemini`, and `openrouter`
 select Responses, Developer API generateContent, and chat completions respectively.
 Each implements `ModelPort`; the driver contains no provider selection.
-The host supplies the complete endpoint URL, credential, model, limits, price,
-model capabilities, request/response byte bounds, input token upper bound, Run,
-and optional session. No discovery, credential loading, or price catalog is provided.
+Use `connect_model` with a canonical `provider/model-name`, an optional
+binding name, and a `Connection`. The bundled catalog supplies the endpoint,
+wire model, capabilities, limits and pricing. Connection supplies a credential
+resolver, Run/session, timeout, reasoning setting and optional lower limits.
+`Connection::input_token_cap` bounds the billed prompt.
+`Connection::context_cap` bounds the sum of the prompt and allowed output.
+With a lower context, reservation subtracts the maximum allowed output to
+compute the effective prompt ceiling. Without lower limits, the adapter
+reserves against the published prompt ceiling.
+
+For OpenAI Responses, a persisted reservation authorizes the adapter to send
+its final input to the free `POST /v1/responses/input_tokens` endpoint with
+the same key and deadline. This includes the input after attachment resolution,
+function definitions and the structured output schema. A count above the
+ceiling, a count failure or an unusable reply prevents inference. Uncapped
+connections use the published bound and skip counting. Other executable
+families can use a lower context when their published prompt bound fits the
+configured context together with the allowed output.
+[Responses input counts](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count) ·
+[OpenAI counting and billing](https://help.openai.com/en/articles/4936856-understanding-and-counting-tokens).
+
+Resolution rejects unknown IDs, disabled features and unverified bindings
+before acquiring credentials.
 The host also pins the model retry policy (`max_attempts`, `backoff`, `max_elapsed`,
 all durations in milliseconds). Its default is 3 attempts including the first,
 1,000 ms initial backoff and 60,000 ms total elapsed time (`RetryPolicy::default`).
@@ -54,18 +74,8 @@ the failed result, error and diagnostic. Merely knowing the HTTP status or a
 bill amount that does not establish the missing counters cannot settle it.
 Settlement never resumes a Run. See [budget](budget.md#price-lines-and-owner-settlement-recovery).
 
-Public OSS image support is separately provided by `ImagePort` adapters:
-
-| Provider / adapter | Feature | Image input | Generation | Reference edit | Mask edit |
-|---|---|---|---|---|---|
-| OpenAI / OpenAiImages | openai | Authorized references | Host-declared | Host-declared | Unsupported |
-| Gemini / GeminiImages | gemini | Authorized references | Host-declared | Host-declared | Unsupported |
-
-These connect to standard `ImageGenerate`/`ImageEdit` using the same `ImageTool`.
-No provider fallback is implicit. OpenAi ModelPort alone does not implement image
-generation. Image MIME, byte/count/dimension and transport bounds come from the
-host's ImageLimits; PNG is the default, still JPEG/WebP are opt-in. See
-[images](images.md) for the OpenAI JSON wire and exact recovery/settlement behavior.
+The provider-neutral image tools and wire fixtures exercise storage, authorization
+and single settlement. See [image contracts](images.md).
 
 ## Contract
 
@@ -91,7 +101,7 @@ payload. The host fixes these before quoting/reservation (it may compute the
 digest while acquiring the original before constructing the declaration).
 `PreparedModelRequest` exposes the same immutable declarations and can own already
 authorized stored bytes, prepared through `ImageModel` before estimation.
-`Config.attachment_resolver.resolve` is called only at invoke,
+`Connection.attachment_resolver.resolve` is called only at invoke,
 with the trusted ToolContext and provider endpoint. The host must
 authorize that Run/principal/operation, fixed version and destination on each call.
 It must not log payloads or return locators in reference IDs or other saved fields.
@@ -112,22 +122,11 @@ inference usage; after sending, lost responses remain Unknown with reservation h
 This does not account for any independent host resolver RPC charge.
 Crash/cancellation without a saved unsent result conservatively retains Unknown.
 
-Document capabilities declare PDF and image support separately for URL and inline
-bytes. OpenAI Responses maps PDFs to input_file (file_url/file_data), PNG/JPEG/
-WebP to input_image. Gemini maps PDFs and those images to fileData/inlineData.
-OpenRouter document inputs are unsupported even if host flags are enabled.
-Host model flags can narrow these paths. Unsupported MIME, empty/invalid
-declarations and unsupported paths reject before sending. The fixed host token
-ceiling must cover all declared documents, including PDF pages, and is unchanged
-by resolution. Declared bytes bound inline Base64; URLs have a fixed 8192-byte
-bound. Count, total declared bytes and worst-case JSON wire size are checked
-before reservation. No request options permit late document attachment.
-The host also validates the actual file format and PDF page count against its
-model/token ceiling. These document limits do not use the ordinary (PNG by default)
-Workspace image inspection limits. `DocumentView` supports bounded PDF page
-selection and PNG/JPEG/WebP via existing image input; see [attachments](attachments.md).
-All three model adapters accept host-enabled JPEG/WebP through ordinary image
-input. OpenRouter rejects the separate document attachment path before sending.
+Catalog capabilities pin permitted document transports and MIME types. The
+bundled Responses and GenerateContent bindings use authorized inline PDF and
+image bytes. Count, total declared bytes and worst-case JSON wire size are
+checked before reservation. `DocumentView` supports bounded PDF page selection
+and image inputs through [attachments](attachments.md).
 `ModelPort::check_input_attachments` checks tool-exchange count/byte limits
 without resolving data; the driver returns repairable feedback for an oversized
 tool result, preserving its complete operation receipt and textual references.
@@ -167,18 +166,13 @@ deadline and optional host continuation limits govern further sends. Automatic
 compaction uses the host port's compaction_limits and routes summary requests by
 model; active continuation state and original history remain Run-bound.
 
-Usage uses the runtime Usage type: cached/image input are subsets of input;
-reasoning/image output are subsets of output; cached image input is their input
-intersection. Missing counters remain None, including missing subsets. Metadata
-separates absent, partial and totals-reported usage. Gemini candidates and thoughts
-are disjoint and are summed once into output only when both are reported (or the
-host explicitly declares that reasoning cannot occur). All other totals already
-include their subsets. Model identity is the returned identity when available;
-prices are never inferred. With a host price matching the returned model identity,
-micro_usd is calculated by the runtime Price.cost (one rounding, subset-aware);
-missing price-sensitive counters leave cost unreported. No price or a model
-mismatch also leaves cost unreported. The runtime rejects mismatched priced model
-identity; hosts must pin/configure the model whose usage they intend to settle.
+Usage preserves provider token totals, cache and reasoning subsets, model
+identity, and the measured cache-write TTL split. Each attempt saves the
+catalog revision, digest, route, rule and exact price basis. Responses sends
+Standard requests with an explicit cache TTL and applies the measured prompt
+band to the full attempt. Gemini output combines candidate and thinking
+counters. Missing price-sensitive counters or incompatible route evidence keep
+the reservation pending.
 
 HTTP redirects and automatic retries are disabled; one invocation sends at most
 once. Connection/body/JSON failure after starting send remains an unknown result,
@@ -189,7 +183,7 @@ local peer observed bytes; `response_read`, `response_decode`, and `http_error` 
 `sent` certainty. Attachment resolution failure is `pre_send` with
 `definitely_not_sent`. This evidence does not imply known usage or permission to
 retry. No lookup or idempotency guarantee is implemented: lookup always Unknown,
-recovery returns None, and the default attempt policy is one attempt.
+recovery returns None, and only the documented explicit Responses errors are eligible for retries.
 
 The public `ExternalResult::provider_diagnostic()` and persisted
 `Operation::provider_diagnostic()` expose typed evidence. Failed image responses
@@ -216,12 +210,21 @@ checked, and an unrepresentable accepted header prevents an early retry).
 `ProviderDiagnostic` contains no header values;
 the existing serialized `Failure.retry_after` retains the validated Retry-After value.
 
-Capabilities contain host-overridable model limits, schema/tool/parallel support,
-separate input/generation/reference-edit/mask-edit declarations and counter
-availability, with fixed subset semantics. The adapter's
-lookup/idempotency support remains none regardless of model settings. Input bound
-is a host supplied conservative token ceiling, never a guessed tokenizer count.
-Bounds, unsupported options and mismatched model/state are rejected before send.
+The driver reserves the maximum price before recording the send intent.
+The adapter consumes the single-send authorization before resolving the
+credential, after constructing and checking the wire payload. The ledger
+recomputes the bill with the attempt's pinned snapshot. Replaying that receipt
+does not charge a second time.
+
+The opt-in `standard-background` binding for GPT-6.1 Terra sends
+`background: true` with the default completion window and reserves the
+full Standard request before submitting. OpenAI temporarily stores the
+response for polling. The driver stores the accepted response ID with its
+attempt. Reconciliation retrieves that ID on the same binding without
+submitting again. Polling errors keep the accepted ID and reservation.
+This binding accepts text and function calls with text results. Attachments
+and images are rejected during preflight.
+[OpenAI background mode](https://developers.openai.com/api/docs/guides/background).
 
 Tests use loopback fake HTTP only. No live-provider or hosted acceptance is claimed.
 This implementation is independently written from the public wire contracts; no
@@ -238,86 +241,124 @@ Rig provider code is extracted and the adoption manifest remains unchanged.
 - [Gemini native image generation and editing](https://ai.google.dev/gemini-api/docs/image-generation)
 - [OpenRouter error contract source](https://github.com/OpenRouterTeam/docs/blob/main/api_reference/errors-and-debugging.mdx)
 
-The endpoints are supplied as full URLs by the host, so generateContent's model
-path is also host-owned. Gemini function-call parallelism has no request switch
-here; a model configured without parallel support returning multiple calls is
-rejected as an unknown stop, and none of those calls is executable.
+The catalog supplies the endpoints and `generateContent` model path. The Gemini
+2.5 Flash-Lite binding sets `thinkingBudget: 0` and checks that usage contains no
+positive thought count. The Developer API limits access to users who previously
+used the 2.5 family. The 3.5 Flash-Lite `generateContent` binding remains
+documented. Its positive thinking needs an enforceable chargeable-token ceiling.
+The Interactions API exposes a separate hard cutoff contract. The 3.1 Flash
+Lite Image price lists 1,120 output tokens per 1K image. The public model limit
+is 4,096 output tokens. The GenerateContent contract limits candidate tokens
+and documents thought tokens as a separate count. The image bindings remain
+documented until the wire provides a combined bound or separate enforced
+thinking and image counts.
+[Gemini 3.1 Flash Lite Image model card](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image) ·
+[Gemini image pricing](https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-flash-lite-image).
 
-## OpenAI Images usage
+[Gemini Developer API lifecycle](https://aistudio.google.com/docs/deprecations#gemini-2.5-flash-models) ·
+[Gemini thinking limits](https://aistudio.google.com/docs/thinking#token-limits).
 
-`OpenAiImages` does not reuse the Responses usage parser. `/images/generations` and
-`/images/edits` return the `ImagesUsage` object, so `openai_images_usage::normalize` maps only
-what that schema and the vendor's pricing note state.
+## OpenAI Images usage and reservation
 
-Sources, read 2026-11-03: the OpenAI OpenAPI description
-(`github.com/openai/openai-openapi`, `main` at c2aecc2, 2026-10-31), schema `ImagesUsage`; and
-the [image generation guide](https://developers.openai.com/api/docs/guides/image-generation),
-section "Cached input pricing".
+Sunburst and Flare have direct PNG generation and edit bindings. The adapter
+fixes `n=1` and uses the nonstreaming API with no partial images. It sends
+an explicit size and quality. Callers supply the size. Quality defaults to
+`low`. The catalog reserves from the public 2.6 calculator values below.
 
-| Response field | Runtime counter |
-|---|---|
-| `input_tokens` (= `input_tokens_details.text_tokens` + `image_tokens`) | `input` |
-| `input_tokens_details.image_tokens` | `image_input`; `text_tokens` goes to `quantities.text_input_tokens` |
-| `output_tokens` ("image tokens in the output image"), or `output_tokens_details.image_tokens` when present | `output`, `image_output`; `output_tokens_details.text_tokens` goes to `quantities.text_output_tokens` |
-| `total_tokens` | checked against `input_tokens + output_tokens`, not stored |
-| (none; the schema has no reasoning category but does not say none is billed) | `reasoning` stays `None`; a price whose reasoning rate differs from the output rate therefore refuses the cost (`IMAGE_USAGE_PRICE_COUNTER_UNKNOWN`), and hosts set both rates equal for image models |
+| Size | Low | Medium | High |
+| --- | ---: | ---: | ---: |
+| `1024x1024` | 823 | 1,449 | 1,756 |
+| `1536x1024` | 664 | 1,132 | 1,372 |
+| `1024x1536` | 664 | 1,132 | 1,372 |
 
-`output_tokens_details` is not in `ImagesUsage` but real responses carry it; it is accepted only
-when consistent with `output_tokens`.
+The calculator reports estimated output tokens and excludes reference inputs
+and prompt tokens. OpenAI publishes no 2.6 hard token limit for these cells.
+The binding reserves twice the calculator estimate for the chosen cell. This
+100% margin is a Runtrell reservation policy. The prompt is limited to 4,096
+UTF-8 bytes and reserves 8,192 text tokens, including headroom for provider
+formatting. Edit allows one bounded PNG reference with each edge at most 1,536
+pixels. The reservation uses 14,048 image input tokens for that reference, twice
+the calculator's 7,024-token square `max` estimate as a reference budget proxy.
+The legacy input tiling examples provide a separate scale comparison and the
+current vision calculator excludes GPT Image edits. The reference budget is
+an estimate with headroom. It has no provider token enforcement. Reservation
+uses undiscounted rates. An actual amount above the saved reservation triggers
+the managed overrun policy.
+[OpenAI 2.6 calculator](https://developers.openai.com/api/docs/guides/image-generation#calculating-costs) ·
+[OpenAI image inputs](https://developers.openai.com/api/docs/guides/images-vision#gpt-image-model-inputs) ·
+[OpenAI image generation](https://developers.openai.com/api/reference/resources/images/methods/generate) ·
+[OpenAI image edit](https://developers.openai.com/api/reference/resources/images/methods/edit).
 
-**Cached counters.** For direct Images API calls, the 2026-11-11 user decision applies the
-GPT Image 2/2.5 billing rule to the two exact 2.6 IDs, `gpt-image-2.6-sunburst` and
-`gpt-image-2.6-flare`. The [pricing page](https://developers.openai.com/api/docs/pricing)
-lists identical Standard token rates for 2.5 and 2.6 Sunburst/Flare: text input $5,
-image input $8, and image output $30 per million tokens, with cached rates $1.25 and $2.
-The [guide's cached-input statement](https://developers.openai.com/api/docs/guides/image-generation#cached-input-pricing)
-explicitly excludes cache discounts for direct Images API requests, including edits, for 2 and
-2.5 only; applying that exclusion to 2.6 is the user's policy decision, not an official 2.6
-statement. Responses API image tools and other routes can have different cache behavior and
-are outside this rule.
+The 2.6 direct raster bindings declare
+`inherited_direct_image_2_2_5_zero_when_unreported`. This pricing policy
+inherits the direct Images 2/2.5 structure: when neither cache counter is
+reported, both count as zero. Reported counters take precedence. A positive
+cache total on an edit still needs the image subset to price the discount.
+The attempt's saved pricing snapshot carries the policy used for settlement.
+[OpenAI cached input pricing](https://developers.openai.com/api/docs/guides/image-generation#cached-input-pricing).
 
-For the eight exact IDs in `openai_images_usage::GPT_IMAGE_2_FAMILY`, missing `cached` and
-`cached_image_input` are filled with zero, and all input tokens are billed at ordinary rates.
-Explicit nonzero cache counters contradict this rule and cause `IMAGE_USAGE_INCONSISTENT`;
-reported counters remain visible for diagnosis. Owner recovery applies the same rule to stored
-Images usage, filling only missing cache counters and refusing contradictory values. Other
-models retain unknown missing cache counters. `Price::cost` keeps its refusal semantics and
-the price is the host's, with all four input rates independent (see [budget](budget.md)).
-For an unpriced or incomplete response, `Usage.price_evidence` can retain a known
-component and the host-priced `SvgUsage` can retain the author component.
-The host reads this evidence through saved `Operation` usage and the owner
-recovery audit; it is informational, not a partial charge.
-If a response omits one total, valid counters on the other axis can still
-produce that axis's evidence. Contradictory reported parts produce no price
-evidence; the complete amount remains unknown in either case.
-An image that arrived with unsettleable usage is kept; the adapter returns the counters it can
-prove and `Usage.unknown_reason`:
+The direct SVG operation is unavailable before credential resolution. The
+Images API accepts an author model and reasoning effort but has no field
+for the author request's `max_output_tokens`. An executable SVG binding
+needs that cap on the author wire and must reserve the bounded prompt and
+reference using the author model's catalog rates and cache rules.
+[SVG request and usage](https://developers.openai.com/api/reference/resources/images/methods/generate) ·
+[SVG billing](https://developers.openai.com/api/docs/guides/image-generation#cost-and-latency).
 
-| `unknown_reason` | Meaning |
-|---|---|
-| `IMAGE_USAGE_ABSENT` | no `usage` object |
-| `IMAGE_USAGE_MALFORMED` | a counter is not a non-negative integer |
-| `IMAGE_USAGE_INCOMPLETE` | a schema-required counter is missing |
-| `IMAGE_USAGE_INCONSISTENT` | parts do not add up to the totals |
-| `IMAGE_USAGE_CACHED_UNREPORTED` | model outside the exact direct Images no-cache rule has unreported cache counters |
-| `IMAGE_USAGE_MODEL_UNPRICED` | the response names a model other than the requested one or a declared alias |
-| `IMAGE_USAGE_NO_PRICE` | the host configured no price |
-| `IMAGE_USAGE_PRICE_COUNTER_UNKNOWN` | another counter that affects the bill is unknown |
-| `IMAGE_USAGE_COST_OVERFLOW` | the bill does not fit a `u64` of micro-USD |
+## OpenRouter payer and routes
 
-The response carries no model field in the published schema, so an absent model means the
-requested model. `ImageCapabilities.response_model_aliases` lists exact response model names the
-host declares to bill as the requested model; usage is then recorded under the priced model.
-Any other reported model is not priced.
+`deepinfra-standard` requires `ApiKey::openrouter(key, OpenRouterPayer::Credits)`.
+The host configures a workspace in which BYOK keys cannot serve the binding.
+`deepinfra-byok` requires `OpenRouterPayer::Byok`. The upstream workspace key
+must use the published paid SKU and have shared-capacity fallback disabled.
+The adapter checks the credential payer against the catalog binding before
+HTTP. It verifies the returned provider, `usage.is_byok`, `usage.cost` and
+`usage.cost_details.upstream_inference_cost` for the selected SKU. Evidence is
+normalized to micro-USD and carried with the original snapshot.
 
-SVG author usage is a separate `Usage.svg_usage` component; complete raw JSON is
-retained even if malformed or the returned model is unknown. Its counters and
-price never enter image counters or image-model `Price::cost`. Exact author rates
-come from the host's `ImageCapabilities.svg_author_prices`, including verified
-reasoning/output inclusion semantics. Missing/malformed/inconsistent/unpriced
-author usage prevents aggregate settlement; it is never a free component.
-The component stores its applied rate snapshot; `Usage::amount` adds image and
-author costs once, while `total_tokens` and `reasoning_tokens` are not extra lines.
-The 2.6 Standard test catalog records 5 / 1.25 / 8 / 2 / 30 USD/M tokens
-(text / cached text / image / cached image / output), E1/E5 accessed 2026-11-05.
-It supplies no fabricated author-model rate or live billing claim.
+BYOK pins three profiles. The upstream profile supplies the provider cost.
+OpenRouter's list-price reference supplies the basis for a maximum 5% platform
+fee, charged through a separate router profile. Reservation assumes none of
+the monthly allowance is available. Settlement checks the upstream cost
+against the upstream profile and uses the reported credit fee within the
+allowance-independent ceiling, so zero and partially discounted fees settle.
+
+`fp8-standard` is a credits binding with DeepInfra and Cloudflare candidates.
+The request supplies both exact tags through `provider.only` and disables
+fallback, which lets OpenRouter choose one ranked endpoint. The attempt stores
+both price snapshots, reserves the maximum of the reachable charges, and
+settles against the one reported provider. The binding uses the 32,000-token
+published shared prompt ceiling. Missing or inconsistent route or payer proof
+keeps the reservation.
+[OpenRouter routing controls](https://openrouter.ai/docs/guides/routing/provider-selection) ·
+[OpenRouter request accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting) ·
+[OpenRouter BYOK](https://openrouter.ai/docs/guides/overview/auth/byok) ·
+[Endpoint SKUs](https://openrouter.ai/api/v1/models/meta-llama/llama-3.1-8b-instruct/endpoints) ·
+[DeepInfra FP8 SKU](https://deepinfra.com/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo).
+
+## Catalog API families and billing meters
+
+The schema admits the API families below. Executable bindings appear as
+`verified` in the generated [catalog](../../catalog/README.md). Each additional
+wire tuple requires a positive registry entry, enforceable admission limits,
+complete meter evidence, a price graph for the SKU, and fixtures for the
+successful and rejected requests. The executable families are
+`openai_responses`, `openai_images` (PNG only), `gemini_generate` (2.5
+Flash-Lite completion), and `openrouter_chat` (listed Llama FP8 bindings).
+The remaining families are schema entries and cannot open a provider
+connection. The GPT-6 Responses registry accepts models on that wire contract
+through the catalog. Models with different wire or metering rules need a
+separate registry entry.
+
+| Family | Wire and billing meters |
+| --- | --- |
+| `openai_responses`, `openai_chat`, `openai_batch` | Completion and Batch item tokens. Distinguish uncached input, cache reads, supported write TTLs and output including reasoning. Provider Tool SKUs may add search/file calls, tool-result tokens, or container starts and duration. [Responses](https://developers.openai.com/api/reference/resources/responses/methods/create) · [Batch](https://developers.openai.com/api/docs/guides/batch) · [Tool SKUs](https://developers.openai.com/api/docs/pricing#tools) |
+| `openai_images`, `openai_audio`, `openai_realtime`, `openai_live` | Direct raster and authoring tokens, streaming partial images, speech characters or tokens, and transcription media or tokens. Realtime meters use terminal modality details. Live duration has active and standby SKUs, plus separately priced downstream models and Tools where applicable. [Images](https://developers.openai.com/api/docs/guides/image-generation) · [Audio](https://developers.openai.com/api/docs/guides/audio) · [Live](https://developers.openai.com/api/docs/models/gpt-live-1) |
+| `gemini_generate`, `gemini_interactions`, `gemini_live`, `gemini_batch`, `vertex_generate`, `vertex_live`, `vertex_batch` | Developer and Cloud text or multimodal generation, Live and Batch. Account for input modality, cache, candidates, thoughts and Tool prompts. Grounding SKUs distinguish a grounded request from the actual billable search queries. [GenerateContent](https://aistudio.google.com/api-reference/generate-content) · [Interactions](https://aistudio.google.com/api-reference/interactions-api/create-interaction) · [Developer SKUs](https://aistudio.google.com/docs/pricing) · [Cloud SKUs](https://cloud.google.com/model-garden/pricing) |
+| `vertex_predict`, `vertex_lro`, `gemini_cache`, `vertex_cache` | Imagen image count, Veo video duration and Lyria clip count. Long-running submit, poll and download share the provider job identity. Cache storage uses token count multiplied by preserved time and is tied to a generation and resource ID. [Cloud SKUs](https://cloud.google.com/model-garden/pricing) · [Developer cache](https://aistudio.google.com/api-reference/caching) · [Vertex cache](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/projects.locations.cachedContents) |
+| `anthropic_messages`, `anthropic_batches` | Input and output tokens, cache read and 5-minute or 1-hour creation. Batch bills per item. Web Search meters eligible calls and model tokens. Code Execution meters the applicable minimum time per container, plus paid duration beyond allowances. [Cache](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) · [Batch](https://platform.claude.com/docs/en/build-with-claude/batch-processing) · [SKUs](https://platform.claude.com/docs/en/about-claude/pricing) |
+| `openrouter_chat`, `openrouter_responses`, `openrouter_batch`, `openrouter_images`, `openrouter_audio`, `openrouter_video` | Routed completion and Batch item tokens, requests and Tool calls. Image, speech, transcription and video SKUs use the selected endpoint's token, image, pixel, character or media-duration meters. Bind each cost to its generation ID, effective endpoint and payer. [API families](https://openrouter.ai/support/) · [Batch](https://openrouter.ai/blog/announcements/batch-api/) · [Billing evidence](https://openrouter.ai/docs/cookbook/administration/usage-accounting) |
+| `xai_chat`, `xai_responses`, `xai_batch`, `xai_images`, `xai_video`, `xai_audio`, `xai_voice` | Completion and Batch tokens, host Tool calls, X Search post/profile records, image counts, video duration and audio characters or duration. Voice sessions meter elapsed audio under the applicable VAD rules and eligible text-input events. [SKUs](https://docs.x.ai/developers/pricing) · [Speech-to-speech](https://docs.x.ai/developers/models/speech-to-speech) · [Video](https://docs.x.ai/developers/model-capabilities/video/overview) |
+| `mistral_chat`, `mistral_batch`, `mistral_ocr`, `mistral_audio` | Completion and Batch tokens, OCR pages and eligible cached pages, and audio duration, character or token meters per speech SKU. [SKUs](https://docs.mistral.ai/inference/pricing?currency=usd) · [OCR](https://docs.mistral.ai/api/endpoint/ocr) · [Speech](https://docs.mistral.ai/studio/audio/text-to-speech/generate-speech) |
+| `deepseek_chat`, `deepseek_responses`, `deepseek_messages`, `deepseek_speech`, `deepseek_tools` | Completion input hit/miss and output tokens, TTS weighted characters, STT seconds rounded up, eligible search/fetch items and OCR/parse pages. A completion with native search may bill result context tokens even when the call fee is zero. [SKUs](https://api-docs.deepseek.com/quick_start/pricing/) · [TTS](https://api-docs.deepseek.com/guides/tts/#billing) · [ASR](https://api-docs.deepseek.com/guides/asr/#billing) |
+| `cohere_chat`, `cohere_transcribe` | Completion billed input/output units and applicable Tool context. Transcription uses the published evaluation plan and the evidence for the binding's actual speech SKU. [Chat](https://docs.cohere.com/v2/reference/chat) · [Transcribe](https://docs.cohere.com/reference/create-audio-transcription) · [Plans](https://docs.cohere.com/docs/transcribe) |

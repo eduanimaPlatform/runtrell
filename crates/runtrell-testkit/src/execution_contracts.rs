@@ -26,6 +26,7 @@ impl LedgerHarness for MemoryLedgerHarness {
 }
 fn context() -> ToolContext {
     ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: Claim {
             run: RunHandle {

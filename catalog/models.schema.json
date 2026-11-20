@@ -1,0 +1,955 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Runtrell model catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "catalog_revision", "profiles", "models", "operations", "price_profiles", "evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "catalog_revision": {"$ref": "#/$defs/id"},
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+      "additionalProperties": {"$ref": "#/$defs/profile"}
+    },
+    "models": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._:@-]*(?:/[A-Za-z0-9][A-Za-z0-9._:@-]*)*$"
+      },
+      "additionalProperties": {"$ref": "#/$defs/model"}
+    },
+    "operations": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+      "additionalProperties": {"$ref": "#/$defs/operation"}
+    },
+    "price_profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+      "additionalProperties": {"$ref": "#/$defs/price_profile"}
+    },
+    "evidence": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+      "additionalProperties": {"$ref": "#/$defs/evidence"}
+    },
+    "time_windows": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+      "additionalProperties": {"$ref": "#/$defs/time_window"}
+    },
+    "allowances": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+      "additionalProperties": {"$ref": "#/$defs/allowance"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+    "model_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._:@-]*(?:/[A-Za-z0-9][A-Za-z0-9._:@-]*)*$"
+    },
+    "count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "positive": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "natural_string": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,35})$"},
+    "positive_string": {"type": "string", "pattern": "^[1-9][0-9]{0,35}$"},
+    "decimal": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,17})(?:[.][0-9]{1,24})?$"},
+    "positive_decimal": {"allOf": [{"$ref": "#/$defs/decimal"}, {"not": {"type": "string", "pattern": "^0(?:[.]0+)?$"}}]},
+    "evidence_refs": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "checked_on", "topic"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://[a-z0-9][a-z0-9.-]+(?:[/?#][^\\s]*)?$",
+          "format": "uri",
+          "maxLength": 600
+        },
+        "checked_on": {"type": "string", "format": "date"},
+        "topic": {"enum": ["pricing", "api", "capabilities", "lifecycle", "routing", "calendar"]}
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_family", "wire_version", "provider", "transport", "origin", "path", "method", "auth", "evidence"],
+      "properties": {
+        "api_family": {
+          "enum": [
+            "openai_responses",
+            "openai_chat",
+            "openai_batch",
+            "gemini_generate",
+            "gemini_interactions",
+            "gemini_batch",
+            "vertex_generate",
+            "vertex_batch",
+            "anthropic_messages",
+            "anthropic_batches",
+            "openrouter_chat",
+            "openrouter_responses",
+            "openrouter_batch",
+            "xai_chat",
+            "xai_responses",
+            "xai_batch",
+            "mistral_chat",
+            "mistral_batch",
+            "deepseek_chat",
+            "deepseek_responses",
+            "deepseek_messages",
+            "cohere_chat",
+            "openai_images",
+            "vertex_predict",
+            "vertex_lro",
+            "openrouter_images",
+            "openrouter_video",
+            "xai_images",
+            "xai_video",
+            "openai_audio",
+            "openai_realtime",
+            "openai_live",
+            "gemini_live",
+            "vertex_live",
+            "openrouter_audio",
+            "xai_audio",
+            "xai_voice",
+            "mistral_audio",
+            "deepseek_speech",
+            "cohere_transcribe",
+            "mistral_ocr",
+            "deepseek_tools",
+            "gemini_cache",
+            "vertex_cache"
+          ]
+        },
+        "wire_version": {"$ref": "#/$defs/id"},
+        "provider": {"$ref": "#/$defs/id"},
+        "transport": {"enum": ["https", "sse", "websocket", "lro"]},
+        "origin": {"type": "string", "pattern": "^(?:https|wss)://[a-z0-9][a-z0-9.-]+$", "format": "uri"},
+        "path": {"type": "string", "pattern": "^/[A-Za-z0-9_./{}:@-]+$"},
+        "method": {"enum": ["GET", "POST", "PATCH", "DELETE", "CONNECT"]},
+        "auth": {"enum": ["bearer", "api_key_header", "google_oauth", "none"]},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "region": {"$ref": "#/$defs/id"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["author", "lifecycle", "operations", "evidence"],
+      "properties": {
+        "author": {"$ref": "#/$defs/id"},
+        "lifecycle": {"enum": ["active", "preview", "deprecated", "retired"]},
+        "operations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "evidence": {"$ref": "#/$defs/evidence_refs"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "input", "output", "capabilities", "default_binding", "bindings", "evidence"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "completion",
+            "raster_generate",
+            "raster_edit",
+            "image_upscale",
+            "svg_generate",
+            "speech_synthesize",
+            "transcribe",
+            "audio_translate",
+            "voice_session",
+            "music_generate",
+            "video_generate",
+            "video_edit",
+            "video_extend",
+            "ocr",
+            "parse",
+            "search",
+            "fetch"
+          ]
+        },
+        "input": {
+          "type": "array",
+          "minItems": 0,
+          "uniqueItems": true,
+          "items": {"enum": ["text", "image", "audio", "video", "document", "structured"]}
+        },
+        "output": {
+          "type": "array",
+          "minItems": 0,
+          "uniqueItems": true,
+          "items": {"enum": ["text", "image", "audio", "video", "document", "structured"]}
+        },
+        "capabilities": {"$ref": "#/$defs/capabilities"},
+        "default_binding": {"$ref": "#/$defs/id"},
+        "bindings": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/binding"}
+        },
+        "evidence": {"$ref": "#/$defs/evidence_refs"}
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "stream": {"type": "boolean"},
+        "structured_output": {"type": "boolean"},
+        "tool_choice": {"type": "boolean"},
+        "tools": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "reasoning_modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "image_qualities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "image_sizes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[1-9][0-9]{0,5}x[1-9][0-9]{0,5}|[1-9][0-9]{0,4}p|[1-9][0-9]?(?:[.][0-9])?k)$"
+          }
+        },
+        "video_resolutions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[1-9][0-9]{0,5}x[1-9][0-9]{0,5}|[1-9][0-9]{0,4}p|[1-9][0-9]?(?:[.][0-9])?k)$"
+          }
+        },
+        "video_audio": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "boolean"}},
+        "media_modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "media_input": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["inline", "provider_file", "verified_url", "multipart"]}
+        },
+        "accepted_mime_types": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"}
+        },
+        "duration_ms_options": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/positive"}},
+        "cache_write_seconds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/positive"}},
+        "voice_modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "auto_size": {"type": "boolean"}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "context_tokens": {"$ref": "#/$defs/positive"},
+        "max_input_tokens": {"$ref": "#/$defs/positive"},
+        "max_output_tokens": {"$ref": "#/$defs/positive"},
+        "request_bytes": {"$ref": "#/$defs/positive"},
+        "response_bytes": {"$ref": "#/$defs/positive"},
+        "attachment_count": {"$ref": "#/$defs/positive"},
+        "attachment_bytes": {"$ref": "#/$defs/positive"},
+        "batch_items": {"$ref": "#/$defs/positive"},
+        "outputs": {"$ref": "#/$defs/positive"},
+        "images_in": {"$ref": "#/$defs/positive"},
+        "image_output_tokens_by_size": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"pattern": "^[1-9][0-9]*x[1-9][0-9]*$"},
+          "additionalProperties": {"$ref": "#/$defs/positive"}
+        },
+        "pages": {"$ref": "#/$defs/positive"},
+        "search_queries": {"$ref": "#/$defs/positive"},
+        "tool_calls": {"$ref": "#/$defs/positive"},
+        "tool_rounds": {"$ref": "#/$defs/positive"},
+        "partial_images": {"$ref": "#/$defs/positive"},
+        "pixel_count_in": {"$ref": "#/$defs/positive"},
+        "pixel_count_out": {"$ref": "#/$defs/positive"},
+        "input_media_ms": {"$ref": "#/$defs/positive"},
+        "output_media_ms": {"$ref": "#/$defs/positive"},
+        "session_ms": {"$ref": "#/$defs/positive"},
+        "input_characters": {"$ref": "#/$defs/positive"},
+        "output_characters": {"$ref": "#/$defs/positive"},
+        "records": {"$ref": "#/$defs/positive"},
+        "messages": {"$ref": "#/$defs/positive"}
+      }
+    },
+    "image_reservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["calculator_output_tokens", "output_multiplier", "prompt_bytes", "text_tokens", "reference_long_edge", "reference_tokens"],
+      "properties": {
+        "calculator_output_tokens": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[1-9][0-9]*x[1-9][0-9]*$"},
+          "additionalProperties": {
+            "type": "object",
+            "propertyNames": {"enum": ["low", "medium", "high"]},
+            "additionalProperties": {"$ref": "#/$defs/positive"}
+          }
+        },
+        "output_multiplier": {"$ref": "#/$defs/positive"},
+        "prompt_bytes": {"$ref": "#/$defs/positive"},
+        "text_tokens": {"$ref": "#/$defs/positive"},
+        "reference_long_edge": {"$ref": "#/$defs/positive"},
+        "reference_tokens": {"$ref": "#/$defs/positive"}
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "request_model",
+        "status",
+        "requested_tier",
+        "plan",
+        "residency",
+        "usage_rule",
+        "bounds_rule",
+        "effects",
+        "evidence"
+      ],
+      "properties": {
+        "profile": {"$ref": "#/$defs/id"},
+        "request_model": {"oneOf": [{"type": "string", "pattern": "^[^\\s]{1,190}$"}, {"type": "null"}]},
+        "status": {"enum": ["documented", "verified", "retired"]},
+        "requested_tier": {"enum": ["standard", "batch", "flex", "priority", "fast", "ultrafast", "background", "off_peak"]},
+        "plan": {"enum": ["paid", "free", "trial", "contract"]},
+        "residency": {"enum": ["global", "regional", "us_only", "fedramp", "eu_only"]},
+        "usage_rule": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*@v[1-9][0-9]{0,5}$"},
+        "bounds_rule": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*@v[1-9][0-9]{0,5}$"},
+        "effects": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/effect"}
+        },
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "limits": {"$ref": "#/$defs/limits"},
+        "image_reservation": {"$ref": "#/$defs/image_reservation"},
+        "cache_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "evidence"],
+          "properties": {
+            "kind": {"const": "inherited_direct_image_2_2_5_zero_when_unreported"},
+            "evidence": {"$ref": "#/$defs/evidence_refs"}
+          }
+        },
+        "region": {"$ref": "#/$defs/id"},
+        "response_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[^\\s]{1,190}$"}
+        },
+        "constrains": {"$ref": "#/$defs/condition"},
+        "background": {"const": true},
+        "allow_fallbacks": {"type": "boolean"}
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effective_tier", "mode", "prices"],
+      "properties": {
+        "effective_tier": {"enum": ["standard", "batch", "flex", "priority", "fast", "ultrafast", "background", "off_peak"]},
+        "mode": {"enum": ["direct", "routed", "byok"]},
+        "prices": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "endpoint_tag": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,127}$"},
+        "upstream_provider": {"$ref": "#/$defs/id"},
+        "region": {"$ref": "#/$defs/id"},
+        "tool_prices": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/id"}
+        },
+        "co_billed": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/co_billed"}
+        },
+        "cache_lifecycle": {"$ref": "#/$defs/cache_lifecycle"}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["mode"], "properties": {"mode": {"enum": ["routed", "byok"]}}},
+          "then": {"required": ["endpoint_tag", "upstream_provider"]}
+        }
+      ]
+    },
+    "co_billed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "operation", "binding", "effect"],
+      "properties": {
+        "model": {"$ref": "#/$defs/model_id"},
+        "operation": {"$ref": "#/$defs/id"},
+        "binding": {"$ref": "#/$defs/id"},
+        "effect": {"$ref": "#/$defs/id"},
+        "applies": {"$ref": "#/$defs/condition"}
+      }
+    },
+    "integer_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min"],
+      "properties": {"min": {"$ref": "#/$defs/count"}, "max_exclusive": {"$ref": "#/$defs/positive"}}
+    },
+    "quantity_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min"],
+      "properties": {"min": {"$ref": "#/$defs/natural_string"}, "max_exclusive": {"$ref": "#/$defs/positive_string"}}
+    },
+    "date_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "until"],
+      "properties": {"from": {"type": "string", "format": "date"}, "until": {"type": "string", "format": "date"}}
+    },
+    "effective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]{1,3})?Z$",
+          "format": "date-time"
+        },
+        "until": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]{1,3})?Z$",
+          "format": "date-time"
+        }
+      }
+    },
+    "clock": {"enum": ["accepted_at", "processed_at", "usage_event_at", "period_start", "provider_reported"]},
+    "time_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["zone", "clock", "default_band", "weekly", "evidence"],
+      "properties": {
+        "zone": {"type": "string", "pattern": "^(?:UTC|[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)+)$"},
+        "clock": {"$ref": "#/$defs/clock"},
+        "default_band": {"$ref": "#/$defs/id"},
+        "weekly": {"type": "array", "minItems": 0, "uniqueItems": true, "items": {"$ref": "#/$defs/weekly_slot"}},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "date_overrides": {
+          "type": "object",
+          "minProperties": 0,
+          "propertyNames": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+          "additionalProperties": {"$ref": "#/$defs/id"}
+        },
+        "calendar_coverage": {"$ref": "#/$defs/date_range"},
+        "calendar_zone": {"type": "string"}
+      },
+      "dependentRequired": {
+        "date_overrides": ["calendar_coverage", "calendar_zone"],
+        "calendar_coverage": ["date_overrides", "calendar_zone"],
+        "calendar_zone": ["date_overrides", "calendar_coverage"]
+      }
+    },
+    "weekly_slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["days", "start_second", "end_second", "band"],
+      "properties": {
+        "days": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]}
+        },
+        "start_second": {"type": "integer", "minimum": 0, "maximum": 86399},
+        "end_second": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "band": {"$ref": "#/$defs/id"}
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "prompt_tokens": {"$ref": "#/$defs/integer_range"},
+        "context_tokens": {"$ref": "#/$defs/integer_range"},
+        "width_px": {"$ref": "#/$defs/integer_range"},
+        "height_px": {"$ref": "#/$defs/integer_range"},
+        "input_width_px": {"$ref": "#/$defs/integer_range"},
+        "input_height_px": {"$ref": "#/$defs/integer_range"},
+        "tier": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["standard", "batch", "flex", "priority", "fast", "ultrafast", "background", "off_peak"]}
+        },
+        "plan": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["paid", "free", "trial", "contract"]}
+        },
+        "mode": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["direct", "routed", "byok"]}},
+        "residency": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["global", "regional", "us_only", "fedramp", "eu_only"]}
+        },
+        "region": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "quality": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "resolution": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[1-9][0-9]{0,5}x[1-9][0-9]{0,5}|[1-9][0-9]{0,4}p|[1-9][0-9]?(?:[.][0-9])?k)$"
+          }
+        },
+        "input_resolution": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[1-9][0-9]{0,5}x[1-9][0-9]{0,5}|[1-9][0-9]{0,4}p|[1-9][0-9]?(?:[.][0-9])?k)$"
+          }
+        },
+        "media_mode": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$"}
+        },
+        "audio_enabled": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "boolean"}},
+        "has_references": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "boolean"}},
+        "promotion": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "boolean"}},
+        "time_band": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "memory_bytes": {"$ref": "#/$defs/integer_range"},
+        "retention_seconds": {"$ref": "#/$defs/integer_range"},
+        "duration_ms": {"$ref": "#/$defs/integer_range"},
+        "output_count": {"$ref": "#/$defs/integer_range"},
+        "state": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["active", "standby", "running", "idle"]}
+        },
+        "outcome": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["success", "filtered", "partial", "failed", "cancelled"]}
+        },
+        "tool_bundle": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "sku": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "quantize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["axis", "scope", "round", "step", "minimum"],
+      "properties": {
+        "axis": {"enum": ["quantity", "size", "duration", "count"]},
+        "scope": {"enum": ["attempt", "item", "event", "session", "resource", "billing_period"]},
+        "round": {"enum": ["ceil", "floor", "half_up", "exact"]},
+        "step": {"$ref": "#/$defs/positive_string"},
+        "minimum": {"$ref": "#/$defs/natural_string"},
+        "trigger": {"enum": ["positive_quantity", "billable_activation"]}
+      }
+    },
+    "meter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "direction"],
+      "properties": {
+        "unit": {
+          "enum": [
+            "token",
+            "image",
+            "pixel",
+            "artifact",
+            "media_ms",
+            "character",
+            "request",
+            "tool_call",
+            "search_query",
+            "page",
+            "record",
+            "size_ms",
+            "resource_time"
+          ]
+        },
+        "direction": {"enum": ["input", "output", "neutral"]},
+        "modalities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["text", "image", "audio", "video", "document"]}
+        },
+        "class": {"enum": ["base", "cache_read", "cache_write", "reasoning", "tool_content"]},
+        "retention_seconds": {"$ref": "#/$defs/positive"},
+        "item_kind": {
+          "enum": [
+            "audio_clip",
+            "code_execution",
+            "container",
+            "file_search",
+            "grounded_prompt",
+            "hosted_shell",
+            "image_search",
+            "maps_search",
+            "post",
+            "profile",
+            "session",
+            "song",
+            "text_message",
+            "web_fetch",
+            "web_search"
+          ]
+        },
+        "character_rule": {
+          "enum": [
+            "unicode_scalars",
+            "utf16_code_units",
+            "unicode_scalars_no_space",
+            "deepseek_weighted",
+            "provider_reported"
+          ]
+        },
+        "time_basis": {"enum": ["activation", "elapsed_ms"]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["unit"],
+            "properties": {"unit": {"enum": ["token", "image", "pixel", "media_ms", "character"]}}
+          },
+          "then": {"required": ["modalities", "class"]}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["media_ms"]}}},
+          "then": {"properties": {"modalities": {"maxItems": 1, "items": {"enum": ["audio", "video"]}}}}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["pixel"]}}},
+          "then": {"properties": {"modalities": {"maxItems": 1, "items": {"const": "image"}}, "class": {"const": "base"}}}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["image"]}}},
+          "then": {"properties": {"modalities": {"maxItems": 1, "items": {"const": "image"}}}}
+        },
+        {
+          "if": {
+            "required": ["unit"],
+            "properties": {"unit": {"enum": ["token", "image", "pixel", "media_ms", "character", "page"]}}
+          },
+          "then": {"properties": {"direction": {"enum": ["input", "output"]}}}
+        },
+        {
+          "if": {
+            "required": ["unit"],
+            "properties": {"unit": {"enum": ["tool_call", "search_query", "request", "record", "size_ms", "resource_time"]}}
+          },
+          "then": {
+            "properties": {"direction": {"const": "neutral"}},
+            "not": {"anyOf": [{"required": ["modalities"]}, {"required": ["class"]}]}
+          }
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["artifact"]}}},
+          "then": {
+            "properties": {"direction": {"const": "output"}},
+            "not": {"anyOf": [{"required": ["modalities"]}, {"required": ["class"]}]}
+          }
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["resource_time"]}}},
+          "then": {"required": ["time_basis"]},
+          "else": {"not": {"anyOf": [{"required": ["time_basis"]}]}}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["character"]}}},
+          "then": {"required": ["character_rule"]},
+          "else": {"not": {"anyOf": [{"required": ["character_rule"]}]}}
+        },
+        {
+          "if": {"required": ["class"], "properties": {"class": {"enum": ["cache_write"]}}},
+          "then": {
+            "required": ["retention_seconds"],
+            "properties": {"unit": {"const": "token"}, "direction": {"const": "input"}}
+          },
+          "else": {"not": {"anyOf": [{"required": ["retention_seconds"]}]}}
+        },
+        {
+          "if": {"required": ["class"], "properties": {"class": {"enum": ["cache_read"]}}},
+          "then": {
+            "properties": {"unit": {"enum": ["token", "page", "character", "media_ms"]}, "direction": {"const": "input"}}
+          }
+        },
+        {
+          "if": {"required": ["class"], "properties": {"class": {"enum": ["tool_content"]}}},
+          "then": {"properties": {"unit": {"const": "token"}, "direction": {"const": "input"}}}
+        },
+        {
+          "if": {"required": ["class"], "properties": {"class": {"enum": ["reasoning"]}}},
+          "then": {"properties": {"unit": {"const": "token"}, "direction": {"const": "output"}}}
+        },
+        {
+          "if": {
+            "not": {
+              "required": ["unit"],
+              "properties": {"unit": {"enum": ["artifact", "tool_call", "search_query", "record", "request", "resource_time"]}}
+            }
+          },
+          "then": {"not": {"anyOf": [{"required": ["item_kind"]}]}}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["artifact"]}}},
+          "then": {"properties": {"item_kind": {"enum": ["audio_clip", "song"]}}, "required": ["item_kind"]}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["tool_call"]}}},
+          "then": {
+            "properties": {
+              "item_kind": {
+                "enum": [
+                  "web_search",
+                  "image_search",
+                  "maps_search",
+                  "web_fetch",
+                  "file_search",
+                  "code_execution",
+                  "hosted_shell",
+                  "text_message"
+                ]
+              }
+            },
+            "required": ["item_kind"]
+          }
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["search_query"]}}},
+          "then": {
+            "properties": {"item_kind": {"enum": ["web_search", "image_search", "maps_search"]}},
+            "required": ["item_kind"]
+          }
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["record"]}}},
+          "then": {"properties": {"item_kind": {"enum": ["post", "profile"]}}, "required": ["item_kind"]}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["request"]}}},
+          "then": {"properties": {"item_kind": {"enum": ["grounded_prompt"]}}}
+        },
+        {
+          "if": {"required": ["unit"], "properties": {"unit": {"enum": ["resource_time"]}}},
+          "then": {"properties": {"item_kind": {"enum": ["container", "session"]}}, "required": ["item_kind"]}
+        }
+      ]
+    },
+    "rate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "evidence"],
+      "properties": {
+        "state": {"enum": ["priced", "unknown"]},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "when": {"$ref": "#/$defs/condition"},
+        "effective": {"$ref": "#/$defs/effective"},
+        "amount": {"$ref": "#/$defs/decimal"},
+        "per": {"$ref": "#/$defs/positive_string"},
+        "marginal": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/marginal_rate"}}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["state"], "properties": {"state": {"const": "priced"}}},
+          "then": {"required": ["per"], "oneOf": [{"required": ["amount"]}, {"required": ["marginal"]}]},
+          "else": {"not": {"anyOf": [{"required": ["amount"]}, {"required": ["per"]}, {"required": ["marginal"]}]}}
+        }
+      ]
+    },
+    "marginal_rate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quantity", "amount"],
+      "properties": {"quantity": {"$ref": "#/$defs/quantity_range"}, "amount": {"$ref": "#/$defs/decimal"}}
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["meter", "bill_on", "rounding_known", "rates"],
+      "properties": {
+        "meter": {"$ref": "#/$defs/meter"},
+        "bill_on": {"enum": ["measured", "accepted", "completed", "success", "grounded", "billable_activation"]},
+        "rounding_known": {"type": "boolean"},
+        "rates": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/rate"}},
+        "applies": {"$ref": "#/$defs/condition"},
+        "quantization": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/quantize"}},
+        "allowance": {"$ref": "#/$defs/id"}
+      }
+    },
+    "factor_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["factor", "evidence"],
+      "properties": {
+        "factor": {"$ref": "#/$defs/decimal"},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "when": {"$ref": "#/$defs/condition"},
+        "effective": {"$ref": "#/$defs/effective"}
+      }
+    },
+    "factor_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["components", "rows"],
+      "properties": {
+        "components": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "rows": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/factor_row"}}
+      }
+    },
+    "allowance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "scope", "period", "amount", "evidence"],
+      "properties": {
+        "kind": {"enum": ["included_usage", "included_money"]},
+        "scope": {"enum": ["account", "organization", "project", "credential", "resource"]},
+        "period": {"enum": ["day", "week", "month", "billing_cycle", "lifetime", "continuous"]},
+        "zone": {"type": "string", "pattern": "^(?:UTC|[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)+)$"},
+        "amount": {"$ref": "#/$defs/decimal"},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "zone_status": {"const": "unknown"}
+      },
+      "oneOf": [{"required": ["zone"]}, {"required": ["zone_status"]}]
+    },
+    "fee": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_profile", "factor", "evidence"],
+      "properties": {
+        "base_profile": {"$ref": "#/$defs/id"},
+        "factor": {"$ref": "#/$defs/decimal"},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "applies": {"$ref": "#/$defs/condition"},
+        "allowance": {"$ref": "#/$defs/id"}
+      }
+    },
+    "charge_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "quantum", "minimum", "round", "evidence"],
+      "properties": {
+        "scope": {"enum": ["attempt", "item", "billing_period"]},
+        "quantum": {"$ref": "#/$defs/positive_decimal"},
+        "minimum": {"$ref": "#/$defs/decimal"},
+        "round": {"enum": ["ceil", "floor", "half_up"]},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "trigger": {"enum": ["positive_subtotal", "billable_activation"]}
+      }
+    },
+    "price_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["billing_provider", "payer", "currency", "purpose", "clock", "evidence"],
+      "properties": {
+        "billing_provider": {"$ref": "#/$defs/id"},
+        "payer": {"enum": ["direct", "router", "upstream"]},
+        "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "purpose": {"enum": ["billable", "reference"]},
+        "clock": {"$ref": "#/$defs/clock"},
+        "evidence": {"$ref": "#/$defs/evidence_refs"},
+        "time_window": {"$ref": "#/$defs/id"},
+        "components": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/component"}
+        },
+        "factor_groups": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/factor_group"}
+        },
+        "fees": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+          "additionalProperties": {"$ref": "#/$defs/fee"}
+        },
+        "charge_rule": {"$ref": "#/$defs/charge_rule"}
+      },
+      "anyOf": [{"required": ["components"]}, {"required": ["fees"]}]
+    },
+    "cache_lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "usage_rule", "bounds_rule", "price", "max_tokens", "max_lifetime_ms", "evidence"],
+      "properties": {
+        "profile": {"$ref": "#/$defs/id"},
+        "usage_rule": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*@v[1-9][0-9]{0,5}$"},
+        "bounds_rule": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*@v[1-9][0-9]{0,5}$"},
+        "price": {"$ref": "#/$defs/id"},
+        "max_tokens": {"$ref": "#/$defs/positive"},
+        "max_lifetime_ms": {"$ref": "#/$defs/positive"},
+        "evidence": {"$ref": "#/$defs/evidence_refs"}
+      }
+    }
+  }
+}

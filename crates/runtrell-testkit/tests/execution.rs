@@ -164,6 +164,7 @@ fn a22_stale_workspace_copy_and_other_run_are_rejected() {
         req.input = Some(w.snapshot(&a).await.unwrap());
         req.input_files.insert("input".into(), b"old".to_vec());
         let ctx = ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: c.clone(),
             principal: "host".into(),
@@ -249,6 +250,7 @@ fn a18_cancel_is_observed_while_execution_is_running() {
     block_on(async {
         let (_, c, _) = setup().await;
         let ctx = ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: c,
             principal: "host".into(),
@@ -384,6 +386,7 @@ fn workspace_copy_is_fixed_and_collected_files_merge_with_same_base() {
         assert_eq!(req.input_files["input"], b"before");
         req.output_paths.push("generated".into());
         let ctx = ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: c,
             principal: "host".into(),

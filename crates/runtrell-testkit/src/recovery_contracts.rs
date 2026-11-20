@@ -249,7 +249,7 @@ pub async fn failed_unknown_retry_and_owner_recovery<S: ControlStore>(
     let recovery = SettlementRecovery {
         basis: "fake-provider-usage-receipt".into(),
         usage: unknown,
-        price,
+        price: Some(price),
     };
     let command = crate::owner_contracts::command("failed-unknown-recovery");
     let receipt = reopened

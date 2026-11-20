@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+#[cfg(test)]
+use crate::adapter::Wire;
 use crate::{
-    adapter::{Adapter, HttpResult, Wire},
+    adapter::{Adapter, HttpResult},
     *,
 };
 use runtrell::{images::*, *};
@@ -9,9 +11,10 @@ use serde_json::json;
 /// Optional native generateContent image generation and reference-image editing.
 /// No remote lookup, mask support, hidden retry or idempotency claim.
 #[derive(Debug)]
-pub struct GeminiImages(Adapter);
+pub struct GeminiImages(pub(crate) Adapter);
 impl GeminiImages {
-    pub fn new(mut config: Config) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn new(mut config: Config) -> Result<Self> {
         if config.capabilities.images.mask_edit {
             return Err(Error::Unsupported("mask_edit".into()));
         }

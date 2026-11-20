@@ -23,6 +23,7 @@ pub mod file_tools;
 pub use execution::{ExecutionBackend, ExecutionLimits, ExecutionRef};
 
 pub mod budget;
+pub mod models;
 pub use budget::{
     AccountPolicy, OPERATOR_ACTION_WAIT, ReservationPolicy, SchedulingPolicy, SettlementRecord,
     SettlementRecovery,

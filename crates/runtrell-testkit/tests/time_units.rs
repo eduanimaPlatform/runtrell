@@ -69,3 +69,10 @@ fn settle_never_resumes() {
         store,
     ));
 }
+
+#[test]
+fn shared_allowance_consumption_is_atomic_in_memory() {
+    let first = MemoryStore::default();
+    let second = first.clone();
+    block_on(settlement_contracts::shared_allowance(&first, &second));
+}

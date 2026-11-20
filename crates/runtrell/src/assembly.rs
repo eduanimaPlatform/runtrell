@@ -11,6 +11,7 @@ trait ErasedTool: Send + Sync {
     fn authorize_result<'a>(&'a self, run: &'a RunRecord, output: &'a Value) -> Call<'a, ()>;
     fn quote<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, Amount>;
     fn operation_kind(&self) -> OperationKind;
+    fn pricing_snapshot(&self) -> Option<models::PricingSnapshot>;
     fn descriptor(&self) -> ToolDescriptor;
     fn requires_recovery_preparation(&self) -> bool;
     fn prepare_recovery<'a>(
@@ -35,6 +36,9 @@ impl<T: Tool> ErasedTool for Erase<T> {
     }
     fn operation_kind(&self) -> OperationKind {
         self.0.operation_kind()
+    }
+    fn pricing_snapshot(&self) -> Option<models::PricingSnapshot> {
+        self.0.pricing_snapshot()
     }
     fn requires_recovery_preparation(&self) -> bool {
         self.0.requires_recovery_preparation()
@@ -79,6 +83,9 @@ impl Tool for RegisteredTool {
     }
     fn operation_kind(&self) -> OperationKind {
         self.0.operation_kind()
+    }
+    fn pricing_snapshot(&self) -> Option<models::PricingSnapshot> {
+        self.0.pricing_snapshot()
     }
     fn requires_recovery_preparation(&self) -> bool {
         self.0.requires_recovery_preparation()

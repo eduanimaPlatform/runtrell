@@ -995,6 +995,7 @@ async fn pg_document_view_selects_pages_and_attaches_fixed_workspace_and_artifac
             .find(|o| o.request.target == "document.view")
             .unwrap();
         let ctx = ToolContext {
+            managed_send: None,
             claim: claim.clone(),
             principal: "worker".into(),
             operation: op.id.clone(),

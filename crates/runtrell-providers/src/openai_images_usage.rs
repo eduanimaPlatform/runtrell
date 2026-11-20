@@ -2,36 +2,25 @@
 //! Usage normalization for the OpenAI Images API (`/images/generations` and
 //! `/images/edits`). It is separate from the Responses path: the Images response has
 //! its own usage object. Reported cache details are preserved; missing cache
-//! counters are inferred zero only for the exact 2/2.5/2.6 model list below.
+//! counters are inferred zero only for the exact 2/2.5 model list below.
 //!
-//! Sources (read 2026-11-03):
-//! - OpenAI OpenAPI description `openai/openai-openapi`, `main` at c2aecc2 (2026-10-31),
-//!   schema `ImagesUsage`: `total_tokens`, `input_tokens` (text + image prompt tokens),
-//!   `output_tokens` ("image tokens in the output image") and
-//!   `input_tokens_details.{text_tokens,image_tokens}`. There is no cached counter and no
-//!   reasoning counter (and nothing says none is billed, so `reasoning` stays unknown). Live responses may add `output_tokens_details.{image_tokens,text_tokens}`
-//!   (the `ImageGenUsage` shape); it is accepted when consistent and never required.
-//! - Image generation guide (https://developers.openai.com/api/docs/guides/image-generation, read
-//!   2026-11-04), "Cached input pricing": for GPT Image 2 and GPT Image 2.5 cached input
-//!   pricing "doesn't apply to direct Images API requests, including /v1/images/edits".
-//!   Every input token on this endpoint is therefore billed at the ordinary rate, so the
-//!   cached counters are exactly 0 for those models.
-//! - The model IDs of the 2/2.5 families are the ones the OpenAI OpenAPI description lists for
-//!   `CreateImageRequest.model` (`main` at f69b0e1, 2026-11-03) and the guide/pricing pages
-//!   name: [`GPT_IMAGE_2_FAMILY`]. On 2026-11-11 the user decided to apply the same direct
-//!   Images billing rule to the exact 2.6 Sunburst/Flare IDs: their Standard prices match 2.5,
-//!   although the guide's cache exclusion names only 2/2.5. This is an authorized policy
-//!   extrapolation, not an official statement about 2.6. The list is exact; no prefix, suffix,
-//!   dated 2.6 snapshot or future model is inferred from it. Other models and Responses image
-//!   tools keep missing cache counters unknown.
+//! The public image usage schema describes total, input, output, text and image
+//! counters. The guide confirms that 2 and 2.5 do not receive cache discounts
+//! on direct Images requests.
+//! <https://developers.openai.com/api/reference/resources/images/methods/generate>
+//! <https://developers.openai.com/api/docs/guides/image-generation#cached-input-pricing>
 //!
-//! A counter is filled only by the guide statement or the stated user decision.
-//! Everything else stays `None`, with a distinct safe `Usage::unknown_reason`.
+//! Managed 2.6 calls apply the catalog's inherited-structure policy when pricing
+//! these counters. An explicit zero total or zero image input proves that the
+//! cached-image subset is zero.
 use crate::Config;
-use runtrell::{Error, Price, SettlementRecovery, SvgUsage, Usage};
+use runtrell::{Error, SvgUsage, Usage};
+#[cfg(test)]
+use runtrell::{Price, SettlementRecovery};
 use serde_json::Value;
 
 /// Identifier of this rule set; recorded as the basis of an owner settlement recovery.
+#[cfg(test)]
 pub const BASIS: &str = "openai-images-usage-1";
 
 pub const REASON_ABSENT: &str = "IMAGE_USAGE_ABSENT";
@@ -44,17 +33,15 @@ pub const REASON_NO_PRICE: &str = "IMAGE_USAGE_NO_PRICE";
 pub const REASON_OVERFLOW: &str = "IMAGE_USAGE_COST_OVERFLOW";
 pub const REASON_PRICE_COUNTER_UNKNOWN: &str = "IMAGE_USAGE_PRICE_COUNTER_UNKNOWN";
 
-/// Exact direct Images IDs covered by the 2/2.5 guide statement or the 2026-11-11 user decision.
+/// Exact direct Images IDs used by the usage normalization fixtures.
 /// The 2/2.5 dated entries are documented snapshots; no dated 2.6 ID is inferred.
-pub const GPT_IMAGE_2_FAMILY: [&str; 8] = [
+pub const GPT_IMAGE_2_FAMILY: [&str; 6] = [
     "gpt-image-2",
     "gpt-image-2-2026-04-21",
     "gpt-image-2.5-sunburst",
     "gpt-image-2.5-sunburst-2026-09-08",
     "gpt-image-2.5-flare",
     "gpt-image-2.5-flare-2026-09-08",
-    "gpt-image-2.6-sunburst",
-    "gpt-image-2.6-flare",
 ];
 
 /// True only for the exact IDs in [`GPT_IMAGE_2_FAMILY`].
@@ -71,12 +58,13 @@ fn counter(usage: &Value, path: &str) -> Result<Option<u64>, ()> {
 
 /// Normalizes the `usage` of one Images API response. Never fails: a response whose image
 /// arrived but whose usage is not settleable returns counters it can prove and a reason.
-pub fn normalize(config: &Config, response: &Value) -> Usage {
+#[cfg(test)]
+pub(crate) fn normalize(config: &Config, response: &Value) -> Usage {
     normalize_with_svg(config, response, false)
 }
 
 /// SVG generation expects author evidence even when the provider omits it.
-pub fn normalize_with_svg(config: &Config, response: &Value, expects_svg: bool) -> Usage {
+pub(crate) fn normalize_with_svg(config: &Config, response: &Value, expects_svg: bool) -> Usage {
     let mut usage = normalize_image(config, response);
     if expects_svg || response.get("svg_usage").is_some() {
         usage.svg_usage = Some(Box::new(normalize_svg(config, &response["svg_usage"])));
@@ -148,14 +136,20 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
     // The response carries no model field in the published schema; absent means the
     // requested model. A different reported model is priced only if the host declared it
     // an alias of the requested model.
-    let reported = response["model"].as_str();
-    let billed_as_requested =
-        reported.is_none_or(|m| m == limits.model || aliases.iter().any(|alias| alias == m));
+    let reported = response.get("model");
+    let billed_as_requested = reported.is_none_or(|model| {
+        model
+            .as_str()
+            .is_some_and(|m| m == limits.model || aliases.iter().any(|alias| alias == m))
+    });
     let mut u = Usage {
         model: if billed_as_requested {
             limits.model.clone()
         } else {
-            reported.unwrap_or_default().to_owned()
+            reported
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
         },
         ..Usage::default()
     };
@@ -244,6 +238,9 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
         u.cached = u.cached.or(Some(0));
         u.cached_image_input = u.cached_image_input.or(Some(0));
     }
+    if u.cached == Some(0) || (u.cached.is_some() && u.image_input == Some(0)) {
+        u.cached_image_input = u.cached_image_input.or(Some(0));
+    }
     price(config, &mut u, billed_as_requested);
     u
 }
@@ -289,11 +286,11 @@ fn attach_price_evidence(config: &Config, u: &mut Usage, billed_as_requested: bo
     }
 }
 
-/// Builds the owner settlement recovery for stored usage under the same direct Images rule:
-/// the guide statement for 2/2.5 and the 2026-11-11 user decision for 2.6.
+/// Builds the owner settlement recovery for a stored Images wire fixture.
 /// Returns `UsageUnknown` when the model family is not covered (the operation then stays for
 /// the operator) and fills only the cache counters covered by that rule.
-pub fn recovery_for_stored_usage(
+#[cfg(test)]
+pub(crate) fn recovery_for_stored_usage(
     stored: &Usage,
     price: &Price,
 ) -> Result<SettlementRecovery, Error> {
@@ -316,7 +313,7 @@ pub fn recovery_for_stored_usage(
     Ok(SettlementRecovery {
         basis: BASIS.into(),
         usage,
-        price: price.clone(),
+        price: Some(price.clone()),
     })
 }
 

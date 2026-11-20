@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared-instance atomic reference adapter. No disk persistence or process durability.
+use crate::models::{AllowanceDebit, AllowanceLedger};
 use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +17,8 @@ pub struct MemoryStore {
 struct Ledger {
     runs: BTreeMap<String, RunRecord>,
     accounts: BTreeMap<String, Account>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    allowances: BTreeMap<String, AllowancePeriod>,
     operations: BTreeMap<String, Operation>,
     owner_receipts: BTreeMap<String, OwnerReceipt>,
     sessions: BTreeMap<String, (u64, u64)>,
@@ -27,6 +30,46 @@ struct Ledger {
     priority_streak: usize,
     #[serde(skip)]
     fail_next: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct AllowancePeriod {
+    limit: u64,
+    consumed: u64,
+    receipts: BTreeMap<String, (u64, u64)>,
+}
+
+impl AllowanceLedger for MemoryStore {
+    async fn consume_allowance(&self, debit: &AllowanceDebit) -> Result<u64> {
+        debit.validate()?;
+        let key = serde_json::to_string(&(&debit.allowance, &debit.scope, &debit.period))
+            .map_err(|_| Error::Storage)?;
+        self.tx(|state| {
+            let period = state
+                .allowances
+                .entry(key)
+                .or_insert_with(|| AllowancePeriod {
+                    limit: debit.limit,
+                    consumed: 0,
+                    receipts: BTreeMap::new(),
+                });
+            if period.limit != debit.limit {
+                return Err(Error::Conflict);
+            }
+            if let Some(&(quantity, included)) = period.receipts.get(&debit.receipt) {
+                return if quantity == debit.quantity {
+                    Ok(included)
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+            let included = debit.quantity.min(period.limit - period.consumed);
+            period.consumed += included;
+            period
+                .receipts
+                .insert(debit.receipt.clone(), (debit.quantity, included));
+            Ok(included)
+        })
+    }
 }
 impl Default for MemoryStore {
     fn default() -> Self {
@@ -1131,10 +1174,7 @@ impl OperationStore for MemoryStore {
                 }
                 _ => None,
             };
-            let amount = usage
-                .map(|u| old.request.settlement_amount(u))
-                .transpose()?
-                .flatten();
+            let amount = old.request.settlement_result(&result)?;
             let incomplete = amount.is_none() && usage.is_some();
             let state = match &result {
                 ExternalResult::Applied { .. } => OperationState::Applied,
@@ -1160,7 +1200,7 @@ impl OperationStore for MemoryStore {
                     a.reserved = a.reserved.subtract(old.request.reserve);
                     a.used = a.used.checked_add(actual)?;
                     a.settle_quantities(&old.request, usage.unwrap())?;
-                    if a.reached() {
+                    if a.reached() || old.request.managed_overrun(actual) {
                         a.exhausted = true;
                     }
                 } else if unknown {
@@ -1285,7 +1325,7 @@ impl OperationStore for MemoryStore {
                 a.reserved = a.reserved.subtract(old.request.reserve);
                 a.used = a.used.checked_add(record.amount)?;
                 a.settle_quantities(&old.request, &record.settled)?;
-                if a.reached() {
+                if a.reached() || old.request.managed_overrun(record.amount) {
                     a.exhausted = true;
                 }
             }

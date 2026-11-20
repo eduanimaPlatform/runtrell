@@ -1702,6 +1702,7 @@ mod tests {
     }
     fn crash_context() -> ToolContext {
         ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: Claim {
                 run: RunHandle {
@@ -1983,6 +1984,7 @@ mod tests {
         let groups = tempfile::tempdir().unwrap();
         let b = fixture(root.path(), groups.path());
         let c = ToolContext {
+            managed_send: None,
             recovery_proof: None,
             claim: Claim {
                 run: RunHandle {

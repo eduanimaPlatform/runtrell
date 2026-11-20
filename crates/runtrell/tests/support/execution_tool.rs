@@ -70,6 +70,7 @@ pub async fn exercise(backend: impl ExecutionBackend, limits: ExecutionLimits) {
     );
     assert!(tool.diagnostics().is_empty());
     let context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim,
         principal: "host".into(),

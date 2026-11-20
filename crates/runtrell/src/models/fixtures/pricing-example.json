@@ -1,0 +1,978 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-11-20.schema2-example",
+  "profiles": {
+    "claude-messages": {
+      "api_family": "anthropic_messages",
+      "provider": "anthropic",
+      "transport": "https",
+      "origin": "https://api.anthropic.com",
+      "path": "/v1/messages",
+      "method": "POST",
+      "auth": "api_key_header",
+      "evidence": ["haiku-model", "claude-cache", "claude-api-version"],
+      "wire_version": "2023-06-01"
+    },
+    "claude-batch": {
+      "api_family": "anthropic_batches",
+      "provider": "anthropic",
+      "transport": "lro",
+      "origin": "https://api.anthropic.com",
+      "path": "/v1/messages/batches",
+      "method": "POST",
+      "auth": "api_key_header",
+      "evidence": ["claude-batch", "claude-api-version"],
+      "wire_version": "2023-06-01"
+    },
+    "openai-generate": {
+      "api_family": "openai_images",
+      "provider": "openai",
+      "transport": "https",
+      "origin": "https://api.openai.com",
+      "path": "/v1/images/generations",
+      "method": "POST",
+      "auth": "bearer",
+      "evidence": ["openai-image-generate"],
+      "wire_version": "v1"
+    },
+    "openai-edit": {
+      "api_family": "openai_images",
+      "provider": "openai",
+      "transport": "https",
+      "origin": "https://api.openai.com",
+      "path": "/v1/images/edits",
+      "method": "POST",
+      "auth": "bearer",
+      "evidence": ["openai-image-edit"],
+      "wire_version": "v1"
+    },
+    "deepseek-tts": {
+      "api_family": "deepseek_speech",
+      "provider": "deepseek",
+      "transport": "https",
+      "origin": "https://api.deepseek.com",
+      "path": "/v1/tools/tts",
+      "method": "POST",
+      "auth": "bearer",
+      "evidence": ["deepseek-tts"],
+      "wire_version": "v1"
+    },
+    "deepseek-asr": {
+      "api_family": "deepseek_speech",
+      "provider": "deepseek",
+      "transport": "https",
+      "origin": "https://api.deepseek.com",
+      "path": "/v1/tools/asr",
+      "method": "POST",
+      "auth": "bearer",
+      "evidence": ["deepseek-asr"],
+      "wire_version": "v1"
+    },
+    "xai-video": {
+      "api_family": "xai_video",
+      "provider": "xai",
+      "transport": "lro",
+      "origin": "https://api.x.ai",
+      "path": "/v1/videos/generations",
+      "method": "POST",
+      "auth": "bearer",
+      "evidence": ["xai-video-generate", "xai-video-model"],
+      "wire_version": "v1"
+    },
+    "router-chat": {
+      "api_family": "openrouter_chat",
+      "provider": "openrouter",
+      "transport": "https",
+      "origin": "https://openrouter.ai",
+      "path": "/api/v1/chat/completions",
+      "method": "POST",
+      "auth": "bearer",
+      "evidence": ["router-routing", "router-usage"],
+      "wire_version": "v1"
+    },
+    "gemini-generate": {
+      "api_family": "gemini_generate",
+      "wire_version": "v1beta",
+      "provider": "gemini",
+      "transport": "https",
+      "origin": "https://generativelanguage.googleapis.com",
+      "path": "/v1beta/models/{model}:generateContent",
+      "method": "POST",
+      "auth": "api_key_header",
+      "evidence": ["gemini-generate"]
+    },
+    "gemini-cache": {
+      "api_family": "gemini_cache",
+      "wire_version": "v1beta",
+      "provider": "gemini",
+      "transport": "https",
+      "origin": "https://generativelanguage.googleapis.com",
+      "path": "/v1beta/cachedContents",
+      "method": "POST",
+      "auth": "api_key_header",
+      "evidence": ["gemini-cache-api"]
+    }
+  },
+  "models": {
+    "anthropic/claude-haiku-5-5": {"author": "anthropic", "lifecycle": "active", "operations": ["haiku-completion"], "evidence": ["haiku-model"]},
+    "openai/gpt-image-2.6-sunburst": {
+      "author": "openai",
+      "lifecycle": "active",
+      "operations": ["sunburst-generate", "sunburst-edit"],
+      "evidence": ["sunburst-model"]
+    },
+    "deepseek/tts": {"author": "deepseek", "lifecycle": "active", "operations": ["deepseek-speech"], "evidence": ["deepseek-tts"]},
+    "deepseek/asr": {
+      "author": "deepseek",
+      "lifecycle": "active",
+      "operations": ["deepseek-transcribe"],
+      "evidence": ["deepseek-asr"]
+    },
+    "xai/grok-imagine-video-1.5-lite": {
+      "author": "xai",
+      "lifecycle": "active",
+      "operations": ["grok-video-generate"],
+      "evidence": ["xai-video-model"]
+    },
+    "openrouter/meta-llama/llama-3.1-8b-instruct": {
+      "author": "meta-llama",
+      "lifecycle": "active",
+      "operations": ["router-llama-chat"],
+      "evidence": ["router-llama-endpoints"]
+    },
+    "gemini/gemini-3.5-flash-lite": {
+      "author": "google",
+      "lifecycle": "active",
+      "operations": ["gemini-flash-lite-completion"],
+      "evidence": ["gemini-flash-lite"]
+    }
+  },
+  "operations": {
+    "haiku-completion": {
+      "kind": "completion",
+      "input": ["text", "image"],
+      "output": ["text"],
+      "capabilities": {"tools": ["web_search"], "cache_write_seconds": [300, 3600]},
+      "default_binding": "standard-global",
+      "bindings": {
+        "standard-global": {
+          "profile": "claude-messages",
+          "request_model": "claude-haiku-5-5",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "anthropic.haiku_messages@v1",
+          "bounds_rule": "anthropic.haiku@v1",
+          "effects": {
+            "default": {
+              "effective_tier": "standard",
+              "mode": "direct",
+              "prices": ["haiku-tokens"],
+              "tool_prices": {"web_search": "claude-web-search"}
+            }
+          },
+          "evidence": ["haiku-model", "claude-cache", "claude-pricing"],
+          "limits": {"context_tokens": 1000000, "max_output_tokens": 128000}
+        },
+        "standard-us": {
+          "profile": "claude-messages",
+          "request_model": "claude-haiku-5-5",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "us_only",
+          "usage_rule": "anthropic.haiku_messages@v1",
+          "bounds_rule": "anthropic.haiku@v1",
+          "effects": {
+            "default": {
+              "effective_tier": "standard",
+              "mode": "direct",
+              "prices": ["haiku-tokens"],
+              "tool_prices": {"web_search": "claude-web-search"}
+            }
+          },
+          "evidence": ["haiku-model", "claude-cache", "claude-pricing"],
+          "limits": {"context_tokens": 1000000, "max_output_tokens": 128000}
+        },
+        "batch-global": {
+          "profile": "claude-batch",
+          "request_model": "claude-haiku-5-5",
+          "status": "documented",
+          "requested_tier": "batch",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "anthropic.batch_haiku@v1",
+          "bounds_rule": "anthropic.haiku@v1",
+          "effects": {
+            "default": {
+              "effective_tier": "batch",
+              "mode": "direct",
+              "prices": ["haiku-tokens"],
+              "tool_prices": {"web_search": "claude-web-search"}
+            }
+          },
+          "evidence": ["haiku-model", "claude-cache", "claude-pricing"],
+          "limits": {"context_tokens": 1000000, "max_output_tokens": 128000}
+        },
+        "batch-us": {
+          "profile": "claude-batch",
+          "request_model": "claude-haiku-5-5",
+          "status": "documented",
+          "requested_tier": "batch",
+          "plan": "paid",
+          "residency": "us_only",
+          "usage_rule": "anthropic.batch_haiku@v1",
+          "bounds_rule": "anthropic.haiku@v1",
+          "effects": {
+            "default": {
+              "effective_tier": "batch",
+              "mode": "direct",
+              "prices": ["haiku-tokens"],
+              "tool_prices": {"web_search": "claude-web-search"}
+            }
+          },
+          "evidence": ["haiku-model", "claude-cache", "claude-pricing"],
+          "limits": {"context_tokens": 1000000, "max_output_tokens": 128000}
+        }
+      },
+      "evidence": ["haiku-model", "claude-batch", "claude-search"]
+    },
+    "sunburst-generate": {
+      "kind": "raster_generate",
+      "input": ["text"],
+      "output": ["image"],
+      "capabilities": {
+        "image_qualities": ["low", "medium", "high", "xhigh", "max"],
+        "image_sizes": ["1024x1024", "1536x1024", "1024x1536"],
+        "formats": ["png"]
+      },
+      "default_binding": "standard",
+      "bindings": {
+        "standard": {
+          "profile": "openai-generate",
+          "request_model": "gpt-image-2.6-sunburst",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "openai.sunburst_direct_generate@v1",
+          "bounds_rule": "openai.sunburst_raster@v1",
+          "effects": {"default": {"effective_tier": "standard", "mode": "direct", "prices": ["sunburst-generate-tokens"]}},
+          "evidence": ["sunburst-model", "openai-image-guide", "openai-image-generate"]
+        }
+      },
+      "evidence": ["sunburst-model", "openai-image-guide"]
+    },
+    "sunburst-edit": {
+      "kind": "raster_edit",
+      "input": ["text", "image"],
+      "output": ["image"],
+      "capabilities": {
+        "image_qualities": ["low", "medium", "high", "xhigh", "max"],
+        "image_sizes": ["1024x1024", "1536x1024", "1024x1536"],
+        "formats": ["png"]
+      },
+      "default_binding": "standard",
+      "bindings": {
+        "standard": {
+          "profile": "openai-edit",
+          "request_model": "gpt-image-2.6-sunburst",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "openai.sunburst_direct_edit@v1",
+          "bounds_rule": "openai.sunburst_raster@v1",
+          "effects": {"default": {"effective_tier": "standard", "mode": "direct", "prices": ["sunburst-edit-tokens"]}},
+          "evidence": ["sunburst-model", "openai-image-guide", "openai-image-edit"]
+        }
+      },
+      "evidence": ["sunburst-model", "openai-image-guide"]
+    },
+    "deepseek-speech": {
+      "kind": "speech_synthesize",
+      "input": ["text"],
+      "output": ["audio"],
+      "capabilities": {"formats": ["wav", "pcm"]},
+      "default_binding": "standard",
+      "bindings": {
+        "standard": {
+          "profile": "deepseek-tts",
+          "request_model": null,
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "deepseek.tts@v1",
+          "bounds_rule": "deepseek.tts@v1",
+          "effects": {"default": {"effective_tier": "standard", "mode": "direct", "prices": ["deepseek-tts-chars"]}},
+          "evidence": ["deepseek-tts"],
+          "limits": {"input_characters": 10000, "request_bytes": 65536}
+        }
+      },
+      "evidence": ["deepseek-tts"]
+    },
+    "deepseek-transcribe": {
+      "kind": "transcribe",
+      "input": ["audio"],
+      "output": ["text"],
+      "capabilities": {"media_input": ["multipart"], "accepted_mime_types": ["audio/wav", "audio/ogg"]},
+      "default_binding": "standard",
+      "bindings": {
+        "standard": {
+          "profile": "deepseek-asr",
+          "request_model": null,
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "deepseek.asr@v1",
+          "bounds_rule": "deepseek.asr@v1",
+          "effects": {"default": {"effective_tier": "standard", "mode": "direct", "prices": ["deepseek-asr-duration"]}},
+          "evidence": ["deepseek-asr"],
+          "limits": {"input_media_ms": 120000, "attachment_bytes": 8388608}
+        }
+      },
+      "evidence": ["deepseek-asr"]
+    },
+    "grok-video-generate": {
+      "kind": "video_generate",
+      "input": ["text", "image"],
+      "output": ["video"],
+      "capabilities": {"video_resolutions": ["480p", "720p", "1080p"], "media_modes": ["text_to_video", "image_to_video"]},
+      "default_binding": "standard",
+      "bindings": {
+        "standard": {
+          "profile": "xai-video",
+          "request_model": "grok-imagine-video-1.5-lite",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "xai.video_generate@v1",
+          "bounds_rule": "xai.video_generate@v1",
+          "effects": {"default": {"effective_tier": "standard", "mode": "direct", "prices": ["xai-video-lite"]}},
+          "evidence": ["xai-video-generate", "xai-video-model"],
+          "limits": {"output_media_ms": 15000, "images_in": 1, "outputs": 1}
+        }
+      },
+      "evidence": ["xai-video-model", "xai-video-generate"]
+    },
+    "router-llama-chat": {
+      "kind": "completion",
+      "input": ["text"],
+      "output": ["text"],
+      "capabilities": {},
+      "default_binding": "deepinfra-standard",
+      "bindings": {
+        "deepinfra-standard": {
+          "profile": "router-chat",
+          "request_model": "meta-llama/llama-3.1-8b-instruct",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "openrouter.llama_chat@v1",
+          "bounds_rule": "openrouter.llama_chat@v1",
+          "effects": {
+            "default": {
+              "effective_tier": "standard",
+              "mode": "routed",
+              "prices": ["router-deepinfra-llama"],
+              "endpoint_tag": "deepinfra/fp8",
+              "upstream_provider": "deepinfra"
+            }
+          },
+          "evidence": ["router-llama-endpoints", "router-routing", "router-usage", "router-byok"],
+          "allow_fallbacks": false,
+          "limits": {"context_tokens": 131072, "max_output_tokens": 16384}
+        }
+      },
+      "evidence": ["router-llama-endpoints", "router-routing"]
+    },
+    "gemini-flash-lite-completion": {
+      "kind": "completion",
+      "input": ["text"],
+      "output": ["text"],
+      "capabilities": {"tools": ["web_search"]},
+      "default_binding": "standard",
+      "bindings": {
+        "standard": {
+          "profile": "gemini-generate",
+          "request_model": "gemini-3.5-flash-lite",
+          "status": "documented",
+          "requested_tier": "standard",
+          "plan": "paid",
+          "residency": "global",
+          "usage_rule": "gemini.flash_lite_generate@v1",
+          "bounds_rule": "gemini.flash_lite_generate@v1",
+          "effects": {
+            "default": {
+              "effective_tier": "standard",
+              "mode": "direct",
+              "prices": ["gemini-flash-lite-tokens"],
+              "tool_prices": {"web_search": "gemini-search-queries"},
+              "cache_lifecycle": {
+                "profile": "gemini-cache",
+                "usage_rule": "gemini.cache_usage@v1",
+                "bounds_rule": "gemini.cache_ttl@v1",
+                "price": "gemini-cache-storage",
+                "max_tokens": 100000,
+                "max_lifetime_ms": 1800000,
+                "evidence": ["gemini-cache-api", "gemini-pricing"]
+              }
+            }
+          },
+          "evidence": ["gemini-generate", "gemini-flash-lite", "gemini-pricing"],
+          "limits": {"max_input_tokens": 1048576, "max_output_tokens": 65536}
+        }
+      },
+      "evidence": ["gemini-flash-lite", "gemini-cache-api", "gemini-search"]
+    }
+  },
+  "price_profiles": {
+    "haiku-tokens": {
+      "billing_provider": "anthropic",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "input": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text", "image"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.10",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 0, "max_exclusive": 100001}}
+            },
+            {
+              "state": "priced",
+              "amount": "0.50",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 100001}}
+            }
+          ]
+        },
+        "read": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text", "image"], "class": "cache_read"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.01",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 0, "max_exclusive": 100001}}
+            },
+            {
+              "state": "priced",
+              "amount": "0.05",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 100001}}
+            }
+          ]
+        },
+        "write-5m": {
+          "meter": {
+            "unit": "token",
+            "direction": "input",
+            "modalities": ["text", "image"],
+            "class": "cache_write",
+            "retention_seconds": 300
+          },
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.125",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 0, "max_exclusive": 100001}}
+            },
+            {
+              "state": "priced",
+              "amount": "0.625",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 100001}}
+            }
+          ]
+        },
+        "write-1h": {
+          "meter": {
+            "unit": "token",
+            "direction": "input",
+            "modalities": ["text", "image"],
+            "class": "cache_write",
+            "retention_seconds": 3600
+          },
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.20",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 0, "max_exclusive": 100001}}
+            },
+            {
+              "state": "priced",
+              "amount": "1.00",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 100001}}
+            }
+          ]
+        },
+        "output": {
+          "meter": {"unit": "token", "direction": "output", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.50",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 0, "max_exclusive": 100001}}
+            },
+            {
+              "state": "priced",
+              "amount": "2.50",
+              "per": "1000000",
+              "evidence": ["claude-pricing"],
+              "when": {"prompt_tokens": {"min": 100001}}
+            }
+          ]
+        }
+      },
+      "evidence": ["claude-pricing"],
+      "factor_groups": {
+        "tier": {
+          "components": ["input", "read", "write-5m", "write-1h", "output"],
+          "rows": [
+            {"when": {"tier": ["standard"]}, "factor": "1", "evidence": ["claude-pricing"]},
+            {"when": {"tier": ["batch"]}, "factor": "0.5", "evidence": ["claude-pricing"]}
+          ]
+        },
+        "residency": {
+          "components": ["input", "read", "write-5m", "write-1h", "output"],
+          "rows": [
+            {"when": {"residency": ["global"]}, "factor": "1", "evidence": ["claude-pricing"]},
+            {"when": {"residency": ["us_only"]}, "factor": "1.1", "evidence": ["claude-pricing"]}
+          ]
+        }
+      }
+    },
+    "claude-web-search": {
+      "billing_provider": "anthropic",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "searches": {
+          "meter": {"unit": "tool_call", "direction": "neutral", "item_kind": "web_search"},
+          "bill_on": "success",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "10", "per": "1000", "evidence": ["claude-search"]}]
+        }
+      },
+      "evidence": ["claude-search", "claude-batch"]
+    },
+    "sunburst-generate-tokens": {
+      "billing_provider": "openai",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "text-in": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "5", "per": "1000000", "evidence": ["openai-pricing"]}]
+        },
+        "text-cache": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "cache_read"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "1.25", "per": "1000000", "evidence": ["openai-pricing"]}]
+        },
+        "image-out": {
+          "meter": {"unit": "token", "direction": "output", "modalities": ["image"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "30", "per": "1000000", "evidence": ["openai-pricing"]}]
+        }
+      },
+      "evidence": ["sunburst-model", "openai-pricing"]
+    },
+    "sunburst-edit-tokens": {
+      "billing_provider": "openai",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "text-in": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "5", "per": "1000000", "evidence": ["openai-pricing"]}]
+        },
+        "text-cache": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "cache_read"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "1.25", "per": "1000000", "evidence": ["openai-pricing"]}]
+        },
+        "image-out": {
+          "meter": {"unit": "token", "direction": "output", "modalities": ["image"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "30", "per": "1000000", "evidence": ["openai-pricing"]}]
+        },
+        "image-in": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["image"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "8", "per": "1000000", "evidence": ["openai-pricing"]}]
+        },
+        "image-cache": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["image"], "class": "cache_read"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "2", "per": "1000000", "evidence": ["openai-pricing"]}]
+        }
+      },
+      "evidence": ["sunburst-model", "openai-pricing"]
+    },
+    "deepseek-tts-chars": {
+      "billing_provider": "deepseek",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "chars": {
+          "meter": {
+            "unit": "character",
+            "direction": "input",
+            "modalities": ["text"],
+            "class": "base",
+            "character_rule": "deepseek_weighted"
+          },
+          "bill_on": "measured",
+          "rounding_known": false,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.45",
+              "per": "10000",
+              "evidence": ["deepseek-tts"],
+              "when": {"promotion": [false]}
+            },
+            {
+              "state": "priced",
+              "amount": "0.225",
+              "per": "10000",
+              "evidence": ["deepseek-tts"],
+              "when": {"promotion": [true]}
+            }
+          ]
+        }
+      },
+      "evidence": ["deepseek-pricing", "deepseek-tts"]
+    },
+    "deepseek-asr-duration": {
+      "billing_provider": "deepseek",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "audio-in": {
+          "meter": {"unit": "media_ms", "direction": "input", "modalities": ["audio"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.116",
+              "per": "3600000",
+              "evidence": ["deepseek-asr"],
+              "when": {"promotion": [false]}
+            },
+            {
+              "state": "priced",
+              "amount": "0.058",
+              "per": "3600000",
+              "evidence": ["deepseek-asr"],
+              "when": {"promotion": [true]}
+            }
+          ],
+          "quantization": [{"axis": "quantity", "scope": "item", "round": "ceil", "step": "1000", "minimum": "0"}]
+        }
+      },
+      "evidence": ["deepseek-pricing", "deepseek-asr"]
+    },
+    "xai-video-lite": {
+      "billing_provider": "xai",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "image-in": {
+          "meter": {"unit": "image", "direction": "input", "modalities": ["image"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "0.01", "per": "1", "evidence": ["xai-pricing"]}],
+          "applies": {"has_references": [true]}
+        },
+        "video-out": {
+          "meter": {"unit": "media_ms", "direction": "output", "modalities": ["video"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": false,
+          "rates": [
+            {
+              "state": "priced",
+              "amount": "0.02",
+              "per": "1000",
+              "evidence": ["xai-pricing"],
+              "when": {"resolution": ["480p"]}
+            },
+            {
+              "state": "priced",
+              "amount": "0.03",
+              "per": "1000",
+              "evidence": ["xai-pricing"],
+              "when": {"resolution": ["720p"]}
+            },
+            {
+              "state": "priced",
+              "amount": "0.14",
+              "per": "1000",
+              "evidence": ["xai-pricing"],
+              "when": {"resolution": ["1080p"]}
+            }
+          ]
+        }
+      },
+      "evidence": ["xai-pricing"]
+    },
+    "router-deepinfra-llama": {
+      "billing_provider": "openrouter",
+      "payer": "router",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "input": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "0.00000002", "per": "1", "evidence": ["router-llama-endpoints"]}]
+        },
+        "output": {
+          "meter": {"unit": "token", "direction": "output", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "0.00000004", "per": "1", "evidence": ["router-llama-endpoints"]}]
+        }
+      },
+      "evidence": ["router-llama-endpoints"]
+    },
+    "gemini-flash-lite-tokens": {
+      "billing_provider": "gemini",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "input": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "0.30", "per": "1000000", "evidence": ["gemini-pricing"]}]
+        },
+        "read": {
+          "meter": {"unit": "token", "direction": "input", "modalities": ["text"], "class": "cache_read"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "0.03", "per": "1000000", "evidence": ["gemini-pricing"]}]
+        },
+        "output": {
+          "meter": {"unit": "token", "direction": "output", "modalities": ["text"], "class": "base"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "2.50", "per": "1000000", "evidence": ["gemini-pricing"]}]
+        }
+      },
+      "evidence": ["gemini-pricing"]
+    },
+    "gemini-cache-storage": {
+      "billing_provider": "gemini",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "usage_event_at",
+      "components": {
+        "storage": {
+          "meter": {"unit": "size_ms", "direction": "neutral"},
+          "bill_on": "measured",
+          "rounding_known": false,
+          "rates": [{"state": "priced", "amount": "1.00", "per": "3600000000000", "evidence": ["gemini-pricing"]}]
+        }
+      },
+      "evidence": ["gemini-pricing"]
+    },
+    "gemini-search-queries": {
+      "billing_provider": "gemini",
+      "payer": "direct",
+      "currency": "USD",
+      "purpose": "billable",
+      "clock": "provider_reported",
+      "components": {
+        "queries": {
+          "meter": {"unit": "search_query", "direction": "neutral", "item_kind": "web_search"},
+          "bill_on": "measured",
+          "rounding_known": true,
+          "rates": [{"state": "priced", "amount": "14", "per": "1000", "evidence": ["gemini-search", "gemini-pricing"]}],
+          "allowance": "gemini-web-search-shared"
+        }
+      },
+      "evidence": ["gemini-search", "gemini-pricing"]
+    }
+  },
+  "evidence": {
+    "claude-pricing": {
+      "url": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked_on": "2026-11-20",
+      "topic": "pricing"
+    },
+    "haiku-model": {
+      "url": "https://platform.claude.com/docs/en/models/haiku-5-5/overview",
+      "checked_on": "2026-11-20",
+      "topic": "capabilities"
+    },
+    "claude-cache": {
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "claude-batch": {
+      "url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "claude-search": {
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "openai-pricing": {
+      "url": "https://developers.openai.com/api/docs/pricing#multimodal-models",
+      "checked_on": "2026-11-20",
+      "topic": "pricing"
+    },
+    "sunburst-model": {
+      "url": "https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst",
+      "checked_on": "2026-11-20",
+      "topic": "capabilities"
+    },
+    "openai-image-guide": {
+      "url": "https://developers.openai.com/api/docs/guides/image-generation",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "openai-image-generate": {
+      "url": "https://developers.openai.com/api/reference/resources/images/methods/generate",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "openai-image-edit": {
+      "url": "https://developers.openai.com/api/reference/resources/images/methods/edit",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "deepseek-pricing": {
+      "url": "https://api-docs.deepseek.com/quick_start/pricing/#speech-pricing",
+      "checked_on": "2026-11-20",
+      "topic": "pricing"
+    },
+    "deepseek-tts": {"url": "https://api-docs.deepseek.com/guides/tts/", "checked_on": "2026-11-20", "topic": "api"},
+    "deepseek-asr": {"url": "https://api-docs.deepseek.com/guides/asr/", "checked_on": "2026-11-20", "topic": "api"},
+    "xai-pricing": {"url": "https://docs.x.ai/developers/pricing", "checked_on": "2026-11-20", "topic": "pricing"},
+    "xai-video-model": {
+      "url": "https://docs.x.ai/developers/models/grok-imagine-video-1.5-lite",
+      "checked_on": "2026-11-20",
+      "topic": "capabilities"
+    },
+    "xai-video-generate": {
+      "url": "https://docs.x.ai/developers/model-capabilities/video/generation",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "router-llama-endpoints": {
+      "url": "https://openrouter.ai/api/v1/models/meta-llama/llama-3.1-8b-instruct/endpoints",
+      "checked_on": "2026-11-20",
+      "topic": "pricing"
+    },
+    "router-routing": {
+      "url": "https://openrouter.ai/docs/guides/routing/provider-selection#targeting-specific-provider-endpoints",
+      "checked_on": "2026-11-20",
+      "topic": "routing"
+    },
+    "router-usage": {
+      "url": "https://openrouter.ai/docs/cookbook/administration/usage-accounting",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "router-byok": {"url": "https://openrouter.ai/docs/guides/overview/auth/byok", "checked_on": "2026-11-20", "topic": "routing"},
+    "claude-api-version": {"url": "https://platform.claude.com/docs/en/api/versioning", "checked_on": "2026-11-20", "topic": "api"},
+    "gemini-generate": {
+      "url": "https://aistudio.google.com/api-reference/generate-content",
+      "checked_on": "2026-11-20",
+      "topic": "api"
+    },
+    "gemini-cache-api": {"url": "https://aistudio.google.com/api-reference/caching", "checked_on": "2026-11-20", "topic": "api"},
+    "gemini-flash-lite": {
+      "url": "https://aistudio.google.com/docs/models/gemini-3.5-flash-lite",
+      "checked_on": "2026-11-20",
+      "topic": "capabilities"
+    },
+    "gemini-pricing": {
+      "url": "https://aistudio.google.com/docs/pricing#gemini-3.5-flash-lite",
+      "checked_on": "2026-11-20",
+      "topic": "pricing"
+    },
+    "gemini-search": {
+      "url": "https://aistudio.google.com/docs/google-search#pricing",
+      "checked_on": "2026-11-20",
+      "topic": "pricing"
+    }
+  },
+  "allowances": {
+    "gemini-web-search-shared": {
+      "kind": "included_usage",
+      "scope": "project",
+      "period": "month",
+      "amount": "5000",
+      "evidence": ["gemini-search", "gemini-pricing"],
+      "zone_status": "unknown"
+    }
+  }
+}

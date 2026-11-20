@@ -24,7 +24,7 @@ Policyは毎回現在の認可を検査する。SecretProviderは限定context�
 
 ## 使用量が精算できない操作（operator action）
 
-完全な結果を保存済みだが usage を精算できない操作は、予約と unknown を保持する。再照会しても同じ保存結果が返るため、lookup 窓（`recovery_until`、Unix ms）が尽きた操作（窓が無い操作は即時）が1つでもあり、直前の lookup で同じ証拠を確認できたとき、Run は `Waiting(OPERATOR_ACTION_WAIT)` に入り、以後 driver は lookup・provider 呼出し・書込みをせず待つ。結果が欠落/不完全な操作（`complete: false` の model 応答、input/output 合計の無い model 結果＝応答喪失）はこの対象外で、従来どおり再開時に lookup して回収または `OutcomeUnknown` に至る。回数上限は無く、状態は証拠に従う。owner は `OperationStore::settle_recovered` で元の操作を一度だけ冪等に精算する（旧値・価格根拠・新値を `Operation.recovery` に保存、再送0）。精算できない証拠は operator 対応のまま残る。精算（`settle_recovered`）は実行を再開しない: Run は operator hold（`Waiting(OPERATOR_ACTION_WAIT)`、owner 解除）に留まり、旧 claim の worker は次の fence で `OwnershipLost`、`claim` 自体は成功し得る（保守用。hold の状態は変えない）が、新規業務の検査（`check(.., true)`・`begin`・`mark_sent`・`checkpoint`）は `Closed` で拒否され、`drive` は lookup も送信もしない。再開は別の owner 操作 `OperationStore::resume_held` だけ。詳細は [budget](budget.md#price-lines-and-owner-settlement-recovery)、OpenAI Images の usage は [providers](providers.md#openai-images-usage)。
+完全な結果を保存済みだが usage を精算できない操作は、予約と unknown を保持する。再照会しても同じ保存結果が返るため、lookup 窓（`recovery_until`、Unix ms）が尽きた操作（窓が無い操作は即時）が1つでもあり、直前の lookup で同じ証拠を確認できたとき、Run は `Waiting(OPERATOR_ACTION_WAIT)` に入り、以後 driver は lookup・provider 呼出し・書込みをせず待つ。結果が欠落/不完全な操作（`complete: false` の model 応答、input/output 合計の無い model 結果＝応答喪失）はこの対象外で、従来どおり再開時に lookup して回収または `OutcomeUnknown` に至る。回数上限は無く、状態は証拠に従う。owner は `OperationStore::settle_recovered` で元の操作を一度だけ冪等に精算する（旧値・価格根拠・新値を `Operation.recovery` に保存、再送0）。精算できない証拠は operator 対応のまま残る。精算（`settle_recovered`）は実行を再開しない: Run は operator hold（`Waiting(OPERATOR_ACTION_WAIT)`、owner 解除）に留まり、旧 claim の worker は次の fence で `OwnershipLost`、`claim` 自体は成功し得る（保守用。hold の状態は変えない）が、新規業務の検査（`check(.., true)`・`begin`・`mark_sent`・`checkpoint`）は `Closed` で拒否され、`drive` は lookup も送信もしない。再開は別の owner 操作 `OperationStore::resume_held` だけ。詳細は [budget](budget.md#price-lines-and-owner-settlement-recovery)、OpenAI Images の usage は [providers](providers.md#openai-images-usage-and-reservation)。
 
 ## 時刻と期間の単位
 
@@ -61,7 +61,7 @@ wireはRust traitと別。schema=1、IDは文字列、金額は整数micro-USD�
 
 任意の汎用添付は `ModelRequest.attachments` に固定対象を保存する。外部参照は ID・版・ページ範囲・MIME・bytes・SHA-256、保存済み参照は既存の `ImageReference` の Workspace／Artifact 契約を使う。`ImageModel` は保存済み対象を見積り前に認可・取得し、同じ `PreparedModelRequest` の bytes を送る。外部対象は `attachments::AttachmentResolver` が送信直前に URL／bytes を解決し、版・範囲・metadata の不一致を拒否する。bytes のサイズ・hash は実測、URL の内容保証は resolver の固定版契約であり Runtrell の独立検証ではない。lookup は別の `authorize` だけを呼び、原本取得・URL 発行・推論再送をしない。解決 RPC と Provider 推論 HTTP は別で、送信前の解決失敗は `ATTACHMENT_NOT_SENT`（推論 usage 0）、送信後の応答喪失は Unknown・予約保持。`document_view::DocumentView` は PDF ページ数取得・範囲選択と PNG/JPEG/WebP の既存画像入力を提供し、`ToolSet::document_view` で選択する。詳細は [attachments](attachments.md) と [providers](providers.md#contract) を参照。
 
-費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。実際の価格・品質値はhostが供給する。provider形式変換は任意の公開[provider adapter](providers.md)が提供する。詳細は[budget](budget.md)。
+費用計算の公開APIは既存のUsage・Price・ModelLimitsへ統合する。Usage.total()は費用観測と独立した総量、Price.cost()は交差を含む区分別の実料金、Price.estimate(input_upper_bound, output_allowance)は最悪単価の予約上界を返す。ModelLimits.estimate()は接続先のcontext/出力指定範囲とmodel/価格一致も検査する。ModelLimits.min_max_output_tokensは技術的な指定下限、ReservationPolicy::Shrink.min_output_budget_tokensはhostの品質上の予約枠下限であり、実生成量の下限ではない。公式adapterでは同梱カタログの価格snapshotを用いる。品質と業務予算はhostが指定する。独自ModelPort・Toolの価格はhostの契約に従う。provider形式変換は任意の公開[provider adapter](providers.md)が提供する。詳細は[budget](budget.md)。
 
 ## 任意の標準構成（rt-3c）
 
@@ -265,6 +265,7 @@ pub struct RunHandle {
 }
 
 pub struct ToolContext {
+    pub managed_send: Option<ManagedSend>,
     pub recovery_proof: Option<RecoveryProof>,
     pub claim: Claim,
     pub principal: String,
@@ -486,6 +487,9 @@ pub trait ModelPort: Send + Sync {
         RetryPolicy::default()
     }
     fn limits(&self) -> ModelLimits;
+    fn pricing_snapshot(&self, _model: &str) -> Option<crate::models::PricingSnapshot> {
+        None
+    }
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
     /// Recovery scope and retention in milliseconds; the driver pins
     /// `recovery_until = Clock::now() + retention` (checked).
@@ -504,6 +508,9 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
+        None
+    }
     /// Recheck live authorization for this exact model input before either a new
     /// invocation or replaying a settled result into model history. This hook
     /// must not acquire or expose the referenced content.

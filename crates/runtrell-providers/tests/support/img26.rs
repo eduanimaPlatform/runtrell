@@ -19,8 +19,8 @@ async fn img26_svg_wire_prices_image_and_author_usage() {
     let mut body = image_response();
     body["data"][0]["b64_json"] = json!(STANDARD.encode(SVG_SOURCE));
     body["usage"] = json!({"total_tokens":935,"input_tokens":111,"output_tokens":824,
-        "input_tokens_details":{"text_tokens":111,"image_tokens":0,"cached_tokens":null,
-            "cached_tokens_details":{"image_tokens":null}},
+        "input_tokens_details":{"text_tokens":111,"image_tokens":0,"cached_tokens":0,
+            "cached_tokens_details":{"image_tokens":0}},
         "output_tokens_details":{"image_tokens":824,"text_tokens":0}});
     body["svg_usage"] = json!({"model":"gpt-6-luna","input_tokens":1583,
         "output_tokens":2304,"reasoning_tokens":1779,"total_tokens":3887});
@@ -444,7 +444,7 @@ async fn pg_img26_author_cost_settles_once_and_unknown_author_recovers_without_s
             let recovery = SettlementRecovery {
                 basis: "fixture-verified-author-price".into(),
                 usage: recovered,
-                price: image_price,
+                price: Some(image_price),
             };
             let command = OwnerCommand {
                 key: "settle-author".into(),
@@ -501,5 +501,88 @@ async fn pg_img26_author_cost_settles_once_and_unknown_author_recovers_without_s
         .unwrap();
         assert_eq!(settled, 1);
         assert_eq!(http.await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn managed_img26_estimates_and_settles_bounded_raster_requests() {
+    use runtrell_testkit::FakeModel;
+    for (id, action, cache, expected) in [
+        ("openai/gpt-image-2.6-flare", ImageAction::Generate, Some(0), Some(155)),
+        ("openai/gpt-image-2.6-sunburst", ImageAction::Edit, Some(0), Some(171)),
+        ("openai/gpt-image-2.6-flare", ImageAction::Generate, None, Some(155)),
+        ("openai/gpt-image-2.6-flare", ImageAction::Edit, None, Some(171)),
+        ("openai/gpt-image-2.6-sunburst", ImageAction::Generate, None, Some(155)),
+        ("openai/gpt-image-2.6-sunburst", ImageAction::Edit, None, Some(171)),
+        ("openai/gpt-image-2.6-sunburst", ImageAction::Edit, Some(1), None),
+    ] {
+        let edit = action == ImageAction::Edit;
+        let mut response = image_response();
+        if !edit {
+            response["usage"]["input_tokens"] = json!(1);
+            response["usage"]["input_tokens_details"]["image_tokens"] = json!(0);
+        }
+        if let Some(cache) = cache {
+            response["usage"]["input_tokens_details"]["cached_tokens"] = json!(cache);
+        }
+        let (url, http) = server(200, "", response).await;
+        let runs = Arc::new(MemoryStore::default());
+        let account = runs.create_account("tenant", Amount::new(100_000, 300_000), None).await.unwrap();
+        let run = runs.start(RunSpec::new("tenant", "raster", account.clone(), "draw")).await.unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let claim = runs.claim(&run, "worker", now, 100_000).await.unwrap();
+        let access = Access::owner(Namespace { owner: run.clone(), agent: "main".into() });
+        let clock = TestClock::default();
+        clock.set(now);
+        let mut provider = Images::connect(id, if edit { models::OperationKind::RasterEdit } else { models::OperationKind::RasterGenerate }, None, Connection {
+            run: run.clone(), session: None, credentials: Arc::new(|_| Ok(ApiKey::new("FIXTURE-KEY"))),
+            attachment_resolver: None, retry_policy: RetryPolicy::default(), timeout_ms: 10000,
+            context_cap: None, input_token_cap: None, max_output_tokens: None, reasoning: None,
+        }).unwrap();
+        provider.set_fixture_endpoint(url);
+        let artifacts = DataStore::memory(StoragePolicy::default());
+        let mut arguments = json!({"prompt":"draw", "size":"1536x1024", "quality":"medium"});
+        if edit {
+            let staged = ArtifactStore::stage_named(&artifacts, &access, ArtifactSpec {
+                id: "reference.png".into(), media_type: "image/png".into(), class: DataClass::Intermediate,
+            }, &png(), now).await.unwrap();
+            let image = ArtifactStore::save(&artifacts, &access, staged, now).await.unwrap();
+            arguments["references"] = json!([ImageReference::Artifact(image)]);
+        }
+        let tool = ImageTool {
+            provider, resolver: ImageResolver { store: artifacts, policy: FakePolicy::default(), accesses: vec![access.clone()], limits: ImageLimits::default() },
+            runs: runs.clone(), clock: clock.clone(), output_access: access,
+            config: ImageToolConfig { action, reserve: Amount::default(), timeout: 10_000 },
+        };
+        for (key, value) in [("quality", json!("auto")), ("size", Value::Null), ("prompt", json!("a".repeat(4097)))] {
+            let mut invalid = arguments.clone();
+            invalid[key] = value;
+            assert!(tool.quote(&runs.get(&run).await.unwrap(), &invalid).await.is_err(), "accepted {key}");
+        }
+        let name = tool.descriptor().name;
+        let runtime = Runtime {
+            store: runs.clone(), tools: vec![tool], policy: FakePolicy::default(), clock,
+            model: FakeModel::scripted(vec![FakeModel::calls(vec![ToolCall { id: "raster".into(), name, arguments }]), FakeModel::decision(json!({"decision":"answered"}))]),
+            validator: Arc::new(DecisionValidator::default()), finalizer: Arc::new(DecisionFinalizer),
+        };
+        runtime.drive(&claim).await.unwrap();
+        let operations = runs.list_operations(&run).await.unwrap();
+        let op = operations.iter().find(|op| op.request.kind == OperationKind::Tool).unwrap();
+        let expected_quote = Amount::new(8192 + 2264 + if edit { 14048 } else { 0 }, 8192 * 5 + 2264 * 30 + if edit { 14048 * 8 } else { 0 });
+        assert_eq!(op.request.reserve, expected_quote);
+        assert!(op.request.pricing.is_some());
+        assert_eq!(op.send_count, 1);
+        let requests = http.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["quality"], "medium");
+        assert_eq!(body["size"], "1536x1024");
+        assert_eq!(body["n"], 1);
+        assert_eq!(body["images"].as_array().map_or(0, Vec::len), usize::from(edit));
+        let usage = match op.result.as_ref().unwrap() { ExternalResult::Applied { usage, .. } => usage, _ => panic!("saved image expected") };
+        assert_eq!(usage.micro_usd, expected);
+        assert_eq!(op.settled, expected.is_some());
+        let totals = runs.account(&account).await.unwrap();
+        assert_eq!(totals.reserved, if expected.is_some() { Amount::default() } else { expected_quote });
     }
 }

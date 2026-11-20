@@ -3,13 +3,10 @@
 `runtrell::images` defines provider-neutral resolution and ordinary image tools.
 `runtrell-providers` has no default features; `OpenAiImages` uses `openai` and
 `GeminiImages` uses `gemini`. These are optional public OSS adapters.
-Hosts choose models, endpoints, credentials, prices, token ceilings, roles and
-access restrictions. Images never require a sandbox or interpreter.
-
-| Public OSS provider | Adapter / feature | Raster generation | Raster reference editing | SVG generation | Mask editing |
-|---|---|---|---|---|---|
-| OpenAI | OpenAiImages / openai | Host-declared | Host-declared | Host-declared | Unsupported |
-| Gemini | GeminiImages / gemini | Host-declared | Host-declared | Unsupported | Unsupported |
+Hosts choose catalog IDs, credentials and access restrictions.
+The [bundled catalog](../../catalog/README.md) lists the executable OpenAI
+raster bindings and the documented Gemini image bindings. Wire and receipt
+tests use loopback transport fixtures.
 
 ## Inputs and requests
 
@@ -32,8 +29,7 @@ All images are resolved before `ModelPort::input_upper_bound` and reservation.
 The wrapper rechecks storage access and Policy before send and retrieval.
 Reconstruction resolves the pinned references again and requires the same hash.
 Text-only ModelPorts reject attachments with Unsupported. Provider adapters
-independently check capability, image and transport bounds. The host token ceiling
-must cover the complete permitted image-inclusive input; tokenization is not guessed.
+independently check capability, image and transport bounds. The provider-bound input allowance covers the complete request, including images.
 
 ## Tools and recovery
 
@@ -49,16 +45,15 @@ GeminiImages uses native generateContent text/inlineData,
 reference edit and mask edit are separate capability declarations. Mask support
 is rejected at construction and preflight; remote lookup/idempotency are absent.
 
-OpenAiImages uses the host's full `/v1/images/generations` endpoint, replacing
-`generations` with `edits` on the same origin for reference editing. The JSON wire
-is `model` (host supplied), `prompt`, `n: 1`, optional nonempty `size`, and
-`output_format` (default `png`, also `jpeg`/`webp`). Reference edits add
-`images: [{ image_url: "data:<mime>;base64,..." }]`. For the configured 2.6 Sunburst
-or Flare model, optional quality (`auto/low/medium/high`), complexity
-(`low/medium/high`) and background (`auto/opaque/transparent`) are sent only when
-provided. No default complexity is sent. Transparent raster output requires PNG/WebP.
-Unknown fields, `xhigh/max` quality, markup, GIF and SVG edit are rejected before HTTP.
-The host declares a separate `ImageSizePolicy` for each enabled model action
+The verified OpenAI bindings use the direct generations and edits endpoints.
+The JSON wire uses the catalog model, prompt, explicit size and quality, `n: 1`
+and `output_format: "png"`. Edit supplies one validated inline PNG in
+`images: [{ image_url: "data:image/png;base64,..." }]`. Callers select one of
+the three listed sizes. Quality defaults to `low` and also accepts `medium`
+and `high`.
+Complexity and background are sent if supplied. The catalog reservation defines
+the prompt and reference image limits. [OpenAI Images bounds](providers.md#openai-images-usage-and-reservation).
+A separate `ImageSizePolicy` applies to each enabled model action
 (generation, reference edit, SVG generation) through `ImageCapabilities`.
 `Values` lists exact `WIDTHxHEIGHT` strings; `Dimensions` declares multiple,
 pixel, edge and aspect bounds. `auto` also permits omission; `Unsized` permits
@@ -69,11 +64,10 @@ the list fits the bounded hint. For `Dimensions`, rejected caller sizes become
 typed `InvalidToolInput`; the runtime sends `TOOL_INPUT_INVALID` with `/size`
 and a repair guide to the Agent. The same typed path covers tighter
 `ImageLimits` payload bounds. Sizes
-are not rounded or replaced. The host supplies constraints verified for the
-selected model and endpoint.
+are passed through after validation against the selected action and endpoint.
 Exactly one `data[0].b64_json` is required. Both adapters reject mask editing.
 GeminiImages rejects size/non-PNG/options rather than silently ignoring them.
-Output MIME must be enabled in the host's ImageLimits.
+Output MIME must be enabled by the selected operation.
 
 SVG generation additionally requires `ImageCapabilities.svg_generation` and
 `image/svg+xml` in allowed MIME. The wire fixes `n:1`, `output_format:"svg"` and
@@ -87,28 +81,32 @@ receipt binding, artifact storage and settlement use the ordinary image path.
 
 OpenAI usage maps reported totals and image subsets without inference. Reported
 text details are retained as `text_input_tokens`/`text_output_tokens` quantities;
-missing details stay absent. Invalid image responses retain parsed usage for the
+missing details stay absent except under an explicit catalog rule. The 2.6
+direct raster rule treats wholly unreported cache counters as zero. Invalid
+image responses retain parsed usage for the
 ordinary billed-failure settlement path. No adapter owns a second ledger.
 `Usage.svg_usage` preserves the complete `svg_usage` JSON plus separate typed
 author model/input/output/reasoning/total counters. It never populates image
 counters. Missing/malformed author evidence or an unlisted author rate keeps
 the author cost unknown and the reservation held, including on HTTP failures.
-An exact host-verified `SvgAuthorPrice` must declare that reasoning is already
+The SVG metering fixtures use an exact `SvgAuthorPrice` to declare that reasoning is already
 included in output. The applied rate snapshot is saved with the author usage.
 `Usage.micro_usd` and `Price::cost` cover the image component; `Usage::amount`
 adds the author component once. `Usage::total` sums each component's input+output,
 never adding either reported total or reasoning again. Duplicate catalog entries
-are ambiguous and remain unpriced. See [provider usage](providers.md#openai-images-usage).
+are ambiguous and remain unpriced. See [provider usage](providers.md#openai-images-usage-and-reservation).
 
-`Tool::quote` checks and resolves the entire input before reservation. Each adapter
-estimates using the host token ceiling, output cap and Price. The tool reserves
-the larger of this estimate and its configured reserve. Runtime owns the single
+`Tool::quote` checks and resolves the entire input before reservation. The tool
+reserves the larger of the adapter's quote and its configured reserve. Runtime owns the single
 operation/reservation/settlement; the ImagePort writes no ledger. RegisteredTool
 and configuration wrappers preserve preflight and result authorization.
 Image tools already return bounded references; applying their `stored_output`
 setting is rejected during ToolSet assembly because it hides those typed inputs.
-The automatic quote is for image rendering; hosts must include an authoring
-allowance in their configured reserve. It is not an exact bound on SVG authoring.
+An executable SVG binding must include the image and authoring charges in its
+pre-send reservation. The author call needs a wire-enforced
+`max_output_tokens` from the request and a bound for the author prompt and
+reference. The catalog applies the author's own price and cache rules. Direct
+Images SVG is unavailable because its wire has no author output cap.
 
 Validated results become immutable Intermediate Artifacts under stable IDs bound
 to Run, operation, attempt, request, adapter/config identity, limits and namespace.

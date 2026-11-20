@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 mod isolation;
+#[cfg(test)]
+mod model_tests;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 struct Requirement {
     text: String,
@@ -79,6 +81,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("../..")
         .canonicalize()?;
     match std::env::args().nth(1).as_deref() {
+        Some("models") => {
+            let mode = std::env::args().nth(2).ok_or("expected models generate or models check")?;
+            let today = std::process::Command::new("date").arg("+%F").output()?;
+            if !today.status.success() {
+                return Err("cannot determine current date".into());
+            }
+            let today = std::str::from_utf8(&today.stdout)?.trim();
+            let (index, listing) = runtrell::models::generate(
+                &fs::read_to_string(root.join("catalog/models.json"))?,
+                &fs::read_to_string(root.join("catalog/models.schema.json"))?,
+                today,
+            )?;
+            for (path, contents) in [
+                ("crates/runtrell/src/models/index.json", index),
+                ("catalog/README.md", listing),
+            ] {
+                let path = root.join(path);
+                match mode.as_str() {
+                    "generate" => fs::write(path, contents)?,
+                    "check" if fs::read_to_string(&path)? == contents => {},
+                    "check" => return Err(format!("stale generated model artifact {}", path.display()).into()),
+                    _ => return Err("expected models generate or models check".into()),
+                }
+            }
+        }
         Some("isolation-tests") | Some("isolation-results") => {
             let args: Vec<_> = std::env::args().collect();
             let suite = args.get(2).ok_or("missing suite")?;

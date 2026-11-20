@@ -71,7 +71,7 @@ RunStore / OperationStore / BudgetAuthority / Schedulerのtraitを維持し、�
 
 ## 接続専用入口（connect）と必要権限
 
-`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の13 tableと`attempts.recovery`・`runs.erasure`列の存在確認（catalogの`to_regclass`・`pg_attribute`）だけである。列が無いruntimeはownerが`initialize`を明示実行するまでNotFound。結果は次のとおり。
+`connect(pool, schema, capacity)`が行うのは、(1) `schema_config`のversion=4とCapacityの照合、(2) 規定の16 tableと`attempts.recovery`・`runs.erasure`列の存在確認（catalogの`to_regclass`・`pg_attribute`）だけである。列が無いruntimeはownerが`initialize`を明示実行するまでNotFound。結果は次のとおり。
 
 | 状況 | 結果 |
 |---|---|
@@ -289,3 +289,11 @@ Rust 1.98.0、使い捨て PostgreSQL 18.6、`CARGO_INCREMENTAL=0`、固定 Rig 
 終了時の suite DB・専用 role・intent 残留は0、maintenance DBの既存schema一覧は保持。
 生ログは `target/rt-run-validation/`（保持期限2026-11-03）。Hosted CI と Linux での
 追加試験実行は未確認であり、ローカル成功をその代わりにはしない。commit・push は未実施。
+
+## Shared allowance ledger
+
+`allowance_periods` stores the initial quantity and consumption for each
+provider allowance, opaque scope and billing period. `allowance_receipts`
+stores the amount allocated per receipt. All consumption of a period locks its
+row and commits the balance and receipt together. The runtime role needs
+SELECT and INSERT on both tables and UPDATE on `allowance_periods`.

@@ -458,6 +458,9 @@ impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
     async fn authorize_result(&self, run: &RunRecord, output: &Value) -> Result<()> {
         self.inner.authorize_result(run, output).await
     }
+    fn pricing_snapshot(&self) -> Option<models::PricingSnapshot> {
+        self.inner.pricing_snapshot()
+    }
     async fn quote(&self, run: &RunRecord, input: &Value) -> Result<Amount> {
         self.inner.quote(run, input).await
     }

@@ -1,24 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 #![forbid(unsafe_code)]
 //! Optional, single-send ModelPort implementations. See docs/design/providers.md.
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 use runtrell::attachments::AttachmentResolver;
+pub use runtrell::models;
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
+mod connect;
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
+pub use connect::*;
+use runtrell::ModelLimits;
 pub use runtrell::images::{ImageLimits, ImageSizePolicy};
-use runtrell::{ModelLimits, RetryPolicy, RunHandle};
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
+use runtrell::{RetryPolicy, RunHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 use std::sync::Arc;
 
 /// Kept out of Debug, Display and all adapter error messages.
 #[derive(Clone)]
-pub struct ApiKey(String);
+pub struct ApiKey(String, Option<OpenRouterPayer>);
 impl ApiKey {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(value.into(), None)
     }
+
+    /// Attest the billing configuration of the workspace owning this key.
+    pub fn openrouter(value: impl Into<String>, payer: OpenRouterPayer) -> Self {
+        Self(value.into(), Some(payer))
+    }
+}
+/// Billing configuration the host has restricted the credential to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenRouterPayer {
+    /// No BYOK credentials can serve this binding in the key's workspace.
+    Credits,
+    /// Fallback is disabled for the upstream credential, which uses the public SKU and rates.
+    Byok,
 }
 impl std::fmt::Debug for ApiKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = &self.0;
+        let _ = (&self.0, self.1);
         f.write_str("ApiKey([REDACTED])")
     }
 }
@@ -130,11 +152,11 @@ impl Capabilities {
     }
 }
 
-/// The host pins all operational values. Endpoint is the full POST URL, including
-/// the model path for generateContent. It must have no credentials/query/fragment.
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 #[derive(Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub endpoint: String,
+    #[cfg(test)]
     pub key: ApiKey,
     pub capabilities: Capabilities,
     /// Pinned model retry bounds. The host includes this in its Run configuration identity.
@@ -202,14 +224,14 @@ mod openai_images;
 #[cfg(feature = "openai")]
 pub use openai_images::OpenAiImages;
 #[cfg(feature = "openai")]
-pub mod openai_images_usage;
-#[cfg(feature = "openai")]
-pub use openai_images_usage::recovery_for_stored_usage as recovery_for_stored_openai_images_usage;
+mod openai_images_usage;
+#[cfg(all(test, feature = "openai"))]
+pub(crate) use openai_images_usage::recovery_for_stored_usage as recovery_for_stored_openai_images_usage;
+#[cfg(any(feature = "openai", feature = "gemini", feature = "openrouter"))]
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("endpoint", &"[HOST ENDPOINT]")
-            .field("key", &self.key)
+            .field("endpoint", &"[PROVIDER ENDPOINT]")
             .field("run", &self.run)
             .field("session", &self.session)
             .finish_non_exhaustive()
@@ -227,3 +249,10 @@ mod tests {
         assert!(output.contains("[REDACTED]"));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/http.rs"]
+mod http_fixtures;
+#[cfg(all(test, feature = "openai"))]
+#[path = "../tests/openai_images_usage.rs"]
+mod images_usage_fixtures;

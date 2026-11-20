@@ -186,6 +186,7 @@ impl Clock for WallClock {
 }
 fn validation_context(claim: &Claim, permission: &str) -> ToolContext {
     ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: claim.clone(),
         principal: "judge".into(),

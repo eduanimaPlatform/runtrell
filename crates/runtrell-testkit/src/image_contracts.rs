@@ -687,6 +687,7 @@ pub async fn workflow_reopened<S: ControlStore + 'static>(
     let prepared = rt.model.prepare_request(&own_run, request).await.unwrap();
     data.revoke(&source_access).await.unwrap();
     let context = ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: next,
         principal: own_run.spec.principal,

@@ -4,6 +4,7 @@
 use runtrell::{execution::*, *};
 fn context(id: &str) -> ToolContext {
     ToolContext {
+        managed_send: None,
         recovery_proof: None,
         claim: Claim {
             run: RunHandle {
