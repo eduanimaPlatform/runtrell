@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    AccountPolicy, OwnerCommand, OwnerReceipt, PreparedModelRequest, ReservationPolicy,
-    SchedulingPolicy, SettlementRecord, SettlementRecovery,
+    AccountPolicy, OwnerCommand, OwnerReceipt, PhaseConfig, PhaseInput, PhaseSeal, PhaseState,
+    PreparedModelRequest, ReservationPolicy, SchedulingPolicy, SettlementRecord,
+    SettlementRecovery,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -544,6 +545,9 @@ pub struct RunSpec {
     pub completion: CompletionPolicy,
     #[serde(default)]
     pub transcript: TranscriptPolicy,
+    /// Ordered phase configuration. An empty list uses a single conversation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<PhaseConfig>,
     /// Maximum consecutive reads of already covered ranges.
     #[serde(default)]
     pub max_repeated_reads: Option<std::num::NonZeroU64>,
@@ -573,6 +577,7 @@ impl RunSpec {
             compaction: None,
             completion: CompletionPolicy::default(),
             transcript: TranscriptPolicy::default(),
+            phases: vec![],
             max_repeated_reads: None,
         }
     }
@@ -766,6 +771,8 @@ pub struct RunRecord {
     pub output: Option<Value>,
     pub receipt: Option<ValidationReceipt>,
     pub completion: Option<String>,
+    #[serde(default)]
+    pub phase: Option<PhaseState>,
 }
 impl RunRecord {
     /// State identity supplied by the trusted validator before an ACK turn.
@@ -1059,6 +1066,9 @@ impl ExternalResult {
 pub struct Operation {
     pub id: String,
     pub run: RunHandle,
+    /// Retired by an intermediate boundary. Only accounting evidence remains.
+    #[serde(default)]
+    pub retired: bool,
     pub request: DispatchRequest,
     pub state: OperationState,
     pub result: Option<ExternalResult>,
@@ -1637,6 +1647,14 @@ pub trait Finalizer: Send + Sync {
         candidate: Value,
         receipt: ValidationReceipt,
     ) -> Result<Completion>;
+
+    /// Erase phase-owned payloads outside the control store, close old grants,
+    /// and return the authorized projection for the next conversation.
+    /// Called after sealing. Retry by Run and phase identity until all backends
+    /// acknowledge deletion. The operation must be idempotent.
+    fn prepare_next_phase(&self, _run: &RunRecord, _seal: &PhaseSeal) -> Result<PhaseInput> {
+        Err(Error::Unsupported("phase payload handoff".into()))
+    }
 }
 pub trait SecretProvider: Send + Sync {
     fn with_secret<R: Send>(
@@ -1658,6 +1676,29 @@ pub struct Event {
 }
 
 pub trait RunStore: Send + Sync {
+    /// Support for the atomic seal/scrub and fenced phase handoff.
+    fn supports_phases(&self) -> bool {
+        false
+    }
+    fn seal_phase(
+        &self,
+        _claim: &Claim,
+        _expected_revision: u64,
+        _output: Value,
+        _receipt: ValidationReceipt,
+        _now: u64,
+    ) -> impl std::future::Future<Output = Result<RunRecord>> + Send {
+        async { Err(Error::Unsupported("intermediate finalization".into())) }
+    }
+    fn open_phase(
+        &self,
+        _claim: &Claim,
+        _expected_revision: u64,
+        _input: PhaseInput,
+        _now: u64,
+    ) -> impl std::future::Future<Output = Result<RunRecord>> + Send {
+        async { Err(Error::Unsupported("intermediate finalization".into())) }
+    }
     /// True when successful finalization atomically clears the run's transcript
     /// and preserves account, attempt and completion metadata.
     fn supports_transcript_purge(&self) -> bool {

@@ -27,6 +27,9 @@ impl RunRecord {
     }
     #[doc(hidden)]
     pub fn matches_purged_request(&self, spec: &RunSpec) -> bool {
+        if let Some(original) = self.phase_request_digest() {
+            return digest(&json!(spec)) == original;
+        }
         self.purge_marker()
             .is_some_and(|marker| marker["request"] == digest(&json!(spec)))
     }

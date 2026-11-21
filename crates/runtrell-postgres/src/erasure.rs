@@ -67,6 +67,25 @@ impl PgStore {
         Ok(())
     }
 
+    pub(crate) async fn redact_owner_payloads(
+        &self,
+        conn: &mut PgConnection,
+        run: &RunHandle,
+    ) -> Result<()> {
+        sqlx::query(&format!(
+            "UPDATE {}.owner_receipts SET receipt={}.erase_receipt_payload(receipt)
+             WHERE receipt->'run'->>'tenant'=$1 AND receipt->'run'->>'id'=$2
+             AND receipt<>{}.erase_receipt_payload(receipt)",
+            self.schema, self.schema, self.schema
+        ))
+        .bind(&run.tenant)
+        .bind(&run.id)
+        .execute(conn)
+        .await
+        .map_err(|e| storage("PgStore::redact_owner_payloads", e))?;
+        Ok(())
+    }
+
     /// Read only erasure state; a missing run returns `NotFound`.
     pub async fn erasure_status(&self, run: &RunHandle) -> Result<Option<RunErasureState>> {
         let marker: Option<Option<String>> = sqlx::query_scalar(&format!(
@@ -197,20 +216,10 @@ impl PgStore {
             let h = &record.handle;
             let spec = scrub_spec(&record.spec);
             let state = RunState::Terminal(Terminal::Cancelled("erased".into()));
-            sqlx::query(&format!("UPDATE {}.runs SET erasure='pending',spec=$3,request_spec=$3,owner=NULL,state=$4,checkpoint=NULL,cancel=NULL,delivery=$5,output=NULL,receipt=NULL,completion=NULL WHERE tenant=$1 AND id=$2",self.schema))
+            sqlx::query(&format!("UPDATE {}.runs SET erasure='pending',spec=$3,request_spec=$3,owner=NULL,state=$4,checkpoint=NULL,phase=NULL,cancel=NULL,delivery=$5,output=NULL,receipt=NULL,completion=NULL WHERE tenant=$1 AND id=$2",self.schema))
                 .bind(&h.tenant).bind(&h.id).bind(json!(spec)).bind(json!(state)).bind(json!(Delivery::None))
                 .execute(&mut *tx).await.map_err(|e| storage("PgStore::erase_run", e))?;
-            // Receipt identity and numeric settlement evidence stay immutable;
-            // only the opaque SVG provider JSON is removed by the SQL guard.
-            sqlx::query(&format!(
-                "UPDATE {}.owner_receipts SET receipt={}.erase_receipt_payload(receipt) WHERE receipt->'run'->>'tenant'=$1 AND receipt->'run'->>'id'=$2 AND receipt<>{}.erase_receipt_payload(receipt)",
-                self.schema, self.schema, self.schema
-            ))
-            .bind(&h.tenant)
-            .bind(&h.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| storage("PgStore::erase_run", e))?;
+            self.redact_owner_payloads(&mut tx, h).await?;
             let attempts: Vec<Value> = sqlx::query_scalar(&format!(
                 "SELECT to_jsonb(a) FROM {}.attempts a WHERE tenant=$1 AND run_id=$2 ORDER BY id FOR UPDATE", self.schema
             ))

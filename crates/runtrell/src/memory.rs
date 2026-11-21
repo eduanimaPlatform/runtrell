@@ -159,6 +159,9 @@ impl MemoryStore {
             if op.run != claim.run {
                 return Err(Error::PermissionDenied);
             }
+            if op.retired {
+                return Err(Error::Closed);
+            }
             if op.request.replay_scope() != Some(scope)
                 || !op.request.recovery_until.is_some_and(|t| now < t)
             {
@@ -206,6 +209,7 @@ fn fence(s: &Ledger, c: &Claim, now: u64, new_work: bool) -> Result<RunRecord> {
         if r.cancel.is_some() || matches!(r.state, RunState::Terminal(_)) {
             return Err(Error::Closed);
         }
+        r.phase_work_allowed()?;
         // Operator hold: settling an operation never resumes execution by itself.
         if matches!(&r.state, RunState::Waiting(w) if w == OPERATOR_ACTION_WAIT) {
             return Err(Error::Closed);
@@ -320,13 +324,14 @@ fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHa
             && r.spec.request_key == spec.request_key
     }) {
         return if old.matches_purged_request(&spec)
-            || (!old.transcript_purged() && old.spec == spec)
+            || (old.phase.is_none() && !old.transcript_purged() && old.spec == spec)
         {
             Ok(old.handle.clone())
         } else {
             Err(Error::Conflict)
         };
     }
+    let phase = spec.initialize_phases()?;
     let a = s.accounts.get(&spec.account).ok_or(Error::NotFound)?;
     if a.tenant != spec.tenant {
         return Err(Error::PermissionDenied);
@@ -396,6 +401,7 @@ fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHa
             output: None,
             receipt: None,
             completion: None,
+            phase,
         },
     );
     Ok(h)
@@ -421,6 +427,9 @@ fn admit_child(
     parent: &RunRecord,
     now: u64,
 ) -> Result<RunHandle> {
+    if parent.phase.is_some() {
+        return Err(Error::Unsupported("children in phased runs".into()));
+    }
     if spec.tenant != c.run.tenant {
         return Err(Error::PermissionDenied);
     }
@@ -477,6 +486,7 @@ fn admit_child(
         Operation {
             id,
             run: c.run.clone(),
+            retired: false,
             request,
             state: OperationState::Accepted,
             result: Some(ExternalResult::Accepted {
@@ -498,6 +508,62 @@ fn admit_child(
     Ok(child)
 }
 impl RunStore for MemoryStore {
+    fn supports_phases(&self) -> bool {
+        true
+    }
+
+    async fn seal_phase(
+        &self,
+        c: &Claim,
+        expected: u64,
+        output: Value,
+        receipt: ValidationReceipt,
+        now: u64,
+    ) -> Result<RunRecord> {
+        self.tx(|s| {
+            let mut run = fence(s, c, now, true)?;
+            for id in ancestors(s, &run.spec.account)? {
+                s.accounts[&id].admission(true)?;
+            }
+            retire_phase_operations(&mut s.operations, &run)?;
+            run.seal_phase(expected, output, receipt, now)?;
+            for receipt in s
+                .owner_receipts
+                .values_mut()
+                .filter(|receipt| receipt.run == c.run)
+            {
+                receipt.clear_transcript();
+            }
+            s.slots
+                .remove(&format!("active:{}:{}", c.run.tenant, c.run.id));
+            let key = key(&c.run);
+            s.queue.retain(|entry| entry.key != key);
+            s.queue.push_back(QueueEntry {
+                key: key.clone(),
+                tenant: c.run.tenant.clone(),
+                scheduling: run.spec.scheduling,
+                deadline: u64::MAX,
+            });
+            s.runs.insert(key, run.clone());
+            Ok(run)
+        })
+    }
+
+    async fn open_phase(
+        &self,
+        c: &Claim,
+        expected: u64,
+        input: PhaseInput,
+        now: u64,
+    ) -> Result<RunRecord> {
+        self.tx(|s| {
+            fence(s, c, now, false)?;
+            let run = get_mut(s, &c.run)?;
+            run.open_phase(expected, input, now)?;
+            Ok(run.clone())
+        })
+    }
+
     fn supports_transcript_purge(&self) -> bool {
         true
     }
@@ -527,7 +593,7 @@ impl RunStore for MemoryStore {
             match old {
                 Some(r)
                     if r.matches_purged_request(spec)
-                        || (!r.transcript_purged() && r.spec == *spec) =>
+                        || (r.phase.is_none() && !r.transcript_purged() && r.spec == *spec) =>
                 {
                     Ok(Some(r.handle.clone()))
                 }
@@ -584,7 +650,8 @@ impl RunStore for MemoryStore {
                 lease_until: now.checked_add(lease).ok_or(Error::Conflict)?,
             };
             r.owner = Some(c.clone());
-            if !matches!(r.state, RunState::Terminal(_))
+            if r.pending_phase().is_none()
+                && !matches!(r.state, RunState::Terminal(_))
                 && !matches!(&r.state, RunState::Waiting(w) if w == OPERATOR_ACTION_WAIT)
             {
                 r.state = RunState::Running;
@@ -695,6 +762,9 @@ impl RunStore for MemoryStore {
                 return Ok(());
             }
             let r = fence(s, c, now, true)?;
+            if r.next_phase().is_some() {
+                return Err(Error::Conflict);
+            }
             for id in ancestors(s, &r.spec.account)? {
                 s.accounts[&id].admission(true)?;
             }
@@ -717,6 +787,7 @@ impl RunStore for MemoryStore {
                         })
                     );
                 o.run == c.run
+                    && !o.retired
                     && ((r.spec.transcript == TranscriptPolicy::PurgeOnSuccess
                         && !o.transcript_purge_ready())
                         || (!o.settled && !superseded_model_retry)
@@ -921,6 +992,9 @@ impl OperationStore for MemoryStore {
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
             }
+            if op.retired {
+                return Err(Error::Closed);
+            }
             if !op.settled {
                 op.validate_result_send()?;
                 op.settlement_allowance(&result, now)?;
@@ -962,6 +1036,9 @@ impl OperationStore for MemoryStore {
             let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
             if old.run != c.run {
                 return Err(Error::PermissionDenied);
+            }
+            if old.retired {
+                return Err(Error::Closed);
             }
             let expired_extension = old.request.extension_expired(now);
             let retry = old.request.attempt > 1
@@ -1042,6 +1119,17 @@ impl OperationStore for MemoryStore {
         // Reservation denial exhausts the request account; atomic intent itself rolls back.
         let result = self.tx(|s| {
             let r = fence(s, c, now, true)?;
+            if matches!(request.kind, OperationKind::Tool | OperationKind::Sandbox)
+                && !r.allows_phase_tool(&request.target)
+            {
+                return Err(Error::PermissionDenied);
+            }
+            if s.operations
+                .values()
+                .any(|op| op.run == c.run && op.retired && op.request.key == request.key)
+            {
+                return Err(Error::Closed);
+            }
             let id = format!("{}:{}:{}", key(&c.run), request.key, request.attempt);
             if let Some(op) = s.operations.get(&id) {
                 return if op.request == request {
@@ -1105,6 +1193,7 @@ impl OperationStore for MemoryStore {
             let op = Operation {
                 id: id.clone(),
                 run: c.run.clone(),
+                retired: false,
                 request,
                 state: OperationState::Intent,
                 result: None,
@@ -1145,7 +1234,7 @@ impl OperationStore for MemoryStore {
             get(s, h)?;
             Ok(s.operations
                 .values()
-                .filter(|o| o.run == *h && o.request.key == k)
+                .filter(|o| o.run == *h && !o.retired && o.request.key == k)
                 .max_by_key(|o| o.request.attempt)
                 .cloned())
         })
@@ -1156,6 +1245,9 @@ impl OperationStore for MemoryStore {
             let op = s.operations.get_mut(id).ok_or(Error::NotFound)?;
             if op.run != c.run {
                 return Err(Error::PermissionDenied);
+            }
+            if op.retired {
+                return Err(Error::Closed);
             }
             op.request.validate_extension_send(now)?;
             if op.state != OperationState::Intent || op.saved_settlement_result()?.is_some() {
@@ -1187,6 +1279,9 @@ impl OperationStore for MemoryStore {
             let old = s.operations.get(id).cloned().ok_or(Error::NotFound)?;
             if old.run != c.run {
                 return Err(Error::PermissionDenied);
+            }
+            if old.retired {
+                return Err(Error::Closed);
             }
             if let Some(saved) = old.saved_settlement_result()?
                 && saved != &result

@@ -198,6 +198,7 @@ fn img26_owner_recovery_prices_author_without_losing_known_image_cost() {
     assert_eq!(stored.micro_usd, Some(1870));
     assert_eq!(stored.amount(), Err(Error::UsageUnknown));
     let op = Operation {
+        retired: false,
         id: "svg-op".into(),
         run: cfg.run.clone(),
         request: runtrell::DispatchRequest::new(
@@ -332,6 +333,7 @@ fn img26_zero_cache_prices_image_and_author_evidence() {
     old.unknown_reason = Some(images_usage::REASON_CACHED_UNREPORTED.into());
     old.price_evidence = None; // owner derives evidence from the verified price
     let op = Operation {
+        retired: false,
         id: "img26".into(),
         run: cfg.run.clone(),
         request: runtrell::DispatchRequest::new(

@@ -251,8 +251,15 @@ pub struct RunSpec {
     pub scheduling: SchedulingPolicy,
     pub continuation: ContinuationPolicy,
     pub compaction: Option<CompactionPolicy>,
+    #[serde(default)]
     pub completion: CompletionPolicy,
+    #[serde(default)]
     pub transcript: TranscriptPolicy,
+    /// Ordered phase configuration. An empty list uses a single conversation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<PhaseConfig>,
+    /// Maximum consecutive reads of already covered ranges.
+    #[serde(default)]
     pub max_repeated_reads: Option<std::num::NonZeroU64>,
 }
 
@@ -263,6 +270,12 @@ pub struct ContinuationPolicy {
 
 pub struct CompactionPolicy {
     pub min_remaining_tokens: u64,
+    /// Preserve typed observations and unresolved diagnostics in the next request.
+    #[serde(default)]
+    pub preserve_progress: bool,
+    /// Maximum completed compactions without new typed progress.
+    #[serde(default)]
+    pub max_without_progress: Option<std::num::NonZeroU64>,
 }
 
 pub struct RunHandle {
@@ -506,6 +519,12 @@ pub trait ModelPort: Send + Sync {
         None
     }
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
+    /// An independent input ceiling to consider when deciding whether to compact.
+    /// Return None when only the combined context bound applies or the input
+    /// estimate cannot distinguish history growth from media preprocessing.
+    fn compaction_input_limit(&self, _request: &PreparedModelRequest) -> Option<u64> {
+        None
+    }
     /// Recovery scope and retention in milliseconds; the driver pins
     /// `recovery_until = Clock::now() + retention` (checked).
     fn recovery(&self) -> Option<(String, u64)> {
@@ -523,6 +542,8 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    /// Derive observations from the pinned input and settled output. Pure and
+    /// deterministic, so replay after a crash yields the same checkpoint.
     fn progress(&self, _input: &Value, _output: &Value) -> Result<Vec<ToolProgress>> {
         Ok(vec![])
     }
@@ -621,9 +642,12 @@ impl Default for RepairPolicy {
     }
 }
 pub trait Validator: Send + Sync {
+    /// Return the current identity of all mutable state checked by an
+    /// acknowledgement tool. Opt in explicitly when using ValidatedAck.
     fn completion_basis(&self, _run: &RunRecord) -> Result<String> {
         Err(Error::Unsupported("validated acknowledgement basis".into()))
     }
+    /// Choose the model repair surface for a final candidate rejected by this validator.
     fn repair_target(&self, _receipt: &ValidationReceipt) -> RepairTarget {
         RepairTarget::Workspace
     }
@@ -639,6 +663,14 @@ pub trait Finalizer: Send + Sync {
         candidate: Value,
         receipt: ValidationReceipt,
     ) -> Result<Completion>;
+
+    /// Erase phase-owned payloads outside the control store, close old grants,
+    /// and return the authorized projection for the next conversation.
+    /// Called after sealing. Retry by Run and phase identity until all backends
+    /// acknowledge deletion. The operation must be idempotent.
+    fn prepare_next_phase(&self, _run: &RunRecord, _seal: &PhaseSeal) -> Result<PhaseInput> {
+        Err(Error::Unsupported("phase payload handoff".into()))
+    }
 }
 pub trait SecretProvider: Send + Sync {
     fn with_secret<R: Send>(
@@ -660,6 +692,31 @@ pub struct Event {
 }
 
 pub trait RunStore: Send + Sync {
+    /// Support for the atomic seal/scrub and fenced phase handoff.
+    fn supports_phases(&self) -> bool {
+        false
+    }
+    fn seal_phase(
+        &self,
+        _claim: &Claim,
+        _expected_revision: u64,
+        _output: Value,
+        _receipt: ValidationReceipt,
+        _now: u64,
+    ) -> impl std::future::Future<Output = Result<RunRecord>> + Send {
+        async { Err(Error::Unsupported("intermediate finalization".into())) }
+    }
+    fn open_phase(
+        &self,
+        _claim: &Claim,
+        _expected_revision: u64,
+        _input: PhaseInput,
+        _now: u64,
+    ) -> impl std::future::Future<Output = Result<RunRecord>> + Send {
+        async { Err(Error::Unsupported("intermediate finalization".into())) }
+    }
+    /// True when successful finalization atomically clears the run's transcript
+    /// and preserves account, attempt and completion metadata.
     fn supports_transcript_purge(&self) -> bool {
         false
     }
@@ -808,8 +865,8 @@ pub trait OperationStore: Send + Sync {
         scope: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
-    /// Atomically settle an unsent retry intent or an expired, unsent resource
-    /// extension intent. Requires the current claim and no result or usage evidence. Keeps
+    /// Atomically settle a cancelled, never-sent model or compaction intent,
+    /// an unsent retry intent, or an expired, unsent resource extension intent. Requires the current claim and no result or usage evidence. Keeps
     /// a failed no-send audit record and releases only this attempt's reservation
     /// and slot; a sent or observed attempt can never be aborted this way.
     fn abort_unsent(

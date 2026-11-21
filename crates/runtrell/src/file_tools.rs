@@ -451,7 +451,7 @@ pub fn pin_catalog<T: Tool>(
         if !names.insert(d.name.clone()) {
             return Err(Error::Conflict);
         }
-        if policy.authorize(run, &d.name, &d.permission).is_ok() {
+        if run.allows_phase_tool(&d.name) && policy.authorize(run, &d.name, &d.permission).is_ok() {
             result.push(d);
         }
     }

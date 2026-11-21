@@ -455,7 +455,7 @@ async fn final_catalog() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     for (label, query) in [
         (
             "relations",

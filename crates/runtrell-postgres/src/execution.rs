@@ -37,6 +37,34 @@ impl PgStore {
             .await.map_err(|e| storage("PgStore::execution_write", e))?;
         Ok(tx)
     }
+    async fn guard_phase_execution(
+        &self,
+        conn: &mut PgConnection,
+        owner: &RunHandle,
+        operation: &str,
+    ) -> Result<()> {
+        // The caller already holds the Run lock, which serializes with sealing.
+        let fenced: bool = sqlx::query_scalar(&format!(
+            "SELECT EXISTS(
+                SELECT 1 FROM {}.runs r LEFT JOIN {}.attempts a
+                ON a.tenant=r.tenant AND a.run_id=r.id AND a.id=$3
+                WHERE r.tenant=$1 AND r.id=$2 AND r.phase IS NOT NULL
+                AND (a.id IS NULL OR a.retired)
+            )",
+            self.schema, self.schema,
+        ))
+        .bind(&owner.tenant)
+        .bind(&owner.id)
+        .bind(operation)
+        .fetch_one(conn)
+        .await
+        .map_err(|e| storage("PgStore::guard_phase_execution", e))?;
+        if fenced {
+            return Err(Error::Closed);
+        }
+        Ok(())
+    }
+
     async fn execution_row(
         &self,
         conn: &mut PgConnection,
@@ -57,6 +85,8 @@ impl ExecutionLedger for PgStore {
         record.validate_intent()?;
         let mut tx = self.execution_write().await?;
         self.guard_run_erasure(&mut tx, &record.owner, true).await?;
+        self.guard_phase_execution(&mut tx, &record.owner, &record.context_operation)
+            .await?;
         sqlx::query(&format!("INSERT INTO {}.executions(owner,context_operation,request,revision,cancel_requested,observation,resources,reclaimed) VALUES($1,$2,$3,0,false,NULL,$4,false) ON CONFLICT DO NOTHING", self.schema))
             .bind(serde_json::to_value(&record.owner).map_err(|e| storage("PgStore::insert", e))?)
             .bind(&record.context_operation)

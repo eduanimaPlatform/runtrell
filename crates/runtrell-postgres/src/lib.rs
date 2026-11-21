@@ -65,7 +65,7 @@ pub struct LateResult {
     pub result: ExternalResult,
 }
 
-/// Tables the schema-4 migration creates; `connect` requires every one.
+/// Tables the schema-5 migration creates; `connect` requires every one.
 const SCHEMA_TABLES: [&str; 16] = [
     "owner_receipts",
     "schema_config",
@@ -84,7 +84,7 @@ const SCHEMA_TABLES: [&str; 16] = [
     "queue_policy",
     "executions",
 ];
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 impl PgStore {
     fn new(pool: PgPool, schema: &str, capacity: Capacity) -> Result<Self> {
@@ -291,17 +291,25 @@ impl PgStore {
             .await
             .map_err(|e| storage("PgStore::retain_late_result", e))?;
         self.guard_run_erasure(&mut tx, &c.run, true).await?;
-        let op: Option<(Value,)> = sqlx::query_as(&format!(
-            "SELECT to_jsonb(a) FROM {}.attempts a WHERE id=$1",
-            self.schema
+        let (value, phase_retired): (Value, bool) = sqlx::query_as(&format!(
+            "SELECT to_jsonb(a),
+             COALESCE((r.phase->'seals'->-1->>'generation')::numeric >= $2::text::numeric, false)
+             FROM {}.attempts a JOIN {}.runs r ON r.tenant=a.tenant AND r.id=a.run_id
+             WHERE a.id=$1",
+            self.schema, self.schema,
         ))
         .bind(id)
+        .bind(c.generation.to_string())
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| storage("PgStore::retain_late_result", e))?;
-        let op: Operation = decode(op.ok_or(Error::NotFound)?.0)?;
+        .map_err(|e| storage("PgStore::retain_late_result", e))?
+        .ok_or(Error::NotFound)?;
+        let op: Operation = decode(value)?;
         if op.run != c.run {
             return Err(Error::PermissionDenied);
+        }
+        if phase_retired || op.retired {
+            return Ok(());
         }
         let value =
             serde_json::to_value(result).map_err(|e| storage("PgStore::retain_late_result", e))?;
@@ -315,8 +323,22 @@ impl PgStore {
     /// Current owner can inspect observations without treating them as authoritative results.
     pub async fn late_results(&self, c: &Claim, now: u64) -> Result<Vec<LateResult>> {
         self.check(c, now, false).await?;
-        let rows = sqlx::query(&format!("SELECT l.operation,l.generation,l.worker,l.observed_at::text AS at,l.result FROM {}.late_results l JOIN {}.attempts r ON r.id=l.operation WHERE r.run=$1 ORDER BY l.observed_at,l.digest", self.schema,self.schema))
-            .bind(serde_json::to_value(&c.run).map_err(|e| storage("PgStore::late_results", e))?).fetch_all(&self.pool).await.map_err(|e| storage("PgStore::late_results", e))?;
+        let rows = sqlx::query(&format!(
+            "SELECT l.operation,l.generation,l.worker,l.observed_at::text AS at,l.result
+             FROM {}.late_results l JOIN {}.attempts a ON a.id=l.operation
+             JOIN {}.runs r ON r.tenant=a.tenant AND r.id=a.run_id
+             WHERE r.tenant=$1 AND r.id=$2 AND r.owner_worker=$3
+             AND r.owner_generation=$4::text::numeric AND NOT a.retired
+             ORDER BY l.observed_at,l.digest",
+            self.schema, self.schema, self.schema,
+        ))
+        .bind(&c.run.tenant)
+        .bind(&c.run.id)
+        .bind(&c.worker)
+        .bind(c.generation.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| storage("PgStore::late_results", e))?;
         rows.into_iter()
             .map(|r| {
                 Ok(LateResult {

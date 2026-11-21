@@ -332,6 +332,10 @@ pub fn configuration_digest(value: &Value) -> String {
 /// The host's finalizer still owns publication; this wrapper checks its result.
 pub struct CheckedFinalizer<'a>(pub &'a dyn Finalizer);
 impl Finalizer for CheckedFinalizer<'_> {
+    fn prepare_next_phase(&self, run: &RunRecord, seal: &PhaseSeal) -> Result<PhaseInput> {
+        self.0.prepare_next_phase(run, seal)
+    }
+
     fn finalize(
         &self,
         run: &RunRecord,

@@ -1,4 +1,4 @@
--- Additive schema-4 erasure fence. Kept separate from the original schema.
+-- Run erasure fence and deterministic accounting redaction.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = '{{schema}}.runs'::regclass
                    AND attname = 'erasure' AND NOT attisdropped) THEN
@@ -61,7 +61,7 @@ BEGIN
 END $$;
 
 -- The sole receipt UPDATE permitted is the exact deterministic redaction above,
--- while its owning Run is fenced pending erasure. Same-value and other DML still
+-- while its owning Run is fenced pending erasure or phase purge. Same-value and other DML still
 -- fail, including DELETE. The original immutable trigger continues to call this
 -- replaced function.
 CREATE OR REPLACE FUNCTION {{schema}}.immutable_owner_receipt() RETURNS trigger
@@ -75,7 +75,7 @@ BEGIN
                SELECT 1 FROM {{schema}}.runs r
                WHERE r.tenant = OLD.receipt->'run'->>'tenant'
                  AND r.id = OLD.receipt->'run'->>'id'
-                 AND r.erasure = 'pending'
+                 AND (r.erasure = 'pending' OR r.phase->'seals'->-1->'purged_at' = 'null'::jsonb)
            ) THEN
             RETURN NEW;
         END IF;

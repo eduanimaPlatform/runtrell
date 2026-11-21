@@ -391,6 +391,7 @@ impl<
             op
         } else {
             let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
+            check_phase_dispatch(&r, &request)?;
             self.policy.authorize(&r, &request.target, permission)?;
             if request.attempt > 1 {
                 let previous = bx(|| self.store.operation(&c.run, &request.key))
@@ -473,6 +474,7 @@ impl<
             return bx(|| self.store.abort_unsent(c, &op.id, self.clock.now())).await;
         }
         let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
+        check_phase_dispatch(&r, &op.request)?;
         self.policy.authorize(&r, &op.request.target, permission)?;
         if op.settled {
             return op.result.ok_or(Error::Conflict);
@@ -704,6 +706,10 @@ impl<
     }
     /// Drives until a terminal result or machine wait. No runner/workspace is required.
     pub async fn drive(&self, c: &Claim) -> Result<RunRecord> {
+        let phased = bx(|| self.store.check(c, self.clock.now(), false))
+            .await?
+            .phase
+            .is_some();
         let slot_key = format!("active:{}:{}", c.run.tenant, c.run.id);
         bx(|| {
             self.store.acquire(SlotRequest {
@@ -717,7 +723,14 @@ impl<
         // The loop owns prepared payloads and adapter futures. Keep its storage
         // off caller stacks, including hosts using small executor threads.
         let result = bx(|| self.drive_gated(c)).await;
-        bx(|| self.store.release_slot(&slot_key)).await?;
+        // Sealing already releases this slot atomically with revoking the
+        // claim. A successor may have reacquired it by the time we return.
+        let sealed = result
+            .as_ref()
+            .is_ok_and(|run| run.pending_phase().is_some() && run.owner.is_none());
+        if !(sealed || phased && result == Err(Error::OwnershipLost)) {
+            bx(|| self.store.release_slot(&slot_key)).await?;
+        }
         bx(|| self.finish_drive(c, result)).await
     }
 
@@ -858,7 +871,10 @@ impl<
         result
     }
     async fn drive_inner(&self, c: &Claim) -> Result<RunRecord> {
-        let r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
+        let mut r = bx(|| self.store.check(c, self.clock.now(), false)).await?;
+        if r.pending_phase().is_some() {
+            r = bx(|| self.resume_phase(c, r)).await?;
+        }
         if matches!(r.state, RunState::Terminal(_)) {
             bx(|| self.reconcile(c)).await?;
             return bx(|| self.store.get(&c.run)).await;
@@ -889,6 +905,9 @@ impl<
             && !self.store.supports_transcript_purge()
         {
             return Err(Error::Unsupported("control store transcript purge".into()));
+        }
+        if !r.spec.phases.is_empty() && !self.store.supports_phases() {
+            return Err(Error::Unsupported("control store phases".into()));
         }
         let catalog = self.tools.iter().map(Tool::descriptor).collect::<Vec<_>>();
         let offered = file_tools::pin_catalog(&r, &self.policy, &self.tools)?;
@@ -1032,7 +1051,8 @@ impl<
         let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&current, "finalize", "finalize")?;
         bx(|| self.store.finalization_allowed(c, self.clock.now())).await?;
-        if current.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+        if (current.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+            || current.next_phase().is_some())
             && bx(|| self.store.list_operations(&c.run))
                 .await?
                 .iter()
@@ -1153,6 +1173,13 @@ impl<
             })
             .await;
         }
+        if current.next_phase().is_some() {
+            return bx(|| {
+                self.store
+                    .seal_phase(c, current.revision, output, receipt, self.clock.now())
+            })
+            .await;
+        }
         let finalizer = self.finalizer.clone();
         let completion =
             tokio::task::spawn_blocking(move || finalizer.finalize(&current, output, receipt))
@@ -1160,6 +1187,18 @@ impl<
                 .map_err(|_| Error::Storage)??;
         bx(|| self.store.finalize(c, completion, self.clock.now())).await?;
         bx(|| self.store.get(&c.run)).await
+    }
+
+    async fn resume_phase(&self, c: &Claim, run: RunRecord) -> Result<RunRecord> {
+        let revision = run.revision;
+        let finalizer = self.finalizer.clone();
+        let input = tokio::task::spawn_blocking(move || {
+            let seal = run.pending_phase().ok_or(Error::Conflict)?;
+            finalizer.prepare_next_phase(&run, seal)
+        })
+        .await
+        .map_err(|_| Error::Storage)??;
+        bx(|| self.store.open_phase(c, revision, input, self.clock.now())).await
     }
 
     async fn repair_final(
@@ -2035,7 +2074,10 @@ impl<
     }
 }
 fn operation_prefix(run: &RunRecord) -> String {
-    let mut prefix = String::new();
+    let mut prefix = run
+        .phase
+        .as_ref()
+        .map_or_else(String::new, |phase| format!("phase:{}:", phase.seals.len()));
     if let Some(cp) = &run.checkpoint {
         if let Some(count) = cp.payload["repair"]["count"].as_u64().filter(|n| *n > 0) {
             prefix.push_str(&format!("repair:{count}:"));
@@ -2045,6 +2087,15 @@ fn operation_prefix(run: &RunRecord) -> String {
         }
     }
     prefix
+}
+
+fn check_phase_dispatch(run: &RunRecord, request: &DispatchRequest) -> Result<()> {
+    if matches!(request.kind, OperationKind::Tool | OperationKind::Sandbox)
+        && !run.allows_phase_tool(&request.target)
+    {
+        return Err(Error::PermissionDenied);
+    }
+    Ok(())
 }
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct RepairProgress {

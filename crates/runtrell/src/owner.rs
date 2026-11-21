@@ -49,6 +49,16 @@ pub struct OwnerReceipt {
     pub at: u64,
 }
 impl OwnerReceipt {
+    pub(crate) fn clear_transcript(&mut self) {
+        if let OwnerRequest::Settle { recovery, .. } = &mut self.request {
+            recovery.usage.clear_transcript();
+        }
+        if let OwnerResult::Settled(record) = &mut self.result {
+            record.previous.clear_transcript();
+            record.settled.clear_transcript();
+        }
+    }
+
     pub fn check_request(
         &self,
         command: &OwnerCommand,

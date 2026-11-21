@@ -1,7 +1,7 @@
--- Schema 4 is a fresh schema; no upgrade of prior schemas.
+-- Schema 5 is a fresh schema; no upgrade of prior schemas.
 CREATE TABLE IF NOT EXISTS {{schema}}.schema_config (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    version integer NOT NULL CHECK (version = 4), capacity jsonb NOT NULL
+    version integer NOT NULL CHECK (version = 5), capacity jsonb NOT NULL
 );
 CREATE TABLE IF NOT EXISTS {{schema}}.runs (
     handle jsonb NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.runs (
     owner_worker text GENERATED ALWAYS AS (owner->>'worker') STORED,
     owner_generation numeric(20,0) GENERATED ALWAYS AS ((owner->>'generation')::numeric) STORED,
     lease_until numeric(20,0) GENERATED ALWAYS AS ((owner->>'lease_until')::numeric) STORED,
-    state jsonb NOT NULL, checkpoint jsonb, cancel text,
+    state jsonb NOT NULL, checkpoint jsonb, phase jsonb, cancel text,
     stop jsonb NOT NULL, cleanup jsonb NOT NULL, settlement jsonb NOT NULL,
     delivery jsonb NOT NULL, output jsonb, receipt jsonb, completion text,
     PRIMARY KEY(tenant,id), UNIQUE(tenant,principal,request_key)
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.attempts (
     state jsonb NOT NULL, result jsonb,
     external_id text GENERATED ALWAYS AS
       (COALESCE(result->'Applied'->>'external_id',result->'Accepted'->>'external_id')) STORED,
-    settled boolean NOT NULL, unknown_usage boolean NOT NULL,
+    settled boolean NOT NULL, unknown_usage boolean NOT NULL, retired boolean NOT NULL DEFAULT false,
     send_generation numeric(20,0), send_count bigint NOT NULL,
     replay_proof_generation numeric(20,0), created_at numeric(20,0) NOT NULL,
     finished_at numeric(20,0), usage_observations jsonb NOT NULL, unsettled_result jsonb,

@@ -10,6 +10,7 @@ pub(crate) enum Mode {
     Budget,
     Work,
     Finalize,
+    Phase,
     Ops,
     Claim,
     Tree,
@@ -488,7 +489,10 @@ impl PgStore {
                             let prior = load_run(&mut s, v)?; s.runs.insert(key(&prior.handle),prior);
                         }
                     }
-                    if matches!(mode, Mode::Budget | Mode::Work | Mode::Finalize) {
+                    if matches!(
+                        mode,
+                        Mode::Budget | Mode::Work | Mode::Finalize | Mode::Phase
+                    ) {
                         self.accounts(conn, &mut s, &r.spec.account, write).await?;
                     }
                 }
@@ -500,7 +504,12 @@ impl PgStore {
                 for at in handles {
                     if matches!(
                         mode,
-                        Mode::Ops | Mode::Work | Mode::Tree | Mode::Finalize | Mode::Close
+                        Mode::Ops
+                            | Mode::Work
+                            | Mode::Tree
+                            | Mode::Finalize
+                            | Mode::Phase
+                            | Mode::Close
                     ) {
                         let mut args = vec![at.tenant.as_str(), at.id.as_str()];
                         let filter = match selection {
@@ -537,7 +546,7 @@ impl PgStore {
                             s.operations.insert(op.id.clone(), op);
                         }
                     }
-                    if matches!(mode, Mode::Claim | Mode::Work) {
+                    if matches!(mode, Mode::Claim | Mode::Work | Mode::Phase) {
                         if let Some(k) = &selected_slot {
                             for v in self.rows(conn, "slots", "key=$1", &[k], false).await? {
                                 add_slot(&mut s, v)?;
@@ -557,7 +566,7 @@ impl PgStore {
                             }
                         }
                     }
-                    if matches!(mode, Mode::Claim | Mode::Tree | Mode::Close) {
+                    if matches!(mode, Mode::Claim | Mode::Tree | Mode::Close | Mode::Phase) {
                         for v in self
                             .rows(conn, "queue_entries", "key=$1", &[&key(&at)], false)
                             .await?
@@ -630,11 +639,21 @@ impl PgStore {
             if before.runs.get(k) != Some(r) {
                 let mut value = json!(r);
                 value["request_spec"] = json!(s.requests.get(k).ok_or(Error::Storage)?);
-                self.put(conn,"runs","handle,spec,request_spec,schema,revision,sequence,owner,generation,state,checkpoint,cancel,stop,cleanup,settlement,delivery,output,receipt,completion","tenant,id",value).await?;
+                self.put(conn,"runs","handle,spec,request_spec,schema,revision,sequence,owner,generation,state,checkpoint,cancel,stop,cleanup,settlement,delivery,output,receipt,completion,phase","tenant,id",value).await?;
                 if r.transcript_purged()
                     && !before.runs.get(k).is_some_and(RunRecord::transcript_purged)
                 {
                     self.purge_transcript_copies(conn, &r.handle).await?;
+                }
+                if r.pending_phase().is_some()
+                    && before
+                        .runs
+                        .get(k)
+                        .and_then(RunRecord::pending_phase)
+                        .is_none()
+                {
+                    self.purge_transcript_copies(conn, &r.handle).await?;
+                    self.redact_owner_payloads(conn, &r.handle).await?;
                 }
             }
         }
@@ -664,7 +683,7 @@ impl PgStore {
         }
         for (k, o) in &s.operations {
             if before.operations.get(k) != Some(o) {
-                self.put(conn,"attempts","id,run,request,state,result,settled,unknown_usage,send_generation,send_count,replay_proof_generation,created_at,finished_at,usage_observations,unsettled_result,recovery","id",json!(o)).await?;
+                self.put(conn,"attempts","id,run,request,state,result,settled,unknown_usage,send_generation,send_count,replay_proof_generation,created_at,finished_at,usage_observations,unsettled_result,recovery,retired","id",json!(o)).await?;
                 if !before.operations.contains_key(k) {
                     let run = s.runs.get(&key(&o.run)).ok_or(Error::Storage)?;
                     for account in ancestors(s, &run.spec.account)? {

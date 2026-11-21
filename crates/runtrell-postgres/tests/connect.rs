@@ -314,7 +314,7 @@ fn mismatch_and_missing_runtime_are_refused_without_writes() {
         ))
         .await;
         env.sql(&format!(
-            "UPDATE \"{schema}\".schema_config SET version = 5"
+            "UPDATE \"{schema}\".schema_config SET version = 6"
         ))
         .await;
         let versioned = env.snapshot().await;
@@ -326,7 +326,7 @@ fn mismatch_and_missing_runtime_are_refused_without_writes() {
         );
         assert_eq!(env.snapshot().await, versioned);
         env.sql(&format!(
-            "UPDATE \"{schema}\".schema_config SET version = 4"
+            "UPDATE \"{schema}\".schema_config SET version = 5"
         ))
         .await;
 

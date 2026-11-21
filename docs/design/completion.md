@@ -91,3 +91,47 @@ Workspace files, staged document or artifact outputs, host exports and provider
 retention have separate ownership. Hosts can use the [Run erasure](erasure.md)
 workflow to delete run-owned Workspace and artifacts. Physical media, WAL,
 backups and provider archives follow the host's storage retention policy.
+
+## Intermediate finalization
+
+Set at least two ordered `PhaseConfig` entries in `RunSpec.phases` to give
+one Run multiple conversations. Each entry supplies a unique ID, a completion
+policy and a tool allowlist. An empty allowlist gives a tool-free phase. Use
+`RunRecord::active_phase()` to select validation rules and workspace grants.
+Tool adapters also check the current claim and scope saved results to the phase.
+The runtime intersects the allowlist with live host authorization.
+
+A passing intermediate submission seals the validated output and receipt in the
+Run. In the same transaction the control store purges the phase transcript,
+retires operation payloads and fences the old claim. A new claim resumes from
+the seal. The host acknowledges deletion of phase-owned copies outside the
+control store and builds the next phase's explicitly authorized input. The
+runtime opens a fresh conversation only after this acknowledgement commits.
+Artifact references in the sealed output identify immutable, readable content.
+
+Run identity, budget, cumulative usage and attempt timing survive the boundary.
+Only the host-projected input and the next phase's configured and authorized
+tools enter the new conversation. The last phase uses the Run's regular finalizer
+and terminal transcript retention policy.
+
+The configuration and identifiers contain host metadata. Child admission is
+unavailable from phased Runs.
+
+`Runtime::drive` returns the Run at `Finalizing` after the intermediate seal.
+The store queues the same Run and releases the active slot. A worker claims it
+again and calls `drive`, which invokes `Finalizer::prepare_next_phase` with
+the pending seal. Implement this hook with idempotent deletion and grant
+revocation for every phase-owned backend. It can place fresh phase data under
+a distinct workspace and return its authorized input and image references.
+Separate `DataStore` instances can isolate phase-owned workspaces and use
+`DataStore::erase_run` against the retired workspace. Return `Error::Pending`
+while deletion is unconfirmed. Retry the Run with the same seal and a valid
+claim. A cancelled or expired Run can confirm purge without opening the next
+conversation.
+
+Seals retain the artifact and validation identity until Run erasure. Progress,
+repair diagnostics, continuation, compaction, prepared requests and old tool
+bodies are cleared from the active conversation and its replay paths.
+Sealing requires settled attempts. PostgreSQL also checks that recorded
+executions have been reclaimed. Provider copies and physical storage retention
+follow the policies of their owners.

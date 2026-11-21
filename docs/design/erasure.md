@@ -8,8 +8,9 @@ another run or service is outside this ownership boundary. Hosts must also remov
 their business records and any exported copies through their own deletion workflow.
 
 Hosts that need to discard only the successful Run's conversation can configure
-[transcript purge at finalization](completion.md). Run-tree erasure below
-applies the broader removal boundary, including run-owned Workspace and artifacts.
+[transcript purge at finalization](completion.md), including an intermediate
+phase boundary. Run-tree erasure applies the broader removal boundary,
+including phase seals, run-owned Workspace and artifacts.
 
 ## Admission and order
 

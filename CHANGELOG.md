@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 — 2026-11-22 — intermediate finalization
+
+- Configure ordered phases within a Run. An intermediate submission seals its
+  validated artifact, purges its transcript and fences its claim. The next phase
+  opens a fresh conversation after host payload erasure is confirmed.
+- Select tools and completion rules per phase. Phase changes preserve the Run's
+  account, usage and attempt timestamps.
+- PostgreSQL uses schema 5 for phase seals and retired operation markers. Provision
+  a fresh schema for this release.
+
 ## 0.5.0 — 2026-11-22 — generic completion, typed progress and transcript purge
 
 - Configure final submission or validated acknowledgement, typed repair and

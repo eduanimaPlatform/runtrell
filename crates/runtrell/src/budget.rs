@@ -138,6 +138,7 @@ impl DispatchRequest {
         };
         let source = source.ok_or(Error::Conflict)?;
         if source.run != *run
+            || source.retired
             || !source.settled
             || source.send_count == 0
             || self.kind != OperationKind::Tool
