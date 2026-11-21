@@ -102,9 +102,32 @@ async fn jpeg_webp_document_views_reach_each_image_adapter_and_invalid_bytes_are
             else {
                 panic!()
             };
+            let mut workspace_ctx = ctx.clone();
+            workspace_ctx.operation = "workspace-image".into();
+            let workspace_input = json!({
+                "workspace":{"path":"image","revision":input["attachment"]["Stored"]["Workspace"]["file"]["revision"],"mime_type":mime},
+            });
+            let ExternalResult::Applied {
+                output: workspace_output,
+                ..
+            } = tool
+                .invoke(&workspace_ctx, workspace_input.clone())
+                .await
+                .unwrap()
+            else {
+                panic!();
+            };
+            assert_eq!(
+                workspace_output["image_inputs"][0]["Workspace"]["file"]["path"],
+                "image"
+            );
+            assert!(matches!(
+                tool.lookup(&workspace_ctx, workspace_input).await.unwrap(),
+                Lookup::Found(_)
+            ));
             assert_eq!(output["page_count"], 1);
             let images: Vec<ImageReference> =
-                serde_json::from_value(output["image_inputs"].clone()).unwrap();
+                serde_json::from_value(workspace_output["image_inputs"].clone()).unwrap();
             assert_eq!(images[0].hash(), content_digest(&bytes));
             let (endpoint, http) = server(200, "", response(kind, "completed", false)).await;
             let mut c = config(endpoint);

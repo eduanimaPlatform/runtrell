@@ -7,6 +7,7 @@ pub use api::*;
 mod owner;
 pub use owner::*;
 mod erasure;
+mod transcript;
 pub use erasure::RunPayloadStore;
 mod driver;
 pub mod memory;

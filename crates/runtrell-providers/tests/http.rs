@@ -29,6 +29,9 @@ mod openai_image_contracts {
 #[cfg(feature = "gemini")]
 #[path = "support/attachment_window.rs"]
 mod attachment_window;
+#[cfg(feature = "gemini")]
+#[path = "support/completion.rs"]
+mod completion_contracts;
 #[path = "support/documents.rs"]
 mod document_contracts;
 #[path = "support/still_images.rs"]
@@ -2559,6 +2562,8 @@ async fn responses_compacts_grown_file_history_then_writes_the_deliverable() {
     // 20,000 input cap - 13,500 slack = 6,500 input before compaction.
     spec.compaction = Some(CompactionPolicy {
         min_remaining_tokens: 13_500,
+        preserve_progress: false,
+        max_without_progress: None,
     });
     let run = store.start(spec).await.unwrap();
     let now = std::time::SystemTime::now()

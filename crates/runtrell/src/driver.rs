@@ -12,6 +12,7 @@ use runtrell_protocol::{
 use serde_json::Value;
 use std::{future::Future, sync::Arc};
 mod context;
+mod progress;
 
 fn child_ready(run: &RunRecord) -> bool {
     matches!(run.state, RunState::Terminal(_))
@@ -631,9 +632,10 @@ impl<
         current: &RunRecord,
         candidate: Value,
         receipt: ValidationReceipt,
-        reason: &str,
+        error: Error,
     ) -> Result<RunRecord> {
         let mut checkpoint = current.checkpoint.clone().ok_or(Error::Conflict)?;
+        record_progress_stop(&mut checkpoint, &error)?;
         checkpoint.payload["last_validation"] =
             serde_json::json!({"candidate":candidate,"receipt":receipt});
         bx(|| {
@@ -641,7 +643,7 @@ impl<
                 .checkpoint(c, current.revision, checkpoint, self.clock.now())
         })
         .await?;
-        Err(Error::Invalid(reason.into()))
+        Err(error)
     }
     async fn next_attempt(
         &self,
@@ -826,6 +828,7 @@ impl<
             }
             let terminal = match e {
                 Error::Deadline => Some(Terminal::DeadlineReached),
+                Error::NoProgress(stop) => Some(Terminal::Stalled(stop.clone())),
                 Error::BudgetAtLimit | Error::ReservationDenied | Error::PriceNotConfigured => {
                     Some(Terminal::BudgetReached(e.to_string()))
                 }
@@ -874,8 +877,44 @@ impl<
                 return Err(Error::Pending("children".into()));
             }
         }
+        if let Some(stop) = r
+            .checkpoint
+            .as_ref()
+            .and_then(|cp| cp.payload.get("progress_stop"))
+        {
+            let stop = serde_json::from_value(stop.clone()).map_err(|_| Error::Conflict)?;
+            return Err(Error::NoProgress(stop));
+        }
+        if r.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+            && !self.store.supports_transcript_purge()
+        {
+            return Err(Error::Unsupported("control store transcript purge".into()));
+        }
         let catalog = self.tools.iter().map(Tool::descriptor).collect::<Vec<_>>();
-        file_tools::pin_catalog(&r, &self.policy, &self.tools)?;
+        let offered = file_tools::pin_catalog(&r, &self.policy, &self.tools)?;
+        if let Some(schema) = &r.spec.completion.output_schema {
+            schema::compile_schema(schema)?;
+        }
+        if r.spec.completion.provider_format
+            && r.spec.completion.output_schema.is_none()
+            && r.spec.completion.mode == CompletionMode::FinalSubmission
+        {
+            return Err(Error::Invalid(
+                "provider format requires an output schema".into(),
+            ));
+        }
+        if r.spec.completion.mode == CompletionMode::ValidatedAck
+            && r.spec.completion.validation_tool.is_none()
+        {
+            return Err(Error::Invalid(
+                "validated acknowledgement requires a validation tool".into(),
+            ));
+        }
+        if let Some(tool) = &r.spec.completion.validation_tool
+            && !offered.iter().any(|descriptor| descriptor.name == *tool)
+        {
+            return Err(Error::PermissionDenied);
+        }
         if let Some(cp) = &r.checkpoint
             && !cp.payload["context"].is_null()
             && cp.payload["context_owner"]
@@ -988,12 +1027,20 @@ impl<
         &self,
         c: &Claim,
         raw: String,
-        mut messages: Vec<Message>,
+        messages: Vec<Message>,
     ) -> Result<RunRecord> {
-        let protocol_spec = ProtocolSpec::new();
+        let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
+        self.policy.authorize(&current, "finalize", "finalize")?;
+        bx(|| self.store.finalization_allowed(c, self.clock.now())).await?;
+        if current.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+            && bx(|| self.store.list_operations(&c.run))
+                .await?
+                .iter()
+                .any(|op| !op.transcript_purge_ready())
+        {
+            return Err(Error::Pending("external reconciliation".into()));
+        }
         let parsed = schema::parse_json(raw.as_bytes());
-        // Bind syntax failures to the exact raw string, never to a
-        // fabricated object. A valid JSON string remains a normal value.
         let output = parsed
             .as_ref()
             .cloned()
@@ -1002,7 +1049,7 @@ impl<
             Value::String(
                 output
                     .as_str()
-                    .unwrap()
+                    .ok_or(Error::Conflict)?
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" "),
@@ -1010,100 +1057,101 @@ impl<
         } else {
             output.clone()
         };
-        let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
-        self.policy.authorize(&current, "finalize", "finalize")?;
-        // Enforce budget/deadline before validation; repair policy follows the receipt.
-        bx(|| self.store.finalization_allowed(c, self.clock.now())).await?;
-        let validator = self.validator.clone();
-        let validation_run = current.clone();
-        let validation_output = output.clone();
-        let receipt = tokio::task::spawn_blocking(move || match parsed {
-            Ok(_) => validator.validate(&validation_run, &validation_output),
-            Err(diagnostics) => Ok(ValidationReceipt {
-                repairable: true,
-                hash: digest(&validation_output),
-                basis_revision: validation_run.spec.basis_revision,
-                config_version: validation_run.spec.config_version,
-                validator: validation_run.spec.validator,
-                validator_version: validation_run.spec.validator_version,
-                passed: false,
-                diagnostics,
-            }),
-        })
-        .await
-        .map_err(|_| Error::Storage)??;
-        if receipt.hash != digest(&output)
-            || receipt.basis_revision != current.spec.basis_revision
-            || receipt.config_version != current.spec.config_version
-            || receipt.validator != current.spec.validator
-            || receipt.validator_version != current.spec.validator_version
-        {
-            return Err(Error::Conflict);
-        }
-        if !receipt.passed {
-            if !receipt.repairable || !diagnostics_agent_repairable(&receipt.diagnostics) {
-                return self
-                    .validation_failure(c, &current, output, receipt, "VALIDATION_UNREPAIRABLE")
-                    .await;
+        let (output, receipt, target) = match &current.spec.completion.mode {
+            CompletionMode::FinalSubmission => {
+                let diagnostics = match parsed {
+                    Err(diagnostics) => diagnostics,
+                    Ok(_) => output_diagnostics(&current, &output)?,
+                };
+                if diagnostics.is_empty() {
+                    let validator = self.validator.clone();
+                    let validation_run = current.clone();
+                    let candidate = output.clone();
+                    let receipt = tokio::task::spawn_blocking(move || {
+                        validator.validate(&validation_run, &candidate)
+                    })
+                    .await
+                    .map_err(|_| Error::Storage)??;
+                    let target = self.validator.repair_target(&receipt);
+                    (output, receipt, target)
+                } else {
+                    let receipt = rejected(&current, &output, diagnostics);
+                    (output, receipt, RepairTarget::OutputFormat)
+                }
             }
-            let previous = current
-                .checkpoint
-                .as_ref()
-                .map(|cp| cp.payload["repair"].clone())
-                .unwrap_or(Value::Null);
-            let count = previous["count"].as_u64().unwrap_or(0);
-            let started = repair_started(&current).unwrap_or(self.clock.now());
-            let policy = self.checked_repair_policy(&current)?;
-            let mut progress = previous.clone();
-            let diagnostics =
-                serde_json::to_value(&receipt.diagnostics).map_err(|_| Error::Storage)?;
-            let stalled = record_repair_progress(
-                &mut progress,
-                &current,
-                "validation",
-                &progress_candidate,
-                &diagnostics,
-                &policy,
-            );
-            if stalled {
-                let mut stopped = current.clone();
-                stopped.checkpoint.as_mut().ok_or(Error::Conflict)?.payload["repair"]["no_progress"] =
-                    progress["no_progress"].clone();
-                return self
-                    .validation_failure(
-                        c,
-                        &stopped,
-                        output,
-                        receipt,
-                        &no_progress_reason(&diagnostics),
+            CompletionMode::ValidatedAck => {
+                let tool = current
+                    .spec
+                    .completion
+                    .validation_tool
+                    .as_ref()
+                    .ok_or(Error::Conflict)?;
+                let feedback = pending_ack(&current)?
+                    .ok_or_else(|| Error::Invalid("VALIDATED_ACK_REQUIRED".into()))?;
+                let descriptor = self
+                    .tools
+                    .iter()
+                    .map(Tool::descriptor)
+                    .find(|descriptor| descriptor.name == *tool)
+                    .ok_or(Error::Conflict)?;
+                self.policy
+                    .authorize(&current, tool, &descriptor.permission)?;
+                if feedback.receipt.basis_revision != current.spec.basis_revision
+                    || self.validator.completion_basis(&current)? != feedback.basis
+                {
+                    let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+                    cp.payload["validated_ack"] = Value::Null;
+                    let receipt = rejected(
+                        &current,
+                        &output,
+                        vec![completion_diagnostic(
+                            "VALIDATION_BASIS_CHANGED",
+                            "The validated state changed. Validate the current state before acknowledging it.",
+                        )],
+                    );
+                    return bx(|| {
+                        self.repair_final(
+                            c,
+                            current,
+                            cp,
+                            messages,
+                            (output.clone(), &output, receipt, RepairTarget::Workspace),
+                        )
+                    })
+                    .await;
+                }
+                if output != serde_json::json!({"acknowledged":true}) {
+                    let receipt = rejected(
+                        &current,
+                        &output,
+                        vec![completion_diagnostic(
+                            "ACK_FORMAT",
+                            "Reply with the acknowledgement object requested.",
+                        )],
+                    );
+                    (output, receipt, RepairTarget::OutputFormat)
+                } else {
+                    (
+                        feedback.candidate,
+                        feedback.receipt,
+                        RepairTarget::OutputFormat,
                     )
-                    .await;
+                }
             }
-            if policy
-                .max_repairs
-                .is_some_and(|max| repair_count(&current) >= max)
-                || policy
-                    .max_elapsed
-                    .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
-            {
-                return self
-                    .validation_failure(c, &current, output, receipt, "VALIDATION_REPAIR_LIMIT")
-                    .await;
-            }
-            let feedback = serde_json::json!({"candidate":output,"diagnostics":receipt.diagnostics,"instruction":"Correct the candidate and submit it for validation again"});
-            messages.push(Message::text("user", feedback.to_string()));
-            let next = AgentRun::from_spec(&protocol_spec, feedback.to_string(), None);
-            let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
-            cp.payload["protocol"] = serde_json::to_value(next).map_err(|_| Error::Storage)?;
-            cp.payload["repair"] = serde_json::json!({"schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,"started":started,"candidate":output,"receipt":receipt});
-            cp.payload["repair"]["no_progress"] = progress["no_progress"].clone();
-            cp.messages = messages;
-            bx(|| {
-                self.store
-                    .checkpoint(c, current.revision, cp, self.clock.now())
+        };
+        check_receipt(&current, &output, &receipt)?;
+        if !receipt.passed {
+            let cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+            return bx(|| {
+                self.repair_final(
+                    c,
+                    current,
+                    cp,
+                    messages,
+                    (output, &progress_candidate, receipt, target),
+                )
             })
-            .await?;
-            return Err(Error::Pending("validation repair".into()));
+            .await;
         }
         let finalizer = self.finalizer.clone();
         let completion =
@@ -1112,6 +1160,70 @@ impl<
                 .map_err(|_| Error::Storage)??;
         bx(|| self.store.finalize(c, completion, self.clock.now())).await?;
         bx(|| self.store.get(&c.run)).await
+    }
+
+    async fn repair_final(
+        &self,
+        c: &Claim,
+        mut current: RunRecord,
+        mut cp: Checkpoint,
+        mut messages: Vec<Message>,
+        (output, progress_candidate, receipt, target): (
+            Value,
+            &Value,
+            ValidationReceipt,
+            RepairTarget,
+        ),
+    ) -> Result<RunRecord> {
+        let started = repair_started(&current).unwrap_or(self.clock.now());
+        let policy = self.checked_repair_policy(&current)?;
+        let reason = if !receipt.repairable || !diagnostics_agent_repairable(&receipt.diagnostics) {
+            Some(Error::Invalid("VALIDATION_UNREPAIRABLE".into()))
+        } else if record_repair_progress(
+            &mut cp.payload["repair_progress"],
+            &current,
+            None,
+            progress_candidate,
+            &receipt.diagnostics,
+            &policy,
+        )? {
+            Some(validation_stall(&receipt.diagnostics))
+        } else if repair_limit(&current, &policy, started, self.clock.now()) {
+            Some(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()))
+        } else {
+            None
+        };
+        if let Some(error) = reason {
+            current.checkpoint = Some(cp);
+            return self
+                .validation_failure(c, &current, output, receipt, error)
+                .await;
+        }
+        let feedback = serde_json::json!({
+            "candidate":output,"diagnostics":receipt.diagnostics,
+            "instruction": match target {
+                RepairTarget::OutputFormat => "Correct the response format and submit it again.",
+                RepairTarget::Workspace => "Address the diagnostics using the available tools, then submit again.",
+            },
+        });
+        let instruction = feedback.to_string();
+        messages.push(Message::text("user", &instruction));
+        let next = AgentRun::from_spec(&ProtocolSpec::new(), instruction, None);
+        let count = cp.payload["repair"]["count"].as_u64().unwrap_or(0);
+        cp.payload["protocol"] = serde_json::to_value(next).map_err(|_| Error::Storage)?;
+        cp.payload["repair"] = serde_json::json!({
+            "schema":1,"count":count.checked_add(1).ok_or(Error::Conflict)?,
+            "started":started,"candidate":output,"receipt":receipt,
+        });
+        cp.payload["completion_repair_target"] =
+            serde_json::to_value(target).map_err(|_| Error::Storage)?;
+        cp.messages = messages;
+        bx(|| {
+            self.store
+                .checkpoint(c, current.revision, cp, self.clock.now())
+        })
+        .await?;
+        Err(Error::Pending("validation repair".into()))
     }
 
     // Separate poll frames keep branch-local request preparation and decoding
@@ -1145,33 +1257,100 @@ impl<
             if let Some(cp) = &current.checkpoint {
                 *messages = cp.messages.clone();
             }
-            let req = ModelRequest {
-                attachments: crate::attachments::model_attachments(messages)?,
-                model: self.model.limits().model,
-                messages: messages.clone(),
-                tools: descriptors.clone(),
-                max_output: 0,
-                metadata: Value::Null,
-                images: images::model_images(&current, messages)?,
+            let ack = if let Some(feedback) = pending_ack(&current)? {
+                if feedback.receipt.basis_revision != current.spec.basis_revision
+                    || self.validator.completion_basis(&current)? != feedback.basis
+                {
+                    let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+                    cp.payload["validated_ack"] = Value::Null;
+                    cp.messages.push(Message::text(
+                        "user",
+                        "The validated state changed. Validate the current state again.",
+                    ));
+                    bx(|| {
+                        self.store
+                            .checkpoint(c, current.revision, cp.clone(), self.clock.now())
+                    })
+                    .await?;
+                    *messages = cp.messages;
+                    return Ok(());
+                }
+                true
+            } else {
+                false
             };
-            let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
-            let input = self.model.input_upper_bound(&prepared)?;
-            if current.spec.compaction.as_ref().is_some_and(|policy| {
-                let limits = self.model.limits();
-                let input_limit = self
-                    .model
-                    .compaction_input_limit(&prepared)
-                    .unwrap_or(u64::MAX);
-                limits
-                    .context
-                    .saturating_sub(limits.max_output)
-                    .min(input_limit)
-                    .saturating_sub(input)
-                    < policy.min_remaining_tokens
-            }) && current
+            let format_repair = current
                 .checkpoint
                 .as_ref()
-                .is_none_or(|cp| cp.payload["compacted_for"] != key)
+                .is_some_and(|cp| cp.payload["completion_repair_target"] == "output_format");
+            let mut req = if ack {
+                ModelRequest {
+                    attachments: vec![],
+                    model: self.model.limits().model,
+                    messages: vec![Message::text(
+                        "user",
+                        "The submitted candidate has been validated. Reply only with {\"acknowledged\":true}.",
+                    )],
+                    tools: vec![],
+                    max_output: 0,
+                    metadata: Value::Null,
+                    images: vec![],
+                }
+            } else {
+                ModelRequest {
+                    attachments: crate::attachments::model_attachments(messages)?,
+                    model: self.model.limits().model,
+                    messages: messages.clone(),
+                    tools: descriptors
+                        .iter()
+                        .filter(|d| {
+                            !format_repair
+                                || (current.spec.completion.mode == CompletionMode::ValidatedAck
+                                    && current.spec.completion.validation_tool.as_ref()
+                                        == Some(&d.name))
+                        })
+                        .cloned()
+                        .collect(),
+                    max_output: 0,
+                    metadata: Value::Null,
+                    images: images::model_images(&current, messages)?,
+                }
+            };
+            if current.spec.completion.provider_format
+                && self.model.supports_output_schema()
+                && req.tools.is_empty()
+            {
+                let schema = if ack {
+                    Some(
+                        serde_json::json!({"type":"object","properties":{"acknowledged":{"type":"boolean","enum":[true]}},"required":["acknowledged"],"additionalProperties":false}),
+                    )
+                } else {
+                    current.spec.completion.output_schema.clone()
+                };
+                if let Some(schema) = schema {
+                    req.metadata = serde_json::json!({"provider_options":{"json_schema":schema}});
+                }
+            }
+            let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
+            let input = self.model.input_upper_bound(&prepared)?;
+            if !ack
+                && current.spec.compaction.as_ref().is_some_and(|policy| {
+                    let limits = self.model.limits();
+                    let input_limit = self
+                        .model
+                        .compaction_input_limit(&prepared)
+                        .unwrap_or(u64::MAX);
+                    limits
+                        .context
+                        .saturating_sub(limits.max_output)
+                        .min(input_limit)
+                        .saturating_sub(input)
+                        < policy.min_remaining_tokens
+                })
+                && current
+                    .checkpoint
+                    .as_ref()
+                    .is_none_or(|cp| cp.payload["compacted_for"] != key)
             {
                 let data = context::CheckpointContext {
                     store: self.store.as_ref(),
@@ -1251,6 +1430,7 @@ impl<
         }
         let invoke_request: ModelRequest = serde_json::from_value(dispatch.input.clone())
             .map_err(|e| Error::Invalid(e.to_string()))?;
+        let restricted = request.tools != descriptors || pending_ack(&current)?.is_some();
         let lookup_request = PreparedModelRequest::for_lookup(invoke_request.clone())?;
         let result = bx(|| {
             self.dispatch(
@@ -1329,6 +1509,14 @@ impl<
         if !reply.complete {
             return Err(Error::Invalid("incomplete model stream".into()));
         }
+        if restricted
+            && reply
+                .calls
+                .iter()
+                .any(|call| !request.tools.iter().any(|d| d.name == call.name))
+        {
+            return Err(Error::Invalid("MODEL_TOOL_NOT_OFFERED".into()));
+        }
         let definitions = request
             .tools
             .iter()
@@ -1402,35 +1590,43 @@ impl<
         let policy = self.checked_repair_policy(current)?;
         let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
         cp.payload["last_tool_validation"] = diagnostic.clone();
-        let diagnostics = diagnostic
+        let diagnostics: Vec<Diagnostic> = diagnostic
             .get("diagnostics")
             .cloned()
-            .unwrap_or_else(|| serde_json::json!([{ "code": diagnostic["code"] }]));
-        let candidate =
-            serde_json::json!({"tool":diagnostic["tool"],"input":diagnostic["candidate"]});
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| Error::Conflict)?
+            .unwrap_or_else(|| {
+                vec![completion_diagnostic(
+                    diagnostic["code"].as_str().unwrap_or("TOOL_REPAIR"),
+                    diagnostic["hint"].as_str().unwrap_or_default(),
+                )]
+            });
+        let validation = diagnostic["validation"] == true;
+        let scope = if validation {
+            None
+        } else {
+            diagnostic["tool"].as_str()
+        };
         if record_repair_progress(
-            &mut cp.payload["tool_repair"],
+            &mut cp.payload["repair_progress"],
             current,
-            "tool",
-            &candidate,
+            scope,
+            &diagnostic["candidate"],
             &diagnostics,
             &policy,
-        ) {
+        )? {
+            let error = validation_stall(&diagnostics);
+            record_progress_stop(&mut cp, &error)?;
             bx(|| {
                 self.store
                     .checkpoint(c, current.revision, cp, self.clock.now())
             })
             .await?;
-            return Err(Error::Invalid(no_progress_reason(&diagnostics)));
+            return Err(error);
         }
         let started = repair_started(current).unwrap_or(self.clock.now());
-        if policy
-            .max_repairs
-            .is_some_and(|max| repair_count(current) >= max)
-            || policy
-                .max_elapsed
-                .is_some_and(|max| self.clock.now().saturating_sub(started) >= max)
-        {
+        if repair_limit(current, &policy, started, self.clock.now()) {
             bx(|| {
                 self.store
                     .checkpoint(c, current.revision, cp, self.clock.now())
@@ -1594,7 +1790,7 @@ impl<
             d.account_binding = descriptor.account.clone();
             d.timeout = Some(descriptor.timeout);
             let lookup_input = input.clone();
-            let repair_input = input.clone();
+            let tool_input = input.clone();
             if let Some(op) = &old {
                 d = bx(|| self.next_attempt(c, op, descriptor.retry.clone())).await?;
             }
@@ -1628,7 +1824,7 @@ impl<
                 }
                 let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
                 let mut cp = self
-                    .prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":repair_input,"code":code,"repairable":true,"hint":hint}))
+                    .prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":tool_input,"code":code,"repairable":true,"hint":hint}))
                     .await?;
                 let op = bx(|| self.store.operation(&c.run, &key))
                     .await?
@@ -1667,6 +1863,12 @@ impl<
             if serde_json::to_vec(&output).unwrap().len() > descriptor.max_output_bytes {
                 return Err(Error::Invalid("tool output exceeds declared limit".into()));
             }
+            let call_id = call.id().to_string();
+            let (cp, projected) = bx(|| {
+                self.checkpoint_tool_progress(c, &current, tool, &tool_input, &output, &call_id)
+            })
+            .await?;
+            let output = projected.unwrap_or(output);
             let mut candidate_messages = messages.clone();
             candidate_messages.push(Message {
                 role: "tool".into(),
@@ -1708,9 +1910,128 @@ impl<
             run.answer(call.answer(answer))
                 .map_err(|e| Error::Invalid(e.to_string()))?;
             *cursor += 1;
-            bx(|| self.save(c, run, messages.clone(), *cursor, catalog)).await?;
+            if let Some(mut cp) = cp {
+                cp.payload["protocol"] = serde_json::to_value(&run).map_err(|_| Error::Storage)?;
+                cp.messages = messages.clone();
+                cp.cursor = *cursor;
+                bx(|| {
+                    self.store
+                        .checkpoint(c, current.revision, cp, self.clock.now())
+                })
+                .await?;
+            } else {
+                bx(|| self.save(c, run, messages.clone(), *cursor, catalog)).await?;
+            }
         }
         Ok(())
+    }
+
+    async fn checkpoint_tool_progress(
+        &self,
+        c: &Claim,
+        current: &RunRecord,
+        tool: &T,
+        input: &Value,
+        output: &Value,
+        call_id: &str,
+    ) -> Result<(Option<Checkpoint>, Option<Value>)> {
+        let name = tool.descriptor().name;
+        let completion_tool = current.spec.completion.validation_tool.as_ref() == Some(&name);
+        let ack_mode = current.spec.completion.mode == CompletionMode::ValidatedAck;
+        let track = completion_tool
+            || current.spec.max_repeated_reads.is_some()
+            || current
+                .spec
+                .compaction
+                .as_ref()
+                .is_some_and(|p| p.preserve_progress || p.max_without_progress.is_some());
+        if !track {
+            return Ok((None, None));
+        }
+        let mut cp = current.checkpoint.clone().ok_or(Error::Conflict)?;
+        let mut progress = progress::WorkProgress::load(&cp)?;
+        let mut projected = None;
+        if completion_tool {
+            let mut feedback: ValidationFeedback =
+                serde_json::from_value(output.clone()).map_err(|_| Error::Conflict)?;
+            check_receipt(current, &feedback.candidate, &feedback.receipt)?;
+            if feedback.basis.is_empty() {
+                return Err(Error::Conflict);
+            }
+            if feedback.receipt.passed {
+                let diagnostics = output_diagnostics(current, &feedback.candidate)?;
+                if !diagnostics.is_empty() {
+                    feedback.receipt = rejected(current, &feedback.candidate, diagnostics);
+                    feedback.repair_target = RepairTarget::OutputFormat;
+                }
+            }
+            if ack_mode
+                && feedback.receipt.passed
+                && self.validator.completion_basis(current)? != feedback.basis
+            {
+                feedback.receipt = rejected(
+                    current,
+                    &feedback.candidate,
+                    vec![completion_diagnostic(
+                        "VALIDATION_BASIS_CHANGED",
+                        "Validate the current state again.",
+                    )],
+                );
+                feedback.repair_target = RepairTarget::Workspace;
+            }
+            if feedback.receipt.passed {
+                progress.validation_pass(&feedback);
+                if ack_mode {
+                    cp.payload["validated_ack"] =
+                        serde_json::to_value(&feedback).map_err(|_| Error::Storage)?;
+                }
+                cp.payload["last_tool_validation"] = Value::Null;
+            } else {
+                if !feedback.receipt.repairable
+                    || !diagnostics_agent_repairable(&feedback.receipt.diagnostics)
+                {
+                    cp.payload["last_tool_validation"] =
+                        serde_json::to_value(&feedback).map_err(|_| Error::Storage)?;
+                    bx(|| {
+                        self.store
+                            .checkpoint(c, current.revision, cp, self.clock.now())
+                    })
+                    .await?;
+                    return Err(Error::Invalid("VALIDATION_UNREPAIRABLE".into()));
+                }
+                cp = bx(|| self.prepare_tool_repair(c, current, serde_json::json!({
+                    "tool":name,"candidate":feedback.candidate,"diagnostics":feedback.receipt.diagnostics,
+                    "validation":true,"target":feedback.repair_target,
+                }))).await?;
+                cp.payload["validated_ack"] = Value::Null;
+            }
+            cp.payload["completion_repair_target"] = if feedback.receipt.passed {
+                Value::Null
+            } else {
+                serde_json::to_value(feedback.repair_target).map_err(|_| Error::Storage)?
+            };
+            projected = Some(serde_json::json!({
+                "passed":feedback.receipt.passed,"diagnostics":feedback.receipt.diagnostics,
+                "repair_target":feedback.repair_target,
+            }));
+        }
+        let stopped = progress.apply(
+            tool.progress(input, output)?,
+            current.spec.max_repeated_reads,
+            call_id,
+        )?;
+        progress.save(&mut cp)?;
+        if stopped {
+            let error = Error::NoProgress(ProgressStop::RepeatedRead);
+            record_progress_stop(&mut cp, &error)?;
+            bx(|| {
+                self.store
+                    .checkpoint(c, current.revision, cp, self.clock.now())
+            })
+            .await?;
+            return Err(error);
+        }
+        Ok((Some(cp), projected))
     }
 }
 fn operation_prefix(run: &RunRecord) -> String {
@@ -1725,78 +2046,78 @@ fn operation_prefix(run: &RunRecord) -> String {
     }
     prefix
 }
-// Persist only a digest of stable diagnostic identity, excluding prose and positions.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct RepairProgress {
+    visits: std::collections::BTreeMap<String, u64>,
+    fingerprint: String,
+    occurrences: u64,
+}
+
 fn record_repair_progress(
     state: &mut Value,
     run: &RunRecord,
-    role: &str,
+    tool: Option<&str>,
     candidate: &Value,
-    diagnostics: &Value,
+    diagnostics: &[Diagnostic],
     policy: &RepairPolicy,
-) -> bool {
-    let mut identities: Vec<String> = diagnostics
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|diagnostic| !matches!(diagnostic["severity"].as_str(), Some("info" | "warning")))
-        .map(|diagnostic| {
-            let mut identity = serde_json::Map::new();
-            for key in [
-                "code",
-                "file",
-                "path",
-                "schema_path",
-                "artifact",
-                "field",
-                "rule",
-                "repair",
-                "observation",
-            ] {
-                if let Some(value) = diagnostic.get(key) {
-                    identity.insert(key.into(), value.clone());
-                }
-            }
-            // Once the host observes an artifact, envelope/prose changes do not
-            // constitute progress. Unobserved candidate diagnostics still bind
-            // the candidate, even in a mixed receipt.
-            if diagnostic.get("observation").is_none_or(Value::is_null) {
-                identity.insert("candidate".into(), candidate.clone());
-            }
-            digest(&Value::Object(identity))
+) -> Result<bool> {
+    let mut identities: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| {
+            // Prose, line positions and ordering can change without fixing the same rule.
+            let candidate = d.observation.is_none().then_some(candidate);
+            digest(&serde_json::json!([
+                d.code,
+                d.file,
+                d.path,
+                d.schema_path,
+                d.artifact,
+                d.field,
+                d.repair,
+                d.observation,
+                candidate,
+            ]))
         })
         .collect();
     identities.sort();
     identities.dedup();
-    let fingerprint = digest(&serde_json::json!({
-        "run":run.handle,"role":role,"validator":run.spec.validator,
-        "validator_version":run.spec.validator_version,"config":run.spec.config_version,
-        "basis":run.spec.basis_revision,"diagnostics":identities,
-        "empty_candidate":if identities.is_empty() {candidate} else {&Value::Null},
-    }));
-    if state.is_null() {
-        *state = serde_json::json!({});
-    }
-    if state["no_progress"].is_null() {
-        state["no_progress"] = serde_json::json!({"visits":{}});
-    }
-    let occurrences = state["no_progress"]["visits"][&fingerprint]
-        .as_u64()
-        .unwrap_or(0)
-        .saturating_add(1);
-    state["no_progress"]["visits"][&fingerprint] = occurrences.into();
-    state["no_progress"]["fingerprint"] = fingerprint.into();
-    state["no_progress"]["occurrences"] = occurrences.into();
-    policy
+    let fingerprint = digest(&serde_json::json!([
+        run.handle,
+        run.spec.validator,
+        run.spec.validator_version,
+        run.spec.config_version,
+        run.spec.basis_revision,
+        tool,
+        identities,
+    ]));
+    let mut progress: RepairProgress = if state.is_null() {
+        RepairProgress::default()
+    } else {
+        serde_json::from_value(state.clone()).map_err(|_| Error::Conflict)?
+    };
+    let count = progress.visits.entry(fingerprint.clone()).or_default();
+    *count = count.saturating_add(1);
+    progress.occurrences = *count;
+    progress.fingerprint = fingerprint;
+    let stop = policy
         .max_no_progress
-        .is_some_and(|max| occurrences >= max.get())
+        .is_some_and(|max| progress.occurrences >= max.get());
+    *state = serde_json::to_value(progress).map_err(|_| Error::Storage)?;
+    Ok(stop)
 }
-fn no_progress_reason(diagnostics: &Value) -> String {
-    // Never copy candidate, paths, free-text causes or hints into the terminal reason.
+fn record_progress_stop(checkpoint: &mut Checkpoint, error: &Error) -> Result<()> {
+    if let Error::NoProgress(stop) = error {
+        checkpoint.payload["progress_stop"] =
+            serde_json::to_value(stop).map_err(|_| Error::Storage)?;
+    }
+    Ok(())
+}
+
+fn validation_stall(diagnostics: &[Diagnostic]) -> Error {
     let mut codes: Vec<_> = diagnostics
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|d| d["code"].as_str())
+        .iter()
+        .map(|d| d.code.as_str())
         .filter(|code| {
             !code.is_empty()
                 && code.len() <= 64
@@ -1807,10 +2128,83 @@ fn no_progress_reason(diagnostics: &Value) -> String {
         .collect();
     codes.sort();
     codes.dedup();
-    format!(
-        "VALIDATION_NO_PROGRESS: {}",
-        codes.into_iter().take(4).collect::<Vec<_>>().join(",")
-    )
+    Error::NoProgress(ProgressStop::Validation {
+        codes: codes.into_iter().take(4).map(str::to_owned).collect(),
+    })
+}
+fn repair_limit(run: &RunRecord, policy: &RepairPolicy, started: u64, now: u64) -> bool {
+    policy
+        .max_repairs
+        .is_some_and(|max| repair_count(run) >= max)
+        || policy
+            .max_elapsed
+            .is_some_and(|max| now.saturating_sub(started) >= max)
+}
+fn completion_diagnostic(code: &str, hint: &str) -> Diagnostic {
+    Diagnostic {
+        repair: DiagnosticRepair::Agent,
+        observation: None,
+        code: code.into(),
+        severity: "error".into(),
+        path: String::new(),
+        schema_path: None,
+        artifact: None,
+        file: None,
+        field: None,
+        span: None,
+        position: None,
+        cause: String::new(),
+        hint: hint.into(),
+    }
+}
+fn rejected(run: &RunRecord, output: &Value, diagnostics: Vec<Diagnostic>) -> ValidationReceipt {
+    ValidationReceipt {
+        hash: digest(output),
+        basis_revision: run.spec.basis_revision,
+        config_version: run.spec.config_version.clone(),
+        validator: run.spec.validator.clone(),
+        validator_version: run.spec.validator_version.clone(),
+        passed: false,
+        repairable: diagnostics_agent_repairable(&diagnostics),
+        diagnostics,
+    }
+}
+fn check_receipt(run: &RunRecord, output: &Value, receipt: &ValidationReceipt) -> Result<()> {
+    if receipt.hash != digest(output)
+        || receipt.basis_revision != run.spec.basis_revision
+        || receipt.config_version != run.spec.config_version
+        || receipt.validator != run.spec.validator
+        || receipt.validator_version != run.spec.validator_version
+    {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+fn output_diagnostics(run: &RunRecord, output: &Value) -> Result<Vec<Diagnostic>> {
+    run.spec
+        .completion
+        .output_schema
+        .as_ref()
+        .map_or_else(|| Ok(vec![]), |schema| schema_diagnostics(output, schema))
+}
+fn pending_ack(run: &RunRecord) -> Result<Option<ValidationFeedback>> {
+    let Some(cp) = &run.checkpoint else {
+        return Ok(None);
+    };
+    let Some(proof) = cp.payload.get("validated_ack").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let feedback: ValidationFeedback =
+        serde_json::from_value(proof.clone()).map_err(|_| Error::Conflict)?;
+    if !feedback.receipt.passed
+        || feedback.receipt.hash != digest(&feedback.candidate)
+        || feedback.receipt.config_version != run.spec.config_version
+        || feedback.receipt.validator != run.spec.validator
+        || feedback.receipt.validator_version != run.spec.validator_version
+    {
+        return Err(Error::Conflict);
+    }
+    Ok(Some(feedback))
 }
 fn repair_started(run: &RunRecord) -> Option<u64> {
     let cp = run.checkpoint.as_ref()?;
@@ -1865,6 +2259,23 @@ impl<
             return Err(Error::PermissionDenied);
         }
         let base = data.context(access).await?;
+        let current = bx(|| self.store.get(&c.run)).await?;
+        let history = if current
+            .spec
+            .compaction
+            .as_ref()
+            .is_some_and(|policy| policy.preserve_progress)
+            && let Some(cp) = &current.checkpoint
+        {
+            let progress = progress::WorkProgress::load(cp)?;
+            serde_json::json!({
+                "history":progress.summary_history(&base.history),
+                "progress":progress.projection(cp),
+                "purpose":base.purpose,
+            })
+        } else {
+            serde_json::json!({"purpose":base.purpose,"history":base.history})
+        };
         let limits = self.model.compaction_limits();
         let request = ModelRequest {
             attachments: vec![],
@@ -1878,18 +2289,14 @@ impl<
                     "user",
                     // Fixed constraints, pending state and artifact provenance stay
                     // outside the summary; do not consume context by quoting them twice.
-                    serde_json::to_string(
-                        &serde_json::json!({"purpose":base.purpose,"history":base.history}),
-                    )
-                    .map_err(|_| Error::Storage)?,
+                    serde_json::to_string(&history).map_err(|_| Error::Storage)?,
                 ),
             ],
             tools: vec![],
             max_output: 0,
-            metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water,"context_digest":digest(&serde_json::to_value(&base).map_err(|_| Error::Storage)?)}),
+            metadata: serde_json::json!({"context_revision":base.revision,"high_water":base.high_water,"context_digest":digest(&serde_json::to_value(&base).map_err(|_| Error::Storage)?),"projection_digest":digest(&history)}),
             images: vec![],
         };
-        let current = bx(|| self.store.get(&c.run)).await?;
         let d = if let Some(op) = bx(|| self.store.operation(&c.run, key)).await? {
             let stored: ModelRequest =
                 serde_json::from_value(op.request.input.clone()).map_err(|_| Error::Conflict)?;

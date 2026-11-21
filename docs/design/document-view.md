@@ -26,3 +26,12 @@ the single inspected image; an explicit image range must be `1..1`. MIME opt-in,
 dimensions and byte limits come from the existing `ImageLimits`. OpenAI, Gemini
 and OpenRouter support this ordinary image route when host-enabled; OpenRouter
 rejects the separate document route. No additional image decoder is used.
+
+For Workspace content, pass a logical path, the revision reported by the file
+catalog and the media type. For example, a raster request can be
+`{"workspace":{"path":"input/chart.png","revision":1,"mime_type":"image/png"}}`.
+The tool authorizes the path and pins the file from the authorized Workspace
+snapshot. A logical raster returns the ordinary `image_inputs` result using
+that fixed reference. History retains the result under the standard attachment
+contract. The source file supplies the image bytes directly. Logical PDF views
+use the same bounded page selection and artifact storage as other PDF views.

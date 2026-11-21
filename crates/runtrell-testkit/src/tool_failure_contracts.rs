@@ -492,9 +492,10 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             | "no_progress_disabled_nonobject" => {
                 assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded))
             }
-            "no_progress" | "no_progress_schema" | "no_progress_cycle" => assert!(
-                matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_NO_PROGRESS"))
-            ),
+            "no_progress" | "no_progress_schema" | "no_progress_cycle" => assert!(matches!(
+                done.state,
+                RunState::Terminal(Terminal::Stalled(ProgressStop::Validation { .. }))
+            )),
             "budget" | "budget_disabled" => assert!(matches!(
                 done.state,
                 RunState::Terminal(Terminal::BudgetReached(_))

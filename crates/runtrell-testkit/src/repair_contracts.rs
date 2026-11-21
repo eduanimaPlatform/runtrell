@@ -266,23 +266,24 @@ pub async fn no_progress_contract<S: ControlStore>(store: Arc<S>) {
             } else if matches!(mode, "candidate" | "diagnostic") {
                 assert_eq!(result.state, RunState::Terminal(Terminal::Succeeded));
             } else {
-                let RunState::Terminal(Terminal::Failed(reason)) = result.state else {
+                let RunState::Terminal(Terminal::Stalled(ProgressStop::Validation { codes })) =
+                    result.state
+                else {
                     panic!("no-progress did not stop: {:?}", result.state)
                 };
-                assert!(reason.contains("VALIDATION_NO_PROGRESS"), "{reason}");
-                assert!(reason.contains(
-                    if matches!(mode, "same" | "raw_normalized" | "host_limit") {
-                        "JSON_SYNTAX"
-                    } else {
-                        "SCHEMA_VALIDATION"
-                    }
-                ));
-                assert!(!reason.contains("host recovery"));
-                assert!(!reason.contains("private"));
-                assert!(!reason.contains("sensitive"));
+                assert_eq!(
+                    codes,
+                    [
+                        if matches!(mode, "same" | "raw_normalized" | "host_limit") {
+                            "JSON_SYNTAX"
+                        } else {
+                            "SCHEMA_VALIDATION"
+                        }
+                    ]
+                );
                 let cp = result.checkpoint.unwrap();
                 assert_eq!(
-                    cp.payload["repair"]["no_progress"]["occurrences"],
+                    cp.payload["repair_progress"]["occurrences"],
                     if mode == "cycle" { 3 } else { replies.len() }
                 );
                 assert!(cp.payload["last_validation"]["receipt"]["diagnostics"].is_array());
@@ -360,7 +361,7 @@ pub async fn no_progress_disabled_contract<S: ControlStore>(store: Arc<S>) {
                     "{mode}/{turn}"
                 );
                 assert_eq!(
-                    result.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+                    result.checkpoint.unwrap().payload["repair_progress"]["occurrences"],
                     if mode == "cycle" {
                         turn / 2 + 1
                     } else {
@@ -493,12 +494,15 @@ pub async fn artifact_progress_contract<S: ControlStore>(store: Arc<S>) {
                 );
             } else {
                 assert!(
-                    matches!(result.state, RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("VALIDATION_NO_PROGRESS")),
+                    matches!(
+                        result.state,
+                        RunState::Terminal(Terminal::Stalled(ProgressStop::Validation { .. }))
+                    ),
                     "{mode}: {:?}",
                     result.state
                 );
                 assert_eq!(
-                    result.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+                    result.checkpoint.unwrap().payload["repair_progress"]["occurrences"],
                     3
                 );
             }

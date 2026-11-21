@@ -7,6 +7,10 @@ a partial adapter must never report success. Independent source material owned b
 another run or service is outside this ownership boundary. Hosts must also remove
 their business records and any exported copies through their own deletion workflow.
 
+Hosts that need to discard only the successful Run's conversation can configure
+[transcript purge at finalization](completion.md). Run-tree erasure below
+applies the broader removal boundary, including run-owned Workspace and artifacts.
+
 ## Admission and order
 
 1. Lock the root then discover and lock descendants under their parent locks.

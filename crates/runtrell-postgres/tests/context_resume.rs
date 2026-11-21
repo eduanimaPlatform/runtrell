@@ -44,6 +44,8 @@ async fn context_prefix_survives_process_restart() {
     let mut spec = RunSpec::new("t", "resume", account, "original occurrence");
     spec.compaction = Some(CompactionPolicy {
         min_remaining_tokens: 2000,
+        preserve_progress: false,
+        max_without_progress: None,
     });
     let run = store.start(spec).await.unwrap();
     let claim = store.claim(&run, "first", 0, 100).await.unwrap();
@@ -112,12 +114,14 @@ async fn no_progress_survives_process_restart_and_compaction() {
     let mut spec = RunSpec::new("t", "repair-process", account, "repair");
     spec.compaction = Some(CompactionPolicy {
         min_remaining_tokens: 2000,
+        preserve_progress: false,
+        max_without_progress: None,
     });
     let run = store.start(spec).await.unwrap();
     let claim = store.claim(&run, "first", 0, 100).await.unwrap();
     let pending = drive(store.clone(), &claim, 0, 0).await;
     assert_eq!(
-        pending.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+        pending.checkpoint.unwrap().payload["repair_progress"]["occurrences"],
         1
     );
     let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -129,11 +133,12 @@ async fn no_progress_survives_process_restart_and_compaction() {
         .unwrap();
     assert!(status.success());
     let stopped = store.get(&run).await.unwrap();
-    assert!(
-        matches!(stopped.state, RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("VALIDATION_NO_PROGRESS"))
-    );
+    assert!(matches!(
+        stopped.state,
+        RunState::Terminal(Terminal::Stalled(ProgressStop::Validation { .. }))
+    ));
     assert_eq!(
-        stopped.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+        stopped.checkpoint.unwrap().payload["repair_progress"]["occurrences"],
         3
     );
     let operations = store.list_operations(&run).await.unwrap();
@@ -171,9 +176,10 @@ async fn resume_context_in_child_process() {
             if turn == 1 {
                 assert_eq!(result.state, RunState::Waiting("validation repair".into()));
             } else {
-                assert!(
-                    matches!(result.state, RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("VALIDATION_NO_PROGRESS"))
-                );
+                assert!(matches!(
+                    result.state,
+                    RunState::Terminal(Terminal::Stalled(ProgressStop::Validation { .. }))
+                ));
             }
         }
         return;

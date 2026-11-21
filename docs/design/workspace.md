@@ -90,3 +90,7 @@ media typeをStaged/ArtifactRefへ必須保存するためnamespace schemaを3�
 ExecutionToolの入力`files`は正確な論理pathの集合であり、未指定fileを読取ったり実行環境へ渡したりしない。`ExecutionRequest.workspace_base`に全WorkspaceのCAS基準、`input`に選択fileのmanifest、`input_files`にそのbytesを固定する。namespace・revision・選択manifestの所属・各fileのhash/bytesを検査し、読取前後に全snapshotを照合する。全Workspaceを渡す低水準freeze_workspaceはworkspace_baseを必要とせず、input自体がCAS基準になる。旧保存形式の読替えではない。
 
 成果物は明示`outputs`だけを受理し、backendの予期しないpathは保存しない。停止後のbounded出力は先に安定IDのIntermediate Artifactへ保存し、全WorkspaceのCASを用いてmergeする。競合・取消・権限失効では`saved=false`と`save_error`を返し、Artifactと実行台帳のcopyを保持する。`saved=true`のときだけ保存済みWorkspaceの版とfile manifestを返す。mergeの成功からoperation結果記録までのWorker停止は再実行せず、元CASでの再保存が競合すれば保存状態を保守的に未確認と報告する。保存済み内容を巻き戻さない。Artifact retentionはhostのStoragePolicyに従う。
+
+`document.view` can open a logical Workspace file at its listed revision.
+Its ordinary tool result supplies a fixed reference for authorized model input.
+See [document views](document-view.md) for the input shape and media handling.

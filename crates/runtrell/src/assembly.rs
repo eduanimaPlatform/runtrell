@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
 
 type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 trait ErasedTool: Send + Sync {
+    fn progress(&self, input: &Value, output: &Value) -> Result<Vec<ToolProgress>>;
     fn authorize_input<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, ()>;
     fn authorize_result<'a>(&'a self, run: &'a RunRecord, output: &'a Value) -> Call<'a, ()>;
     fn quote<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, Amount>;
@@ -25,6 +26,9 @@ trait ErasedTool: Send + Sync {
 }
 struct Erase<T>(T);
 impl<T: Tool> ErasedTool for Erase<T> {
+    fn progress(&self, input: &Value, output: &Value) -> Result<Vec<ToolProgress>> {
+        self.0.progress(input, output)
+    }
     fn authorize_input<'a>(&'a self, run: &'a RunRecord, input: &'a Value) -> Call<'a, ()> {
         Box::pin(self.0.authorize_input(run, input))
     }
@@ -72,6 +76,9 @@ impl RegisteredTool {
     }
 }
 impl Tool for RegisteredTool {
+    fn progress(&self, input: &Value, output: &Value) -> Result<Vec<ToolProgress>> {
+        self.0.progress(input, output)
+    }
     async fn authorize_input(&self, run: &RunRecord, input: &Value) -> Result<()> {
         self.0.authorize_input(run, input).await
     }

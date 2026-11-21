@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 — 2026-11-22 — generic completion, typed progress and transcript purge
+
+- Configure final submission or validated acknowledgement, typed repair and
+  compaction progress, and transcript purge at successful finalization.
+- Open an authorized Workspace image by logical path as a standard tool result.
+
 ## 0.4.0 — 2026-11-21 — request-sized input bounds and cancelled intent release
 
 - The Responses adapter derives `input_upper_bound` from the prepared request,

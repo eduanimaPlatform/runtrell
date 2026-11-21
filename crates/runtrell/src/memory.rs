@@ -17,6 +17,8 @@ pub struct MemoryStore {
 struct Ledger {
     runs: BTreeMap<String, RunRecord>,
     accounts: BTreeMap<String, Account>,
+    #[serde(default)]
+    transcript_requests: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     allowances: BTreeMap<String, AllowancePeriod>,
     operations: BTreeMap<String, Operation>,
@@ -296,6 +298,8 @@ fn refresh_settlement(s: &mut Ledger, h: &RunHandle) {
     }
 }
 fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHandle> {
+    let original_digest = (spec.transcript == TranscriptPolicy::PurgeOnSuccess)
+        .then(|| digest(&serde_json::json!(spec)));
     if spec.scheduling.weight == 0
         || matches!(
             spec.budget,
@@ -315,7 +319,9 @@ fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHa
             && r.spec.principal == spec.principal
             && r.spec.request_key == spec.request_key
     }) {
-        return if old.spec == spec {
+        return if old.matches_purged_request(&spec)
+            || (!old.transcript_purged() && old.spec == spec)
+        {
             Ok(old.handle.clone())
         } else {
             Err(Error::Conflict)
@@ -367,6 +373,9 @@ fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHa
         scheduling: spec.scheduling,
         deadline: spec.deadline.unwrap_or(u64::MAX),
     });
+    if let Some(hash) = original_digest {
+        s.transcript_requests.insert(key(&h), hash);
+    }
     s.runs.insert(
         key(&h),
         RunRecord {
@@ -422,7 +431,7 @@ fn admit_child(
         operation_key,
         OperationKind::ChildRun,
         "child",
-        serde_json::to_value(&spec).map_err(|_| Error::Storage)?,
+        Value::String(digest(&serde_json::json!(spec))),
         Amount::default(),
     );
     let id = format!("{}:{}:1", key(&c.run), operation_key);
@@ -489,6 +498,10 @@ fn admit_child(
     Ok(child)
 }
 impl RunStore for MemoryStore {
+    fn supports_transcript_purge(&self) -> bool {
+        true
+    }
+
     async fn renew(&self, c: &Claim, now: u64, lease: u64) -> Result<Claim> {
         self.tx(|s| {
             fence(s, c, now, false)?;
@@ -512,7 +525,12 @@ impl RunStore for MemoryStore {
                     && r.spec.request_key == spec.request_key
             });
             match old {
-                Some(r) if r.spec == *spec => Ok(Some(r.handle.clone())),
+                Some(r)
+                    if r.matches_purged_request(spec)
+                        || (!r.transcript_purged() && r.spec == *spec) =>
+                {
+                    Ok(Some(r.handle.clone()))
+                }
                 Some(_) => Err(Error::Conflict),
                 None => Ok(None),
             }
@@ -673,10 +691,7 @@ impl RunStore for MemoryStore {
     async fn finalize(&self, c: &Claim, completion: Completion, now: u64) -> Result<()> {
         self.tx(|s| {
             let r = fence(s, c, now, false)?;
-            if r.completion.as_ref() == Some(&completion.id)
-                && r.output.as_ref() == Some(&completion.output)
-                && r.receipt.as_ref() == Some(&completion.receipt)
-            {
+            if r.matches_completion(&completion) {
                 return Ok(());
             }
             let r = fence(s, c, now, true)?;
@@ -702,7 +717,9 @@ impl RunStore for MemoryStore {
                         })
                     );
                 o.run == c.run
-                    && ((!o.settled && !superseded_model_retry)
+                    && ((r.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+                        && !o.transcript_purge_ready())
+                        || (!o.settled && !superseded_model_retry)
                         || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
                         || (o.state == OperationState::Failed
                             && !o.model_repair_acknowledged(&r)
@@ -730,12 +747,19 @@ impl RunStore for MemoryStore {
                 }
                 session.1 += 1;
             }
-            let r = get_mut(s, &c.run)?;
-            r.state = RunState::Terminal(Terminal::Succeeded);
-            r.output = Some(completion.output);
-            r.receipt = Some(completion.receipt);
-            r.completion = Some(completion.id);
-            r.revision += 1;
+            let request_digest = if r.spec.transcript == TranscriptPolicy::PurgeOnSuccess {
+                for op in s.operations.values_mut().filter(|o| o.run == c.run) {
+                    op.clear_transcript();
+                }
+                Some(
+                    s.transcript_requests
+                        .remove(&key(&c.run))
+                        .ok_or(Error::Conflict)?,
+                )
+            } else {
+                None
+            };
+            get_mut(s, &c.run)?.confirm_completion(completion, request_digest, now);
             Ok(())
         })
     }

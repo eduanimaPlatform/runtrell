@@ -156,7 +156,9 @@ fn start(s: &mut Ledger, mut spec: RunSpec) -> Result<RunHandle> {
             && r.spec.principal == spec.principal
             && r.spec.request_key == spec.request_key
     }) {
-        return if s.requests.get(&key(&old.handle)) == Some(&spec) {
+        return if old.matches_purged_request(&spec)
+            || (!old.transcript_purged() && s.requests.get(&key(&old.handle)) == Some(&spec))
+        {
             Ok(old.handle.clone())
         } else {
             Err(Error::Conflict)
@@ -263,7 +265,7 @@ fn admit_child(
         operation_key,
         OperationKind::ChildRun,
         "child",
-        serde_json::to_value(&spec).map_err(|e| storage("PgStore::admit_child", e))?,
+        Value::String(digest(&serde_json::json!(spec))),
         Amount::default(),
     );
     let id = format!("{}:{}:1", key(&c.run), operation_key);
@@ -325,6 +327,10 @@ fn admit_child(
     Ok(child)
 }
 impl RunStore for PgStore {
+    fn supports_transcript_purge(&self) -> bool {
+        true
+    }
+
     async fn renew(&self, c: &Claim, now: u64, lease: u64) -> Result<Claim> {
         self.tx(Scope::Run(&c.run, Mode::Bare), |s| {
             fence(s, c, now, false)?;
@@ -349,7 +355,11 @@ impl RunStore for PgStore {
                     && r.spec.request_key == spec.request_key
             });
             match old {
-                Some(r) if s.requests.get(&key(&r.handle)) == Some(spec) => {
+                Some(r)
+                    if r.matches_purged_request(spec)
+                        || (!r.transcript_purged()
+                            && s.requests.get(&key(&r.handle)) == Some(spec)) =>
+                {
                     Ok(Some(r.handle.clone()))
                 }
                 Some(_) => Err(Error::Conflict),
@@ -1243,10 +1253,7 @@ impl PgStore {
     ) -> Result<()> {
         self.tx_in(tx, Scope::Run(&c.run, Mode::Finalize), |s| {
             let r = fence(s, c, now, false)?;
-            if r.completion.as_ref() == Some(&completion.id)
-                && r.output.as_ref() == Some(&completion.output)
-                && r.receipt.as_ref() == Some(&completion.receipt)
-            {
+            if r.matches_completion(&completion) {
                 return Ok(());
             }
             let r = fence(s, c, now, true)?;
@@ -1272,7 +1279,9 @@ impl PgStore {
                         })
                     );
                 o.run == c.run
-                    && ((!o.settled && !superseded_model_retry)
+                    && ((r.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+                        && !o.transcript_purge_ready())
+                        || (!o.settled && !superseded_model_retry)
                         || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
                         || (o.state == OperationState::Failed
                             && !o.model_repair_acknowledged(&r)
@@ -1300,12 +1309,20 @@ impl PgStore {
                 }
                 session.1 += 1;
             }
-            let r = get_mut(s, &c.run)?;
-            r.state = RunState::Terminal(Terminal::Succeeded);
-            r.output = Some(completion.output);
-            r.receipt = Some(completion.receipt);
-            r.completion = Some(completion.id);
-            r.revision += 1;
+            let request_digest = if r.spec.transcript == TranscriptPolicy::PurgeOnSuccess {
+                for op in s.operations.values_mut().filter(|o| o.run == c.run) {
+                    op.clear_transcript();
+                }
+                Some({
+                    let spec = s.requests.get_mut(&key(&c.run)).ok_or(Error::Conflict)?;
+                    let hash = digest(&json!(spec));
+                    spec.clear_transcript();
+                    hash
+                })
+            } else {
+                None
+            };
+            get_mut(s, &c.run)?.confirm_completion(completion, request_digest, now);
             Ok(())
         })
         .await

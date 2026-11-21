@@ -637,6 +637,9 @@ pub struct ImageModel<M, S, P, R> {
 impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
     for ImageModel<M, S, P, R>
 {
+    fn supports_output_schema(&self) -> bool {
+        self.inner.supports_output_schema()
+    }
     fn pricing_snapshot(&self, model: &str) -> Option<crate::models::PricingSnapshot> {
         self.inner.pricing_snapshot(model)
     }

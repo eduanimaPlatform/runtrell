@@ -476,3 +476,161 @@ async fn atomic_child_admission_participates_in_host_transaction() {
     );
     assert_eq!(store.get(&child).await.unwrap().spec.parent, Some(parent));
 }
+
+#[tokio::test]
+async fn transcript_purge_commits_with_completion_after_the_reservation_settles() {
+    use serde_json::{Value, json};
+    let (pool, schema, store) = open().await;
+    let account = store
+        .create_account("t", Amount::new(100, 100), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new("t", "purge", account.clone(), "private prompt");
+    spec.transcript = TranscriptPolicy::PurgeOnSuccess;
+    let run = store.start(spec.clone()).await.unwrap();
+    let first = store.claim(&run, "first", 0, 10).await.unwrap();
+    let active = store.get(&run).await.unwrap();
+    store
+        .checkpoint(
+            &first,
+            active.revision,
+            Checkpoint {
+                schema: 1,
+                revision: active.revision,
+                cursor: 7,
+                messages: vec![Message::text("user", "private message")],
+                payload: json!({"context":{"summary":"private summary"}}),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let dispatch = DispatchRequest::new(
+        "tool:0",
+        OperationKind::Tool,
+        "tool",
+        json!({"args":"private arguments"}),
+        Amount::new(10, 5),
+    );
+    let op = store.begin(&first, dispatch, 2).await.unwrap();
+    store.mark_sent(&first, &op.id, 2).await.unwrap();
+    store
+        .record(&first, &op.id, ExternalResult::Unknown, 3)
+        .await
+        .unwrap();
+    let completion = Completion {
+        id: "accepted".into(),
+        output: json!({"value":"private submission"}),
+        receipt: ValidationReceipt {
+            hash: digest(&json!({"value":"private submission"})),
+            basis_revision: 0,
+            config_version: spec.config_version.clone(),
+            validator: spec.validator.clone(),
+            validator_version: spec.validator_version.clone(),
+            passed: true,
+            repairable: false,
+            diagnostics: vec![],
+        },
+    };
+    assert_eq!(
+        store.finalize(&first, completion.clone(), 4).await,
+        Err(Error::UsageUnknown)
+    );
+    assert_eq!(
+        store.account(&account).await.unwrap().reserved,
+        Amount::new(10, 5)
+    );
+    let reopened = PgStore::connect(pool.clone(), &schema, Capacity::default())
+        .await
+        .unwrap();
+    let claim = reopened.claim(&run, "successor", 10, 100).await.unwrap();
+    let body = ExternalResult::Applied {
+        physical_evidence: None,
+        output: json!({"output":"private tool output"}),
+        usage: Usage::measured(2, 3, 1),
+        external_id: None,
+    };
+    assert_eq!(
+        reopened.record(&first, &op.id, body.clone(), 11).await,
+        Err(Error::OwnershipLost)
+    );
+    assert_eq!(
+        reopened.late_results(&claim, 11).await.unwrap()[0].result,
+        body
+    );
+    reopened
+        .record(&claim, &op.id, body.clone(), 11)
+        .await
+        .unwrap();
+    let before = reopened.account(&account).await.unwrap();
+    assert_eq!(before.reserved, Amount::default());
+    let mut tx = pool.begin().await.unwrap();
+    reopened
+        .finalize_in(&mut tx, &claim, completion.clone(), 12)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert!(
+        reopened
+            .get(&run)
+            .await
+            .unwrap()
+            .checkpoint
+            .unwrap()
+            .payload
+            .to_string()
+            .contains("private summary")
+    );
+    reopened
+        .finalize(&claim, completion.clone(), 13)
+        .await
+        .unwrap();
+    reopened.finalize(&claim, completion, 13).await.unwrap();
+    assert_eq!(
+        reopened.find_request(&spec).await.unwrap(),
+        Some(run.clone())
+    );
+    let mut changed = spec;
+    changed.input = String::new();
+    assert_eq!(reopened.start(changed).await, Err(Error::Conflict));
+    let terminal = reopened.get(&run).await.unwrap();
+    assert_eq!(terminal.state, RunState::Terminal(Terminal::Succeeded));
+    assert!(terminal.transcript_purged());
+    let checkpoint = terminal.checkpoint.unwrap();
+    assert!(checkpoint.messages.is_empty());
+    assert_eq!(checkpoint.cursor, 7);
+    assert_eq!(checkpoint.payload["transcript_purge"]["at"], 13);
+    let raw: Value = sqlx::query_scalar(&format!(
+        "SELECT to_jsonb(r) FROM {schema}.runs r WHERE id=$1"
+    ))
+    .bind(&run.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!raw.to_string().contains("private"));
+    let attempts = reopened.list_operations(&run).await.unwrap();
+    assert_eq!(attempts[0].finished_at, Some(11));
+    assert!(
+        matches!(&attempts[0].result, Some(ExternalResult::Applied { usage, output:Value::Null, .. }) if usage.input == Some(2) && usage.output == Some(3))
+    );
+    let late = reopened.late_results(&claim, 13).await.unwrap();
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0].observed_at, 11);
+    assert!(matches!(
+        &late[0].result,
+        ExternalResult::Applied {
+            output: Value::Null,
+            ..
+        }
+    ));
+    assert_eq!(
+        reopened.record(&first, &op.id, body, 14).await,
+        Err(Error::Closed)
+    );
+    assert!(
+        !serde_json::to_string(&attempts)
+            .unwrap()
+            .contains("private")
+    );
+    assert_eq!(reopened.account(&account).await.unwrap(), before);
+}

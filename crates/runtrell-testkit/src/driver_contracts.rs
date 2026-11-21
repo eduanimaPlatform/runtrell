@@ -487,6 +487,8 @@ pub async fn automatic_compaction<S: ControlStore>(store: Arc<S>, reopened: Arc<
     );
     spec.compaction = Some(CompactionPolicy {
         min_remaining_tokens: 20,
+        preserve_progress: false,
+        max_without_progress: None,
     });
     let run = store.start(spec).await.unwrap();
     let claim = store.claim(&run, "first", 0, 100).await.unwrap();

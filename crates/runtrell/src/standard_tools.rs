@@ -86,6 +86,13 @@ struct ConfiguredTool {
     descriptor: ToolDescriptor,
 }
 impl Tool for ConfiguredTool {
+    fn progress(
+        &self,
+        input: &serde_json::Value,
+        output: &serde_json::Value,
+    ) -> Result<Vec<ToolProgress>> {
+        self.inner.progress(input, output)
+    }
     async fn authorize_input(&self, run: &RunRecord, input: &serde_json::Value) -> Result<()> {
         self.inner.authorize_input(run, input).await
     }

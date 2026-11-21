@@ -96,19 +96,22 @@ JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postg
 
 最終出力の修正可否は、hostのValidationReceipt.repairableと全blocking診断の明示分類を両方満たす場合にだけ許可する。Diagnostic.repairはDiagnosticRepair::{Agent,Host,Operator,Unknown}の単一判定であり、修復担当を表す。agent_can_write()とrepairable()はAgentの場合だけtrueとなる。hostがagentCanWrite等へ投影するときもこのメソッドを使い、code・パスや別の既定値から再判定しない。DataStoreのTargetValidatorは業務codeにも同じ分類を宣言できる。ValidationChain.repairable_codesは削除し、schema合格後の子validatorのreceiptと診断を保守的に統合する。driverの直接Validator経路でもHost/Operator/Unknownをreceipt flagだけで昇格させない。info/warning以外の未知severityは修復不能とする。candidateのJSON_SYNTAX／schema診断はAgentと明示する。json_artifact_diagnosticsはbytes/hashを照合して観測を設定するが、保存先の書込み権限は判断せずUnknownを返す。hostが実際の権限・修復方法を確認して分類する。host retry／operator actionの実行はhostの責務であり、RuntrellはAgentへ誤配送しない。
 
-修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: Option<NonZeroU64>の既定Some(3)で、同じ失敗fingerprintが3回出現するとVALIDATION_NO_PROGRESSで失敗終了する。A→B→A→B→AでもAの3回目で停止する。用途ごとにNoneを指定すると回数判定を無効化でき、Some(N)で別上限を設定できる。Noneでも通常の口座予約・精算、Run期限、取消、認可、所有権の検査は常時適用される。無制限呼出しを許可する設定ではない。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
+修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: Option<NonZeroU64>の既定Some(3)で、同じ失敗fingerprintが3回出現すると `Terminal::Stalled(ProgressStop::Validation { .. })` で終了する。A→B→A→B→AでもAの3回目で停止する。用途ごとにNoneを指定すると回数判定を無効化でき、Some(N)で別上限を設定できる。Noneでも通常の口座予約・精算、Run期限、取消、認可、所有権の検査は常時適用される。無制限呼出しを許可する設定ではない。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
 
 進展の観測はDiagnostic.observation: Option<ArtifactObservation>でhostが渡す。artifactは安定した対象識別子、versionはArtifactVersion::ContentDigest（検査したbytesのdigest）またはRevision（内容を表すhost管理の版）とする。内容が同じ書込みでも増える保存世代・Runのcheckpoint revisionを内容版として使わず、その場合はcontent digestを使う。Runtrellはパスを推測せず、ファイルを独自に読み直さず、品質改善を推定しない。観測がある診断は対象・内容・規則・担当の変化を進展として扱い、completion envelopeや文面だけの変化は進展としない。観測のない診断はcandidateを含めて照合するため、混合receiptのcandidate側の修正も検出できる。対象の内容が変われば最終envelopeが同じでも別fingerprintとなる。hostは診断と同じ検査時点の正しい観測を渡し、stale digest等はConflictとして扱う。
 
-RepairPolicy全体をcheckpointへ固定し、再開時に現行のhost policyが保存値と異なれば外部呼出し前に拒否する。旧checkpointの読替えは追加しない。fingerprintはrun・修復role（validation/tool）・validator名/版・config・basisへ束縛する。code/file/path/schema_path/artifact/field/rule/repair/observationと、必要なcandidateを診断ごとにcanonical化し、集合を整列・重複除去する。info/warning、cause/hint、position/spanは進展判定から除外する。正常JSONはキー順・表記空白を無視し、array順と文字列値は保持する。不正JSONのraw文字列は連続空白を1空白へ正規化する。toolはtool名と入力をcandidateへ含める。repair.no_progress／tool_repair.no_progressへfingerprint・occurrences・visits（fingerprint別出現数）を保存し、runtime・claim再作成、process再起動、context compactionで失わない。visitsは異なる失敗の数に比例して増えるため、通常のhost予算・期限・任意修正上限とcheckpoint保存制約を維持する。旧consecutive形式の読替えは追加しない。
+RepairPolicy全体をcheckpointへ固定し、再開時に現行のhost policyが保存値と異なれば外部呼出し前に拒否する。旧checkpointの読替えは追加しない。fingerprintはRun、validator名・版、構成版、basisへ束縛する。最終提出と設定済み検証toolは同じ型付き診断の集合を照合する。一般toolの入力・実行エラーはtool名でも区別する。code・file・path・schema_path・artifact・field・repair・observationと必要な候補を診断ごとにcanonical化し、集合を整列・重複除去する。info/warning、cause/hint、position/spanは進展判定から除外する。正常JSONはキー順・表記空白を無視し、array順と文字列値は保持する。不正JSONのraw文字列は連続空白を1空白へ正規化する。toolはtool名と入力をcandidateへ含める。checkpointの `repair_progress` へfingerprint・occurrences・visits（fingerprint別出現数）を保存し、runtime・claim再作成、process再起動、context compactionで失わない。visitsは異なる失敗の数に比例して増えるため、通常のhost予算・期限・任意修正上限とcheckpoint保存制約を維持する。旧consecutive形式の読替えは追加しない。
 
-終了理由は最大4個の64文字以内の大文字ASCII codeだけを付け、本文・パス・hintを流出させない。直近の完全な診断はlast_validation／last_tool_validationに残す。新しい公開fieldは必須であり、旧形式fallbackはない。無進展停止は費用・停滞を抑える制御であり、診断欠落やowner不備そのものの修正完了を意味しない。反復時はモデル能力よりhost/tool/schema/validatorと検証対象の配線を優先調査し、原因修正後に同じ最小再現で成功を確認する。
+`ProgressStop::Validation` は最大4個の64文字以内の大文字ASCII codeを持ち、本文・パス・hintを流出させない。直近の完全な診断はlast_validation／last_tool_validationに残す。無進展停止は費用・停滞を抑える制御であり、診断欠落やowner不備そのものの修正完了を意味しない。反復時はモデル能力よりhost/tool/schema/validatorと検証対象の配線を優先調査し、原因修正後に同じ最小再現で成功を確認する。
 
 通常driverはmetadata.stop_reason=max_tokensを継続可能な応答として扱う。usageを先に精算し、応答のtool callは採用しない。RunSpec.continuationの文面（汎用の短文を既定）を履歴へ追加して別operationを作り、出力枠を再見積りする。回数の固定上限はなく、任意max_continuations・予算・deadlineで停止する。
 
 RunSpec.compactionは入力見積りと通常出力上限を除いたcontext余裕の閾値を設定する。ModelPort.compaction_limitsでhostが圧縮モデル・価格・上限を選び、portはrequest.modelでprepare/invoke/lookupを配送する（既定は通常モデル）。送信時の独立した入力上限も `ModelPort.compaction_input_limit` が返す場合は残余の計算に含める。通常loopは新しいmodel要求の前に閾値に応じてcompact_contextを自動実行し、summaryと有効なモデル入力を同じcheckpoint CASで保存する。checkpoint内のContextStoreは元の履歴を保持し、context_ownerでRunへ束縛する。別Runへコピーされたsummaryは再開前に拒否する。圧縮はtool処理が完了したモデル境界で行い、直近のtool交換・Provider継続状態・固定RunSpecと口座は要約に委ねず保持する。保存済み圧縮結果の復旧では再予約・再送せず元operationを照合する。
 
 checkpoint の context は元メッセージを `facts` へ位置順に一度だけ追記する。保存した `checkpoint.payload.context_protocol_len` 以降だけを次の stage で取り込み、文字列の一致では発言を統合しない。有効な `history` は checkpoint.messages から復元し、context 内へ同じ配列を保存しない（context.history は明示的に append した追加 evidence のみ）。圧縮は summary・有効 messages・取込み位置 を同じ CAS で更新し、保持した tail や生成した summary を新しい元発言として再追記しない。元履歴は ContextStore::context の facts で読める。これは現行保存形式であり旧形式の読替えは行わない。
+
+最終提出・検証済み ACK、読み書き進捗の型、確定時の会話消去の設定と保存境界は
+[Completion and transcript retention](completion.md) を参照。
 
 成果物bytesはhostが保存adapterで取得し、TargetValidator等から`schema::json_artifact_diagnostics`を利用する。同じ構文診断にArtifact IDを付け、参照のhash/bytesと不一致ならConflictで拒否する。対象選択・保存先・検証基準はhostの責任、構文判定と修正機構は共通基盤。試験の成果物保存はMemory DataStoreで、Postgresは制御checkpoint/操作台帳を担う。
 
@@ -248,6 +251,9 @@ pub struct RunSpec {
     pub scheduling: SchedulingPolicy,
     pub continuation: ContinuationPolicy,
     pub compaction: Option<CompactionPolicy>,
+    pub completion: CompletionPolicy,
+    pub transcript: TranscriptPolicy,
+    pub max_repeated_reads: Option<std::num::NonZeroU64>,
 }
 
 pub struct ContinuationPolicy {
@@ -447,6 +453,9 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    fn supports_output_schema(&self) -> bool {
+        false
+    }
     /// Pure admission check for a tool exchange, without resolving payloads or
     /// sending inference. Return MODEL_ATTACHMENT_LIMIT for repairable size/count
     /// failures so the driver can ask the agent to narrow the view.
@@ -514,6 +523,9 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    fn progress(&self, _input: &Value, _output: &Value) -> Result<Vec<ToolProgress>> {
+        Ok(vec![])
+    }
     fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
         None
     }
@@ -609,6 +621,12 @@ impl Default for RepairPolicy {
     }
 }
 pub trait Validator: Send + Sync {
+    fn completion_basis(&self, _run: &RunRecord) -> Result<String> {
+        Err(Error::Unsupported("validated acknowledgement basis".into()))
+    }
+    fn repair_target(&self, _receipt: &ValidationReceipt) -> RepairTarget {
+        RepairTarget::Workspace
+    }
     fn repair_policy(&self) -> RepairPolicy {
         RepairPolicy::default()
     }
@@ -642,6 +660,9 @@ pub struct Event {
 }
 
 pub trait RunStore: Send + Sync {
+    fn supports_transcript_purge(&self) -> bool {
+        false
+    }
     /// Extend the current owner's lease without changing RunRecord::revision.
     /// The returned Claim and persisted owner.lease_until witness renewal;
     /// checkpoint CAS remains valid across same-generation heartbeats.

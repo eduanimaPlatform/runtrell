@@ -313,6 +313,19 @@ pub struct DocumentViewInput {
     pub attachment: Attachment,
     pub pages: Option<PageRange>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceView {
+    workspace: WorkspaceDocument,
+    pages: Option<PageRange>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceDocument {
+    path: String,
+    revision: u64,
+    mime_type: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentViewLimits {
     pub max_bytes: usize,
@@ -372,6 +385,76 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> DocumentView<S, P, 
         }
         Ok(input)
     }
+    async fn resolve_input(&self, run: &RunRecord, input: &Value) -> Result<DocumentViewInput> {
+        if input.get("workspace").is_none() {
+            return self.input(input.clone());
+        }
+        let selection: WorkspaceView = serde_json::from_value(input.clone())
+            .map_err(|_| Error::Invalid("DOCUMENT_VIEW_INPUT".into()))?;
+        let WorkspaceDocument {
+            path,
+            revision,
+            mime_type,
+        } = selection.workspace;
+        logical_path(&path)?;
+        if self.output_access.actor().owner != run.handle
+            || self.output_access.actor() != self.output_access.namespace()
+        {
+            return Err(Error::PermissionDenied);
+        }
+        self.resolver
+            .policy
+            .authorize(run, &path, "document.view")?;
+        let snapshot = self.resolver.store.snapshot(&self.output_access).await?;
+        let file = snapshot
+            .files
+            .into_iter()
+            .find(|file| file.path == path && file.revision == revision)
+            .ok_or(Error::Conflict)?;
+        let attachment = Attachment::Stored(ImageReference::Workspace {
+            namespace: snapshot.namespace,
+            file,
+            mime_type,
+        });
+        self.input(json!(DocumentViewInput {
+            attachment,
+            pages: selection.pages
+        }))
+    }
+
+    async fn workspace_image(
+        &self,
+        run: &RunRecord,
+        parsed: &DocumentViewInput,
+    ) -> Result<Option<Value>> {
+        let Attachment::Stored(reference @ ImageReference::Workspace { file, .. }) =
+            &parsed.attachment
+        else {
+            return Ok(None);
+        };
+        if !reference.mime().starts_with("image/") {
+            return Ok(None);
+        }
+        self.resolver
+            .policy
+            .authorize(run, &file.path, "document.view")?;
+        if parsed
+            .pages
+            .as_ref()
+            .is_some_and(|pages| pages.first != 1 || pages.last != 1)
+        {
+            return Err(Error::Invalid("DOCUMENT_PAGE_RANGE".into()));
+        }
+        let bytes = self
+            .resolver
+            .read_reference(run, reference, "attachment.resolve", self.limits.max_bytes)
+            .await?;
+        self.resolver.limits.inspect(reference.mime(), &bytes)?;
+        Ok(Some(
+            json!({"page_count":1,"source":parsed,"image_inputs":[reference]}),
+        ))
+    }
+
     fn authorize(
         &self,
         run: &RunRecord,
@@ -423,8 +506,14 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> DocumentView<S, P, 
         ]))
     }
     async fn stored(&self, c: &ToolContext, input: &Value) -> Result<Lookup> {
-        let parsed = self.input(input.clone())?;
+        let run = self.runs.get(&c.claim.run).await?;
+        let parsed = self.resolve_input(&run, input).await?;
         let run = self.bound(c, &parsed).await?;
+        if input.get("workspace").is_some()
+            && let Some(output) = self.workspace_image(&run, &parsed).await?
+        {
+            return Ok(Lookup::Found(applied(output)));
+        }
         let binding = self.binding(c, input);
         let staged = match self
             .resolver
@@ -460,7 +549,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
         ToolDescriptor {
             name: "document.view".into(),
             version: format!(
-                "document-view-2:{}",
+                "document-view-3:{}",
                 digest(&json!([
                     self.limits,
                     self.output_access.namespace(),
@@ -472,7 +561,20 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
             capability:
                 "Inspect PDF page count or attach selected PDF pages / PNG / JPEG / WebP to the next model input"
                     .into(),
-            input_schema: json!({"type":"object","properties":{"attachment":{"type":"object"},"pages":{"type":["object","null"],"properties":{"first":{"type":"integer","minimum":1},"last":{"type":"integer","minimum":1}},"required":["first","last"],"additionalProperties":false}},"required":["attachment"],"additionalProperties":false}),
+            input_schema: json!({
+                "type":"object",
+                "properties":{
+                    "attachment":{"type":"object"},
+                    "workspace":{"type":"object","properties":{
+                        "path":{"type":"string","description":"Logical path returned by files.list"},
+                        "revision":{"type":"integer","minimum":0},
+                        "mime_type":{"type":"string","enum":["application/pdf","image/png","image/jpeg","image/webp"]},
+                    },"required":["path","revision","mime_type"],"additionalProperties":false},
+                    "pages":{"type":["object","null"],"properties":{"first":{"type":"integer","minimum":1},"last":{"type":"integer","minimum":1}},"required":["first","last"],"additionalProperties":false},
+                },
+                "oneOf":[{"required":["attachment"]},{"required":["workspace"]}],
+                "additionalProperties":false,
+            }),
             output_schema: json!({"type":"object"}),
             side_effect: true,
             timeout: self.limits.timeout,
@@ -488,7 +590,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
         }
     }
     async fn quote(&self, run: &RunRecord, input: &Value) -> Result<Amount> {
-        let input = self.input(input.clone())?;
+        let input = self.resolve_input(run, input).await?;
         self.authorize(run, &input, "document.view")?;
         if let Attachment::Stored(reference) = &input.attachment {
             self.resolver
@@ -499,6 +601,15 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
     }
     async fn authorize_result(&self, run: &RunRecord, output: &Value) -> Result<()> {
         let input = self.input(output["source"].clone())?;
+        if output["image_inputs"]
+            .get(0)
+            .is_some_and(|v| v.get("Workspace").is_some())
+            && let Attachment::Stored(ImageReference::Workspace { file, .. }) = &input.attachment
+        {
+            self.resolver
+                .policy
+                .authorize(run, &file.path, "document.view")?;
+        }
         self.authorize(run, &input, "attachment.retrieve")?;
         if let Attachment::Stored(reference) = &input.attachment {
             self.resolver
@@ -530,8 +641,14 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
         self.stored(c, &input).await
     }
     async fn invoke(&self, c: &ToolContext, input: Value) -> Result<ExternalResult> {
-        let parsed = self.input(input.clone())?;
+        let run = self.runs.get(&c.claim.run).await?;
+        let parsed = self.resolve_input(&run, &input).await?;
         let run = self.bound(c, &parsed).await?;
+        if input.get("workspace").is_some()
+            && let Some(output) = self.workspace_image(&run, &parsed).await?
+        {
+            return Ok(applied(output));
+        }
         if let Lookup::Found(result) = self.stored(c, &input).await? {
             return Ok(result);
         }

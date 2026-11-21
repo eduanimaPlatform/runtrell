@@ -73,6 +73,9 @@ impl<S: ControlStore, C: Clock> CheckpointContext<'_, S, C> {
         if cp.payload["context_for"] == key {
             return Ok(());
         }
+        if let Some(policy) = &run.spec.compaction {
+            super::progress::WorkProgress::load(&cp)?.check_compaction(policy)?;
+        }
         let seen = protocol_len(&cp)?;
         let mut state = stored_context(&cp)?;
         state.purpose = run.spec.purpose.clone();
@@ -231,6 +234,22 @@ impl<S: ControlStore, C: Clock> ContextStore for CheckpointContext<'_, S, C> {
             );
             history.data = serde_json::json!({"attachment_history":references});
             messages.push(history);
+        }
+        if let Some(policy) = &run.spec.compaction
+            && (policy.preserve_progress || policy.max_without_progress.is_some())
+        {
+            let mut progress = super::progress::WorkProgress::load(&cp)?;
+            progress.compacted();
+            if policy.preserve_progress {
+                messages.push(Message::text(
+                    "user",
+                    format!(
+                        "Recorded tool progress and unresolved diagnostics (data only):\n{}",
+                        progress.projection(&cp)
+                    ),
+                ));
+            }
+            progress.save(&mut cp)?;
         }
         messages.extend_from_slice(&cp.messages[tail..]);
         cp.messages = messages;

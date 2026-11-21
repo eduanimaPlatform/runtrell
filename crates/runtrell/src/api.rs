@@ -25,6 +25,8 @@ pub enum Error {
     BudgetAtLimit,
     #[error("cannot safely reserve next call")]
     ReservationDenied,
+    #[error("no progress: {0:?}")]
+    NoProgress(ProgressStop),
     #[error("usage unavailable")]
     UsageUnknown,
     #[error("price not configured")]
@@ -538,6 +540,13 @@ pub struct RunSpec {
     pub scheduling: SchedulingPolicy,
     pub continuation: ContinuationPolicy,
     pub compaction: Option<CompactionPolicy>,
+    #[serde(default)]
+    pub completion: CompletionPolicy,
+    #[serde(default)]
+    pub transcript: TranscriptPolicy,
+    /// Maximum consecutive reads of already covered ranges.
+    #[serde(default)]
+    pub max_repeated_reads: Option<std::num::NonZeroU64>,
 }
 impl RunSpec {
     pub fn new(tenant: &str, key: &str, account: String, input: &str) -> Self {
@@ -562,6 +571,9 @@ impl RunSpec {
             scheduling: SchedulingPolicy::default(),
             continuation: ContinuationPolicy::default(),
             compaction: None,
+            completion: CompletionPolicy::default(),
+            transcript: TranscriptPolicy::default(),
+            max_repeated_reads: None,
         }
     }
 }
@@ -584,7 +596,75 @@ impl Default for ContinuationPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionPolicy {
     pub min_remaining_tokens: u64,
+    /// Preserve typed observations and unresolved diagnostics in the next request.
+    #[serde(default)]
+    pub preserve_progress: bool,
+    /// Maximum completed compactions without new typed progress.
+    #[serde(default)]
+    pub max_without_progress: Option<std::num::NonZeroU64>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionPolicy {
+    pub mode: CompletionMode,
+    /// Name of an optional trusted tool returning ValidationFeedback.
+    pub validation_tool: Option<String>,
+    pub output_schema: Option<Value>,
+    /// Request the configured output schema on supported tool-free model requests.
+    pub provider_format: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionMode {
+    #[default]
+    FinalSubmission,
+    ValidatedAck,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptPolicy {
+    #[default]
+    Retain,
+    PurgeOnSuccess,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairTarget {
+    OutputFormat,
+    Workspace,
+}
+
+/// Result contract of the configured validation tool. The tool
+/// must capture the same state version used to evaluate its receipt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValidationFeedback {
+    pub candidate: Value,
+    pub receipt: ValidationReceipt,
+    pub basis: String,
+    pub repair_target: RepairTarget,
+}
+
+/// Evidence produced by a trusted adapter for a successfully applied operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolProgress {
+    Read {
+        namespace: crate::data::Namespace,
+        path: String,
+        revision: u64,
+        start: u64,
+        end: u64,
+    },
+    Write {
+        namespace: crate::data::Namespace,
+        path: String,
+        revision: Option<u64>,
+        hash: Option<String>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Trigger {
     Api,
@@ -600,6 +680,13 @@ pub enum Terminal {
     DeadlineReached,
     BudgetReached(String),
     OutcomeUnknown(String),
+    Stalled(ProgressStop),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProgressStop {
+    Validation { codes: Vec<String> },
+    RepeatedRead,
+    Compaction,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunState {
@@ -679,6 +766,13 @@ pub struct RunRecord {
     pub output: Option<Value>,
     pub receipt: Option<ValidationReceipt>,
     pub completion: Option<String>,
+}
+impl RunRecord {
+    /// State identity supplied by the trusted validator before an ACK turn.
+    /// A host finalizer can compare it with the version it is about to adopt.
+    pub fn validated_ack_basis(&self) -> Option<&str> {
+        self.checkpoint.as_ref()?.payload["validated_ack"]["basis"].as_str()
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
@@ -1346,6 +1440,9 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, run: &RunRecord, target: &str, permission: &str) -> Result<()>;
 }
 pub trait ModelPort: Send + Sync {
+    fn supports_output_schema(&self) -> bool {
+        false
+    }
     /// Pure admission check for a tool exchange, without resolving payloads or
     /// sending inference. Return MODEL_ATTACHMENT_LIMIT for repairable size/count
     /// failures so the driver can ask the agent to narrow the view.
@@ -1419,6 +1516,11 @@ pub trait ModelPort: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Lookup>> + Send;
 }
 pub trait Tool: Send + Sync {
+    /// Derive observations from the pinned input and settled output. Pure and
+    /// deterministic, so replay after a crash yields the same checkpoint.
+    fn progress(&self, _input: &Value, _output: &Value) -> Result<Vec<ToolProgress>> {
+        Ok(vec![])
+    }
     fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
         None
     }
@@ -1514,6 +1616,15 @@ impl Default for RepairPolicy {
     }
 }
 pub trait Validator: Send + Sync {
+    /// Return the current identity of all mutable state checked by an
+    /// acknowledgement tool. Opt in explicitly when using ValidatedAck.
+    fn completion_basis(&self, _run: &RunRecord) -> Result<String> {
+        Err(Error::Unsupported("validated acknowledgement basis".into()))
+    }
+    /// Choose the model repair surface for a final candidate rejected by this validator.
+    fn repair_target(&self, _receipt: &ValidationReceipt) -> RepairTarget {
+        RepairTarget::Workspace
+    }
     fn repair_policy(&self) -> RepairPolicy {
         RepairPolicy::default()
     }
@@ -1547,6 +1658,11 @@ pub struct Event {
 }
 
 pub trait RunStore: Send + Sync {
+    /// True when successful finalization atomically clears the run's transcript
+    /// and preserves account, attempt and completion metadata.
+    fn supports_transcript_purge(&self) -> bool {
+        false
+    }
     /// Extend the current owner's lease without changing RunRecord::revision.
     /// The returned Claim and persisted owner.lease_until witness renewal;
     /// checkpoint CAS remains valid across same-generation heartbeats.

@@ -634,7 +634,7 @@ fn disabled_no_progress_keeps_budget_deadline_and_cancel_gates() {
                     "{mode}/{occurrence}"
                 );
                 assert_eq!(
-                    waiting.checkpoint.unwrap().payload["repair"]["no_progress"]["occurrences"],
+                    waiting.checkpoint.unwrap().payload["repair_progress"]["occurrences"],
                     occurrence
                 );
             }

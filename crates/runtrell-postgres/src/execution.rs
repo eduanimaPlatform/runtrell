@@ -11,17 +11,18 @@ impl PgStore {
         lock: bool,
     ) -> Result<()> {
         let sql = format!(
-            "SELECT erasure FROM {}.runs WHERE tenant=$1 AND id=$2{}",
+            "SELECT erasure IS NOT NULL OR ($3 AND COALESCE(checkpoint->'payload' ? 'transcript_purge',false)) FROM {}.runs WHERE tenant=$1 AND id=$2{}",
             self.schema,
             if lock { " FOR UPDATE" } else { "" }
         );
-        let marker: Option<Option<String>> = sqlx::query_scalar(&sql)
+        let marker: Option<bool> = sqlx::query_scalar(&sql)
             .bind(&owner.tenant)
             .bind(&owner.id)
+            .bind(lock)
             .fetch_optional(conn)
             .await
             .map_err(|e| storage("PgStore::guard_run_erasure", e))?;
-        if marker.flatten().is_some() {
+        if marker == Some(true) {
             return Err(Error::Closed);
         }
         Ok(())

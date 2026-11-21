@@ -291,6 +291,55 @@ impl<S: StandardToolStore> FileTool<S> {
     }
 }
 impl<S: StandardToolStore> Tool for FileTool<S> {
+    fn progress(&self, input: &Value, output: &Value) -> Result<Vec<ToolProgress>> {
+        let namespace = self.access.namespace().clone();
+        let write = |file: FileVersion| ToolProgress::Write {
+            namespace: namespace.clone(),
+            path: file.path,
+            revision: Some(file.revision),
+            hash: Some(file.hash),
+        };
+        let path = || {
+            input["path"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(Error::Conflict)
+        };
+        match self.action {
+            FileAction::Read => {
+                let start = output["offset"].as_u64().ok_or(Error::Conflict)?;
+                let length = output["text"].as_str().ok_or(Error::Conflict)?.len() as u64;
+                Ok(vec![ToolProgress::Read {
+                    namespace,
+                    path: path()?,
+                    revision: input["revision"].as_u64().ok_or(Error::Conflict)?,
+                    start,
+                    end: start.checked_add(length).ok_or(Error::Conflict)?,
+                }])
+            }
+            FileAction::Write => Ok(vec![write(
+                serde_json::from_value(output.clone()).map_err(|_| Error::Conflict)?,
+            )]),
+            FileAction::ExactReplace => {
+                let snapshot: WorkspaceSnapshot =
+                    serde_json::from_value(output.clone()).map_err(|_| Error::Conflict)?;
+                let edits = input["edits"].as_array().ok_or(Error::Conflict)?;
+                Ok(snapshot
+                    .files
+                    .into_iter()
+                    .filter(|file| edits.iter().any(|e| e["path"] == file.path))
+                    .map(write)
+                    .collect())
+            }
+            FileAction::Delete => Ok(vec![ToolProgress::Write {
+                namespace,
+                path: path()?,
+                revision: None,
+                hash: None,
+            }]),
+            _ => Ok(vec![]),
+        }
+    }
     fn descriptor(&self) -> ToolDescriptor {
         let write = matches!(
             self.action,
@@ -452,6 +501,11 @@ impl<T: Tool, S: StandardToolStore> StoredOutputTool<T, S> {
     }
 }
 impl<T: Tool, S: StandardToolStore> Tool for StoredOutputTool<T, S> {
+    fn progress(&self, input: &Value, output: &Value) -> Result<Vec<ToolProgress>> {
+        output
+            .get("Inline")
+            .map_or_else(|| Ok(vec![]), |output| self.inner.progress(input, output))
+    }
     async fn authorize_input(&self, run: &RunRecord, input: &Value) -> Result<()> {
         self.inner.authorize_input(run, input).await
     }

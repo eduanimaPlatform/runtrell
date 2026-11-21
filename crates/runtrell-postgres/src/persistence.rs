@@ -631,6 +631,11 @@ impl PgStore {
                 let mut value = json!(r);
                 value["request_spec"] = json!(s.requests.get(k).ok_or(Error::Storage)?);
                 self.put(conn,"runs","handle,spec,request_spec,schema,revision,sequence,owner,generation,state,checkpoint,cancel,stop,cleanup,settlement,delivery,output,receipt,completion","tenant,id",value).await?;
+                if r.transcript_purged()
+                    && !before.runs.get(k).is_some_and(RunRecord::transcript_purged)
+                {
+                    self.purge_transcript_copies(conn, &r.handle).await?;
+                }
             }
         }
         for (k, a) in &s.accounts {

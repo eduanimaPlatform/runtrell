@@ -1500,6 +1500,9 @@ macro_rules! adapter {
                     && request.resolved_images().is_empty())
                 .then_some(self.0.config.input_token_upper_bound)
             }
+            fn supports_output_schema(&self) -> bool {
+                self.0.config.capabilities.json_schema
+            }
             fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
                 request.validate_for_send()?;
                 // Size the largest feasible cap too: its decimal wire encoding

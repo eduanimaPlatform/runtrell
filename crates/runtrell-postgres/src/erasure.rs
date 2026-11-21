@@ -9,6 +9,64 @@ pub enum RunErasureState {
 }
 
 impl PgStore {
+    /// Runs under the same locked transaction as the completion marker.
+    pub(crate) async fn purge_transcript_copies(
+        &self,
+        conn: &mut PgConnection,
+        run: &RunHandle,
+    ) -> Result<()> {
+        let active: bool = sqlx::query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {}.executions WHERE tenant=$1 AND run_id=$2 AND NOT reclaimed)",
+            self.schema,
+        ))
+        .bind(&run.tenant)
+        .bind(&run.id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| storage("transcript purge", e))?;
+        if active {
+            return Err(Error::Pending("execution not reclaimed".into()));
+        }
+        sqlx::query(&format!(
+            "DELETE FROM {}.executions WHERE tenant=$1 AND run_id=$2",
+            self.schema
+        ))
+        .bind(&run.tenant)
+        .bind(&run.id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| storage("transcript purge", e))?;
+
+        let rows: Vec<(String, String, String, String, Value)> = sqlx::query_as(&format!(
+            "SELECT l.operation,l.generation,l.worker,l.digest,l.result
+             FROM {}.late_results l JOIN {}.attempts a ON l.operation=a.id
+             WHERE a.tenant=$1 AND a.run_id=$2",
+            self.schema, self.schema,
+        ))
+        .bind(&run.tenant)
+        .bind(&run.id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| storage("transcript purge", e))?;
+        for (operation, generation, worker, fingerprint, value) in rows {
+            let mut result: ExternalResult = decode(value)?;
+            result.clear_transcript(false);
+            sqlx::query(&format!(
+                "UPDATE {}.late_results SET result=$5 WHERE operation=$1 AND generation=$2 AND worker=$3 AND digest=$4",
+                self.schema,
+            ))
+            .bind(operation)
+            .bind(generation)
+            .bind(worker)
+            .bind(fingerprint)
+            .bind(json!(result))
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| storage("transcript purge", e))?;
+        }
+        Ok(())
+    }
+
     /// Read only erasure state; a missing run returns `NotFound`.
     pub async fn erasure_status(&self, run: &RunHandle) -> Result<Option<RunErasureState>> {
         let marker: Option<Option<String>> = sqlx::query_scalar(&format!(
@@ -169,11 +227,11 @@ impl PgStore {
                 op.request.recovery_until = None;
                 op.result = op.result.map(scrub_result);
                 for usage in &mut op.usage_observations {
-                    scrub_usage(usage);
+                    usage.clear_transcript();
                 }
                 if let Some(recovery) = &mut op.recovery {
-                    scrub_usage(&mut recovery.previous);
-                    scrub_usage(&mut recovery.settled);
+                    recovery.previous.clear_transcript();
+                    recovery.settled.clear_transcript();
                 }
                 op.unsettled_result = None;
                 sqlx::query(&format!(
@@ -301,42 +359,10 @@ fn scrub_spec(spec: &RunSpec) -> RunSpec {
     clean
 }
 
-fn scrub_usage(usage: &mut Usage) {
-    if let Some(svg) = &mut usage.svg_usage {
-        let reported = &svg.reported;
-        svg.reported = if reported.is_object() {
-            let mut clean = serde_json::Map::new();
-            clean.insert(
-                "model".into(),
-                match (&svg.model, reported.get("model")) {
-                    (Some(model), Some(Value::String(actual))) if actual == model => json!(model),
-                    _ => Value::Bool(false),
-                },
-            );
-            for field in [
-                "input_tokens",
-                "output_tokens",
-                "reasoning_tokens",
-                "total_tokens",
-            ] {
-                let value = match reported.get(field) {
-                    None | Some(Value::Null) => Value::Null,
-                    Some(value) if value.as_u64().is_some() => value.clone(),
-                    _ => Value::Bool(false),
-                };
-                clean.insert(field.into(), value);
-            }
-            Value::Object(clean)
-        } else {
-            Value::Null
-        };
-    }
-}
-
 fn scrub_result(result: ExternalResult) -> ExternalResult {
     match result {
         ExternalResult::Applied { mut usage, .. } => {
-            scrub_usage(&mut usage);
+            usage.clear_transcript();
             ExternalResult::Applied {
                 physical_evidence: None,
                 output: Value::Null,
@@ -345,7 +371,7 @@ fn scrub_result(result: ExternalResult) -> ExternalResult {
             }
         }
         ExternalResult::Failed { mut usage, .. } => {
-            scrub_usage(&mut usage);
+            usage.clear_transcript();
             ExternalResult::Failed {
                 physical_evidence: None,
                 code: "erased".into(),
