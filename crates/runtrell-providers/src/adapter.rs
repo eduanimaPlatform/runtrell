@@ -647,6 +647,52 @@ impl Adapter {
         })
         .await
     }
+    // The same input fields go to the token-count endpoint and into the
+    // estimate. Borrow the payload so counting need not clone media data.
+    fn responses_input(body: &Value) -> BTreeMap<&str, &Value> {
+        [
+            "model",
+            "input",
+            "tools",
+            "text",
+            "parallel_tool_calls",
+            "reasoning",
+            "truncation",
+        ]
+        .into_iter()
+        .filter_map(|key| Some((key, body.get(key)?)))
+        .collect()
+    }
+
+    fn model_input_bound(&self, body: &Value, unresolved_attachments: bool) -> Result<u64> {
+        let cap = self.config.input_token_upper_bound;
+        if !self.counts_responses_input() || unresolved_attachments {
+            return Ok(cap);
+        }
+        let items = |key: &str| body[key].as_array().map_or(0, Vec::len) as u64;
+        let contains_media = body["input"].as_array().into_iter().flatten().any(|item| {
+            let media =
+                |part: &Value| matches!(part["type"].as_str(), Some("input_file" | "input_image"));
+            media(item) || item["content"].as_array().into_iter().flatten().any(media)
+        });
+        if contains_media {
+            // Provider preprocessing turns PDF pages and images into tokens.
+            // Transport size cannot bound extraction, rendering or image tiling.
+            return Ok(cap);
+        }
+        let bytes = serde_json::to_vec(&Self::responses_input(body))
+            .map_err(|_| invalid())?
+            .len() as u64;
+        // One token per UTF-8 byte, with headroom for hidden request and item
+        // framing. The provider count enforces this estimate before inference.
+        Ok(cap.min(
+            bytes.saturating_add(256).saturating_add(
+                items("input")
+                    .saturating_add(items("tools"))
+                    .saturating_mul(32),
+            ),
+        ))
+    }
     pub(crate) fn managed_quote(&self, body: &Value) -> Result<Amount> {
         let managed = self.managed.as_ref().ok_or(Error::ReservationDenied)?;
         if managed.model.image_reservation().is_some() {
@@ -669,19 +715,13 @@ impl Adapter {
             .unwrap_or(self.config.capabilities.limits.max_output);
         managed
             .pricing
-            .estimate(self.config.input_token_upper_bound, output)
+            .estimate(self.model_input_bound(body, false)?, output)
     }
 
-    fn needs_input_count(&self) -> bool {
-        self.managed.as_ref().is_some_and(|managed| {
-            managed.model.api_family() == "openai_responses"
-                && managed
-                    .model
-                    .limits()
-                    .max_input_tokens
-                    .or(managed.model.limits().context_tokens)
-                    .is_some_and(|limit| self.config.input_token_upper_bound < limit)
-        })
+    fn counts_responses_input(&self) -> bool {
+        self.managed
+            .as_ref()
+            .is_some_and(|managed| managed.model.api_family() == "openai_responses")
     }
 
     /// Free Responses preflight over the same complete input. The supported
@@ -693,18 +733,7 @@ impl Adapter {
         authorization: HeaderValue,
         timeout: Duration,
     ) -> Option<u64> {
-        let fields = [
-            "model",
-            "input",
-            "tools",
-            "text",
-            "parallel_tool_calls",
-            "truncation",
-        ];
-        let input: serde_json::Map<_, _> = fields
-            .into_iter()
-            .filter_map(|key| Some((key.into(), body.get(key)?.clone())))
-            .collect();
+        let input = Self::responses_input(body);
         let mut response = self
             .client
             .post(format!("{endpoint}/input_tokens"))
@@ -821,7 +850,8 @@ impl Adapter {
         };
         let mut value = HeaderValue::from_str(&secret).map_err(|_| invalid())?;
         value.set_sensitive(true);
-        if self.needs_input_count() {
+        if self.counts_responses_input() {
+            let bound = self.model_input_bound(&body, false)?;
             let start = Instant::now();
             let count = self
                 .count_responses_input(endpoint, &body, value.clone(), timeout)
@@ -831,6 +861,7 @@ impl Adapter {
                 Some(count) if count > self.config.input_token_upper_bound => {
                     Some("CONTEXT_CAP_EXCEEDED")
                 }
+                Some(count) if count > bound => Some("INPUT_TOKEN_ESTIMATE_EXCEEDED"),
                 Some(_) if !timeout.is_zero() => None,
                 _ => Some("INPUT_TOKEN_COUNT_UNAVAILABLE"),
             };
@@ -1291,7 +1322,7 @@ impl Adapter {
             let route_mismatch = match self.wire {
                 Wire::Responses => {
                     v["service_tier"] != "default"
-                        || (self.needs_input_count()
+                        || (self.counts_responses_input()
                             && u.input
                                 .is_some_and(|n| n > self.config.input_token_upper_bound))
                 }
@@ -1463,6 +1494,12 @@ macro_rules! adapter {
                     .filter(|connection| connection.model.wire_model() == model)
                     .map(|connection| connection.pricing.clone())
             }
+            fn compaction_input_limit(&self, request: &PreparedModelRequest) -> Option<u64> {
+                (self.0.counts_responses_input()
+                    && request.attachments().is_empty()
+                    && request.resolved_images().is_empty())
+                .then_some(self.0.config.input_token_upper_bound)
+            }
             fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64> {
                 request.validate_for_send()?;
                 // Size the largest feasible cap too: its decimal wire encoding
@@ -1484,7 +1521,8 @@ macro_rules! adapter {
                         .with_max_output(request.max_output.max(ceiling)),
                 )?;
                 self.0.check_document_wire_bound(request, &body)?;
-                Ok(self.0.config.input_token_upper_bound)
+                self.0
+                    .model_input_bound(&body, !request.attachments().is_empty())
             }
             fn retry_policy(&self) -> RetryPolicy {
                 self.0.config.retry_policy.clone()

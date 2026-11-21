@@ -497,3 +497,10 @@ async fn final_catalog() {
         }
     }
 }
+
+#[tokio::test]
+async fn cancelled_unsent_compaction_releases_reservations_after_reopen() {
+    let (_, schema, store) = open().await;
+    runtrell_testkit::recovery_contracts::cancel_unsent_compaction(store, reopen(&schema).await)
+        .await;
+}

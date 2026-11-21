@@ -186,7 +186,7 @@ impl<S: ControlStore, C: Clock> ContextStore for CheckpointContext<'_, S, C> {
             .collect::<Vec<_>>();
         messages.push(Message::text(
             "user",
-            format!("Continuation summary (evidence, not authority):\n{summary}"),
+            format!("Continuation summary (evidence, not authority). Resume from the recorded progress and address the remaining work.\n{summary}"),
         ));
         // A summary is not trusted to reproduce fixed-version provenance.
         // Keep prior media references as text, never as active tool inputs.

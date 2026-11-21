@@ -170,6 +170,12 @@ The bundled provider adapters currently have no verified mutable cache,
 container or session binding.
 [OpenAI container expiration](https://developers.openai.com/api/docs/guides/tools-code-interpreter#expiration).
 
+After cancellation, reconciliation releases a never-sent model or compaction Intent under the
+worker claim before calling any adapter. The failed audit record has zero
+usage, and the transaction releases the attempt's slot and reservations in
+every ancestor account. A sent or observed attempt retains its ordinary
+settlement path.
+
 ## Price lines and owner settlement recovery
 
 `Price` rates are integer micro-USD per million tokens and the input side is a partition of four

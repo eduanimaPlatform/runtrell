@@ -986,6 +986,25 @@ pub struct Operation {
     pub recovery: Option<Box<SettlementRecord>>,
 }
 impl Operation {
+    /// A reservation with no dispatch, replay or result evidence.
+    pub fn is_unsent_intent(&self) -> bool {
+        self.state == OperationState::Intent
+            && self.send_count == 0
+            && self.send_generation.is_none()
+            && self.replay_proof_generation.is_none()
+            && self.result.is_none()
+            && self.unsettled_result.is_none()
+            && self.usage_observations.is_empty()
+            && !self.settled
+            && !self.unknown_usage
+    }
+    /// A cancelled model or compaction intent needs no adapter cleanup.
+    pub fn abortable_on_cancel(&self) -> bool {
+        matches!(
+            self.request.kind,
+            OperationKind::Model | OperationKind::Compaction
+        ) && self.is_unsent_intent()
+    }
     /// Read persisted evidence even if an outward result was reduced to `Unknown`
     /// while usage settlement remains pending.
     pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
@@ -1377,6 +1396,12 @@ pub trait ModelPort: Send + Sync {
         None
     }
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
+    /// An independent input ceiling to consider when deciding whether to compact.
+    /// Return None when only the combined context bound applies or the input
+    /// estimate cannot distinguish history growth from media preprocessing.
+    fn compaction_input_limit(&self, _request: &PreparedModelRequest) -> Option<u64> {
+        None
+    }
     /// Recovery scope and retention in milliseconds; the driver pins
     /// `recovery_until = Clock::now() + retention` (checked).
     fn recovery(&self) -> Option<(String, u64)> {
@@ -1667,8 +1692,8 @@ pub trait OperationStore: Send + Sync {
         scope: &str,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
-    /// Atomically settle an unsent retry intent or an expired, unsent resource
-    /// extension intent. Requires the current claim and no result or usage evidence. Keeps
+    /// Atomically settle a cancelled, never-sent model or compaction intent,
+    /// an unsent retry intent, or an expired, unsent resource extension intent. Requires the current claim and no result or usage evidence. Keeps
     /// a failed no-send audit record and releases only this attempt's reservation
     /// and slot; a sent or observed attempt can never be aborted this way.
     fn abort_unsent(

@@ -612,7 +612,10 @@ impl RunStore for MemoryStore {
                         })
                         .map(|r| r.handle.clone()),
                 );
-                let has_ops = s.operations.values().any(|o| o.run == h && !o.settled);
+                let has_ops = s
+                    .operations
+                    .values()
+                    .any(|o| o.run == h && !o.settled && !o.abortable_on_cancel());
                 let r = get_mut(s, &h)?;
                 r.cancel = Some(reason.into());
                 r.state = RunState::Terminal(Terminal::Cancelled(reason.into()));
@@ -942,16 +945,8 @@ impl OperationStore for MemoryStore {
                     old.request.kind,
                     OperationKind::Model | OperationKind::Compaction
                 );
-            if !(expired_extension || retry)
-                || old.state != OperationState::Intent
-                || old.send_count != 0
-                || old.send_generation.is_some()
-                || old.result.is_some()
-                || old.unsettled_result.is_some()
-                || !old.usage_observations.is_empty()
-                || old.settled
-                || old.unknown_usage
-            {
+            let cancelled_before_send = r.cancel.is_some() && old.abortable_on_cancel();
+            if !(cancelled_before_send || expired_extension || retry) || !old.is_unsent_intent() {
                 return Err(Error::Conflict);
             }
             let mut usage = Usage::measured(0, 0, 0);
@@ -974,7 +969,9 @@ impl OperationStore for MemoryStore {
             let result = ExternalResult::Failed {
                 repair_hint: None,
                 physical_evidence: None,
-                code: if expired_extension {
+                code: if cancelled_before_send {
+                    "CANCELLED_BEFORE_SEND"
+                } else if expired_extension {
                     "RESOURCE_LEASE_EXPIRED"
                 } else {
                     "RETRY_EXHAUSTED: total elapsed"

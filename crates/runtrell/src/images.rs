@@ -646,6 +646,9 @@ impl<M: ModelPort, S: StandardToolStore, P: Policy, R: RunStore> ModelPort
     fn limits(&self) -> ModelLimits {
         self.inner.limits()
     }
+    fn compaction_input_limit(&self, request: &PreparedModelRequest) -> Option<u64> {
+        self.inner.compaction_input_limit(request)
+    }
     fn input_upper_bound(&self, r: &PreparedModelRequest) -> Result<u64> {
         self.inner.input_upper_bound(r)
     }

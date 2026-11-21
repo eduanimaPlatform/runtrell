@@ -141,6 +141,7 @@ pub async fn abort_never_sent_retry<S: ControlStore>(first: Arc<S>, reopened: Ar
     sent_request.attempt = 2;
     let sent = first.begin(&sent_claim, sent_request, 1).await.unwrap();
     first.mark_sent(&sent_claim, &sent.id, 1).await.unwrap();
+    first.cancel(&sent_run, "owner requested").await.unwrap();
     assert_eq!(
         first.abort_unsent(&sent_claim, &sent.id, 60_000).await,
         Err(Error::Conflict)
@@ -1119,4 +1120,87 @@ pub async fn job_preparation<S: ControlStore>(s: Arc<S>) {
     ));
     assert_eq!(s.account(&account).await.unwrap().used, Amount::new(0, 2));
     assert_eq!(state.seen.lock().unwrap().len(), 2);
+}
+
+/// A cancelled initial compaction intent holds no provider work to reconcile.
+pub async fn cancel_unsent_compaction<S: ControlStore>(store: Arc<S>, reopened: Arc<S>) {
+    use crate::{
+        BusinessTool, DecisionFinalizer, DecisionValidator, FakeModel, FakePolicy, TestClock,
+    };
+    let reserve = Amount::new(1200, 2400);
+    let parent = store.create_account("t", reserve, None).await.unwrap();
+    let account = store
+        .create_account("t", reserve, Some(parent.clone()))
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new(
+            "t",
+            "cancel-compaction",
+            account.clone(),
+            "finish work",
+        ))
+        .await
+        .unwrap();
+    let claim = store.claim(&run, "original", 0, 10).await.unwrap();
+    let attempt = store
+        .begin(
+            &claim,
+            DispatchRequest::new(
+                "summary",
+                OperationKind::Compaction,
+                "fake",
+                Value::Null,
+                reserve,
+            ),
+            0,
+        )
+        .await
+        .unwrap();
+    store.cancel(&run, "owner requested").await.unwrap();
+    assert_eq!(
+        store.mark_sent(&claim, &attempt.id, 1).await,
+        Err(Error::Closed)
+    );
+    let claim = reopened.claim(&run, "successor", 11, 10).await.unwrap();
+    let clock = TestClock::default();
+    clock.set(11);
+    let runtime = Runtime {
+        store: reopened.clone(),
+        model: FakeModel::default(),
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock,
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    for _ in 0..2 {
+        let record = runtime.drive(&claim).await.unwrap();
+        assert!(matches!(
+            record.state,
+            RunState::Terminal(Terminal::Cancelled(_))
+        ));
+        assert_eq!(
+            (record.stop, record.cleanup, record.settlement),
+            (
+                Progress::NotRequired,
+                Progress::NotRequired,
+                Progress::Confirmed
+            )
+        );
+    }
+    let op = reopened.list_operations(&run).await.unwrap().remove(0);
+    assert!(op.settled && !op.unknown_usage);
+    assert_eq!((op.send_count, op.send_generation), (0, None));
+    assert!(
+        matches!(op.result, Some(ExternalResult::Failed {code, usage, ..})
+        if code == "CANCELLED_BEFORE_SEND" && usage.amount() == Ok(Amount::default()))
+    );
+    for id in [account, parent] {
+        let ledger = reopened.account(&id).await.unwrap();
+        assert_eq!(
+            (ledger.reserved, ledger.used, ledger.unknown),
+            (Amount::default(), Amount::default(), 0)
+        );
+    }
 }

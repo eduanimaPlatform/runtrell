@@ -1716,7 +1716,9 @@ async fn bundled_model_requires_reservation_and_settles_once() {
         .unwrap_or_else(|_| "openai/gpt-6.2-sol".into());
     let expect_unknown = std::env::var_os("RUNTRELL_CATALOG_DEMO_UNKNOWN").is_some();
     let wire_id = id.split_once('/').unwrap().1;
-    let (url, server) = server(200, "", json!({
+    let (url, server) = raw_server_with_replies(vec![
+        json!({"object":"response.input_tokens","input_tokens":100}),
+        json!({
         "id": "resp-local",
         "model": wire_id,
         "status": "completed",
@@ -1727,7 +1729,7 @@ async fn bundled_model_requires_reservation_and_settles_once() {
              {"ttl_30m_tokens":0,"ttl_12h_tokens":0}},
             "output_tokens":50,"output_tokens_details":{"reasoning_tokens":10},
             "total_tokens":150}
-    })).await;
+    })], 0).await;
     let store = Arc::new(MemoryStore::default());
     let account = store
         .create_account("tenant", Amount::new(2_000_000, 10_000_000), None)
@@ -1839,9 +1841,10 @@ async fn bundled_model_requires_reservation_and_settles_once() {
         Amount::new(150, 662)
     );
     let requests = server.await.unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("POST /test/input_tokens "));
     let payload: Value =
-        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(payload["max_output_tokens"], 64);
     assert_eq!(payload["service_tier"], "default");
     assert_eq!(payload["prompt_cache_options"]["ttl"], "30m");
@@ -1856,11 +1859,12 @@ async fn managed_context_cap_counts_final_input_and_blocks_long_context() {
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
     };
 
-    for (count, input_only, allowed) in [
-        (271_936, false, true),
-        (271_937, false, false),
-        (272_000, true, true),
-        (272_001, true, false),
+    for (count, input_only, above_estimate, allowed) in [
+        (271_936, false, false, true),
+        (271_937, false, false, false),
+        (272_000, true, false, true),
+        (272_001, true, false, false),
+        (10_000, true, true, false),
     ] {
         let (url, server) = raw_server_with_replies(vec![
             json!({"object":"response.input_tokens","input_tokens":count}),
@@ -1874,12 +1878,17 @@ async fn managed_context_cap_counts_final_input_and_blocks_long_context() {
             .create_account("tenant", Amount::new(272_064, 700_000), None)
             .await
             .unwrap();
+        let input = if above_estimate {
+            "answer".into()
+        } else {
+            "a".repeat(272_000)
+        };
         let run = store
             .start(RunSpec::new(
                 "tenant",
                 "bounded-context",
                 account.clone(),
-                "answer",
+                &input,
             ))
             .await
             .unwrap();
@@ -1939,7 +1948,7 @@ async fn managed_context_cap_counts_final_input_and_blocks_long_context() {
             let op = store.operations(&claim.run).await.unwrap().remove(0);
             assert!(op.settled);
             assert!(
-                matches!(op.result, Some(ExternalResult::Failed { code, .. }) if code == "CONTEXT_CAP_EXCEEDED")
+                matches!(op.result, Some(ExternalResult::Failed { code, .. }) if code == if above_estimate { "INPUT_TOKEN_ESTIMATE_EXCEEDED" } else { "CONTEXT_CAP_EXCEEDED" })
             );
         }
     }
@@ -2171,12 +2180,13 @@ async fn managed_background_contract<S: ControlStore>(
         "cache_write_tokens":0},"output_tokens":32,"total_tokens":132});
     let (url, http) = raw_server_with_replies(
         vec![
+            json!({"object":"response.input_tokens","input_tokens":100}),
             pending("queued"),
             pending("in_progress"),
             pending("in_progress"),
             terminal,
         ],
-        4,
+        5,
     )
     .await;
 
@@ -2267,13 +2277,14 @@ async fn managed_background_contract<S: ControlStore>(
     assert_eq!(totals.reserved, Amount::default());
 
     let requests = http.await.unwrap();
-    assert!((2..=4).contains(&requests.len()));
-    assert!(requests[0].starts_with("POST /test "));
-    let sent: Value = serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!((3..=5).contains(&requests.len()));
+    assert!(requests[0].starts_with("POST /test/input_tokens "));
+    assert!(requests[1].starts_with("POST /test "));
+    let sent: Value = serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(sent["background"], true);
     assert_eq!(sent["max_output_tokens"], 64);
     assert!(
-        requests[1..]
+        requests[2..]
             .iter()
             .all(|req| req.starts_with("GET /test/resp_fixture "))
     );
@@ -2435,4 +2446,276 @@ async fn managed_gemini_wire_binds_the_thinking_budget_and_verifies_the_sku() {
         0
     );
     assert_eq!(sent["generationConfig"]["candidateCount"], 1);
+}
+
+#[cfg(feature = "openai")]
+#[test]
+fn responses_bound_tracks_prepared_history_and_stops_at_the_input_cap() {
+    let mut request = request();
+    request.model = "gpt-6.2-sol".into();
+    request.max_output = 64;
+    let model = connect_model(
+        "openai/gpt-6.2-sol",
+        None,
+        Connection {
+            run: context().claim.run,
+            session: None,
+            credentials: Arc::new(|_| panic!("estimating must not resolve credentials")),
+            attachment_resolver: None,
+            retry_policy: RetryPolicy::default(),
+            timeout_ms: 10_000,
+            context_cap: None,
+            input_token_cap: Some(32_000),
+            max_output_tokens: Some(64),
+            reasoning: None,
+        },
+    )
+    .unwrap();
+    let bound = |r: &ModelRequest| model.input_upper_bound(&text(r.clone())).unwrap();
+    let initial = bound(&request);
+    request
+        .messages
+        .push(Message::text("assistant", "Recent findings. ".repeat(700)));
+    let grown = bound(&request);
+    assert!(initial < grown && grown < 32_000, "{initial} -> {grown}");
+    request
+        .messages
+        .push(Message::text("user", "long history ".repeat(3000)));
+    assert_eq!(bound(&request), 32_000);
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn responses_compacts_grown_file_history_then_writes_the_deliverable() {
+    use runtrell::{
+        data::{Access, DataStore, Namespace, StoragePolicy, WorkspaceStore},
+        file_tools::{FileAction, FileTool},
+        memory::MemoryStore,
+    };
+    use runtrell_testkit::{DecisionFinalizer, DecisionValidator, FakePolicy, TestClock};
+
+    let counted = |tokens| json!({"object":"response.input_tokens","input_tokens":tokens});
+    let answer = |id: &str, output, input: u64| {
+        json!({"id":id,"model":"gpt-6.2-sol","status":"completed","service_tier":"default",
+            "output":[output],"usage":{"input_tokens":input,
+            "input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},
+            "output_tokens":32,"total_tokens":input+32}})
+    };
+    let function = |tool: &str, id: &str, arguments: Value| {
+        json!({"type":"function_call","status":"completed","call_id":id,
+            "name":digest(&json!(tool)), "arguments":arguments.to_string()})
+    };
+    let read = |path, revision| json!({"path":path,"revision":revision,"offset":0,"length":4096});
+    let message = |text: &str| {
+        json!({"type":"message","role":"assistant","status":"completed",
+            "content":[{"type":"output_text","text":text}]})
+    };
+    let summary = "Read input/a.txt and input/b.txt. First found 17, second found 42. Next write work/result.txt with both findings.";
+    let (url, http) = raw_server_with_replies(
+        vec![
+            counted(100),
+            answer(
+                "resp_1",
+                function("files.read", "call_a", read("input/a.txt", 1)),
+                100,
+            ),
+            counted(1200),
+            answer(
+                "resp_2",
+                function("files.read", "call_b", read("input/b.txt", 2)),
+                1200,
+            ),
+            counted(1900),
+            answer("resp_summary", message(summary), 1900),
+            counted(1250),
+            answer(
+                "resp_3",
+                function(
+                    "files.write",
+                    "call_save",
+                    json!({"path":"work/result.txt","expected_revision":null,"text":"17 and 42"}),
+                ),
+                1250,
+            ),
+            counted(1375),
+            answer("resp_4", message("{\"decision\":\"saved\"}"), 1375),
+        ],
+        10,
+    )
+    .await;
+
+    let store = Arc::new(MemoryStore::default());
+    let account = store
+        .create_account("tenant", Amount::new(100_000, 1_000_000), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new(
+        "tenant",
+        "file-progress",
+        account.clone(),
+        "Read both sources and save the findings in work/result.txt.",
+    );
+    // The configured input cap binds earlier than the model context window.
+    // 20,000 input cap - 13,500 slack = 6,500 input before compaction.
+    spec.compaction = Some(CompactionPolicy {
+        min_remaining_tokens: 13_500,
+    });
+    let run = store.start(spec).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claim = store.claim(&run, "worker", now, 100_000).await.unwrap();
+    let clock = TestClock::default();
+    clock.set(now);
+    let mut model = connect_model(
+        "openai/gpt-6.2-sol",
+        None,
+        Connection {
+            run: run.clone(),
+            session: None,
+            credentials: Arc::new(|_| Ok(ApiKey::new("FIXTURE-KEY"))),
+            attachment_resolver: None,
+            retry_policy: RetryPolicy::default(),
+            timeout_ms: 10_000,
+            context_cap: None,
+            input_token_cap: Some(20_000),
+            max_output_tokens: Some(64),
+            reasoning: None,
+        },
+    )
+    .unwrap();
+    model.0.config.endpoint = url;
+    let access = Access::owner(Namespace {
+        owner: run.clone(),
+        agent: "files".into(),
+    });
+    let data = DataStore::memory(StoragePolicy::default());
+    for (path, bytes) in [
+        ("input/a.txt", b"First found 17. ".repeat(180)),
+        ("input/b.txt", b"Second found 42. ".repeat(105)),
+    ] {
+        data.write(&access, path, None, &bytes).await.unwrap();
+    }
+    let tools = [FileAction::Read, FileAction::Write]
+        .map(|action| FileTool {
+            store: data.clone(),
+            access: access.clone(),
+            action,
+        })
+        .to_vec();
+    let runtime = Runtime {
+        store: store.clone(),
+        model,
+        tools,
+        policy: FakePolicy::default(),
+        clock,
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let result = runtime.drive(&claim).await.unwrap();
+    let requests = http.await.unwrap();
+    let turns = store
+        .list_operations(&run)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|op| {
+            matches!(
+                op.request.kind,
+                OperationKind::Model | OperationKind::Compaction
+            )
+        })
+        .map(|op| {
+            (
+                op.request.key,
+                op.request.reserve.tokens - op.request.input["max_output"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result.state,
+        RunState::Terminal(Terminal::Succeeded),
+        "reserved input by turn: {turns:?}"
+    );
+    let (pairs, extra) = requests.as_chunks::<2>();
+    assert!(extra.is_empty());
+    let prompts: Vec<Value> = pairs
+        .iter()
+        .map(|pair| {
+            assert!(pair[0].starts_with("POST /test/input_tokens "));
+            assert!(pair[1].starts_with("POST /test "));
+            let body = |request: &str| {
+                serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap()
+            };
+            let counted = body(&pair[0]);
+            let sent = body(&pair[1]);
+            assert_eq!(counted["input"], sent["input"]);
+            counted
+        })
+        .collect();
+    let [initial, after_one_read, compact, resumed, after_write] = prompts.as_slice() else {
+        panic!("expected four normal turns and one compaction");
+    };
+    assert!(!initial["input"].to_string().contains("input/a.txt"));
+    assert!(
+        after_one_read["input"]
+            .to_string()
+            .contains("First found 17")
+    );
+    let compact_input = compact["input"].to_string();
+    for fact in [
+        "current goal",
+        "already read or written",
+        "input/a.txt",
+        "input/b.txt",
+        "work/result.txt",
+        "First found 17",
+        "Second found 42",
+    ] {
+        assert!(compact_input.contains(fact), "{fact}");
+    }
+    assert!(resumed["input"].to_string().contains(summary));
+    assert!(
+        !resumed["input"]
+            .to_string()
+            .contains(&"First found 17. ".repeat(10))
+    );
+    assert!(after_write["input"].to_string().contains("work/result.txt"));
+    assert_eq!(
+        data.read(&access, "work/result.txt", 3, 0, 20)
+            .await
+            .unwrap()
+            .bytes,
+        b"17 and 42"
+    );
+
+    let operations = store.list_operations(&run).await.unwrap();
+    let mut compactions = 0;
+    let mut used = Amount::default();
+    for op in operations.iter().filter(|op| {
+        matches!(
+            op.request.kind,
+            OperationKind::Model | OperationKind::Compaction
+        )
+    }) {
+        compactions += u64::from(op.request.kind == OperationKind::Compaction);
+        assert!(op.settled && !op.unknown_usage && op.send_count == 1);
+        let Some(ExternalResult::Applied { usage, .. }) = &op.result else {
+            panic!()
+        };
+        let actual = usage.amount().unwrap();
+        assert!(
+            actual.tokens <= op.request.reserve.tokens
+                && actual.micro_usd <= op.request.reserve.micro_usd
+        );
+        used.tokens += actual.tokens;
+        used.micro_usd += actual.micro_usd;
+    }
+    assert_eq!(compactions, 1);
+    let balance = store.account(&account).await.unwrap();
+    assert_eq!(
+        (balance.used, balance.reserved, balance.unknown),
+        (used, Amount::default(), 0)
+    );
 }

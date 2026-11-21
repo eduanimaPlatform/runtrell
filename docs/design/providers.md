@@ -9,20 +9,29 @@ wire model, capabilities, limits and pricing. Connection supplies a credential
 resolver, Run/session, timeout, reasoning setting and optional lower limits.
 `Connection::input_token_cap` bounds the billed prompt.
 `Connection::context_cap` bounds the sum of the prompt and allowed output.
-With a lower context, reservation subtracts the maximum allowed output to
-compute the effective prompt ceiling. Without lower limits, the adapter
-reserves against the published prompt ceiling.
+With a lower context, the effective prompt ceiling leaves room for the maximum
+allowed output. Other executable families reserve against the published prompt
+ceiling and can lower context when that ceiling and the allowed output fit.
 
-For OpenAI Responses, a persisted reservation authorizes the adapter to send
-its final input to the free `POST /v1/responses/input_tokens` endpoint with
-the same key and deadline. This includes the input after attachment resolution,
-function definitions and the structured output schema. A count above the
-ceiling, a count failure or an unusable reply prevents inference. Uncapped
-connections use the published bound and skip counting. Other executable
-families can use a lower context when their published prompt bound fits the
-configured context together with the allowed output.
+For OpenAI Responses, the adapter sizes the prepared input, including replayed
+provider items, function definitions and the structured output schema. The text
+estimate uses serialized UTF-8 bytes with headroom for request and item framing
+and is capped by the effective prompt ceiling. PDF extraction and page rendering,
+and image preprocessing and tiling, are metered independently of transport bytes.
+Requests with attachments use the effective prompt ceiling as their conservative
+bound. Compaction and reservation use the same bound. For text, compaction
+measures headroom against both the effective prompt ceiling and the total
+context window. Inputs with active visual media retain the combined-context
+check because the reserved media allowance cannot measure history growth.
+
+Before inference, the persisted reservation authorizes the adapter to submit the
+final input to the free `POST /v1/responses/input_tokens` endpoint with the same key
+and deadline. It counts the input after attachment resolution with the provider's
+tokenization rules. A count above the estimated bound or configured ceiling, a
+count failure or an unusable reply prevents inference.
 [Responses input counts](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count) ·
-[OpenAI counting and billing](https://help.openai.com/en/articles/4936856-understanding-and-counting-tokens).
+[File inputs](https://developers.openai.com/api/docs/guides/file-inputs) ·
+[Image tokenization](https://developers.openai.com/api/docs/guides/images-vision).
 
 Resolution rejects unknown IDs, disabled features and unverified bindings
 before acquiring credentials.

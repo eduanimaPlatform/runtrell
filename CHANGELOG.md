@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 — 2026-11-21 — request-sized input bounds and cancelled intent release
+
+- The Responses adapter derives `input_upper_bound` from the prepared request,
+  capped by the configured input limit, so compaction fires only as the real
+  history grows instead of always or never.
+- Cancelling a run releases reservations held by unsent model intents,
+  including after a store reconnect.
+- The continuation message tells the model to resume from the recorded progress.
+
 ## 0.3.0 — 2026-11-20 — allowance settlement and resource extension (breaking)
 
 - Certified OpenRouter BYOK allowance evidence can settle together with the

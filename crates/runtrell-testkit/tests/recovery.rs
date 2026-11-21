@@ -255,3 +255,11 @@ recovery!(restart_expired_proof_cannot_resend, "expired");
 recovery!(restart_changed_caller_cannot_resend, "caller_changed");
 recovery!(restart_without_policy_cannot_resend, "no_policy");
 recovery!(restart_lookup_then_old_generation_cannot_resend, "handoff");
+
+#[test]
+fn cancelled_unsent_compaction_releases_reservations() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::default());
+        recovery_contracts::cancel_unsent_compaction(store.clone(), store).await;
+    });
+}
