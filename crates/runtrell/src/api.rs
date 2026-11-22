@@ -548,7 +548,7 @@ pub struct RunSpec {
     /// Ordered phase configuration. An empty list uses a single conversation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<PhaseConfig>,
-    /// Maximum consecutive reads of already covered ranges.
+    /// Maximum consecutive reads of already covered ranges, excluding recovery reads.
     #[serde(default)]
     pub max_repeated_reads: Option<std::num::NonZeroU64>,
 }
@@ -1455,7 +1455,7 @@ pub trait ModelPort: Send + Sync {
     }
     /// Pure admission check for retained model inputs, without resolving payloads
     /// or sending inference. Return MODEL_ATTACHMENT_LIMIT for size/count
-    /// failures so the driver can compact or return repairable tool feedback.
+    /// failures so the driver can demote replayed media or return repairable tool feedback.
     fn check_input_attachments(
         &self,
         _attachments: &[crate::attachments::Attachment],

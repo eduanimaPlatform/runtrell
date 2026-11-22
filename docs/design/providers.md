@@ -134,10 +134,12 @@ bundled Responses and GenerateContent bindings use authorized inline PDF and
 image bytes. Count, total declared bytes and worst-case JSON wire size are
 checked before reservation. `DocumentView` supports bounded PDF page selection
 and image inputs through [attachments](attachments.md).
-`ModelPort::check_input_attachments` checks the retained inputs against count and
-byte limits without resolving data. With compaction enabled, the driver can
-summarize older inputs to admit an exchange that fits on its own. Oversized
-results receive repairable feedback and keep their full receipts and references.
+`ModelPort::check_input_attachments` checks inputs against count and byte
+limits without resolving data. Report size or count overflow with
+`MODEL_ATTACHMENT_LIMIT` so the driver can demote older replayed media before
+sizing the request. A pending exchange that exceeds the limits with the
+run's host inputs receives repairable feedback and keeps its full receipts
+and references.
 Provider echoes of a resolved URL, full UTF-8 payload
 or Base64 payload are redacted before saving reply/continuation metadata; this
 does not replace the host's authorization and source-access policy.

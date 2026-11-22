@@ -129,6 +129,7 @@ enum Scenario {
     Revoked,
     Compact,
     CountLimit,
+    ByteLimit,
     EstimateExceeded,
 }
 
@@ -198,6 +199,11 @@ async fn run(scenario: Scenario, outputs: Vec<Vec<Value>>) -> RunResult {
         revoke_page_one_after_first_send: matches!(scenario, Scenario::Revoked),
         ..Resolver::default()
     });
+    let input_cap = if matches!(scenario, Scenario::CountLimit | Scenario::ByteLimit) {
+        70_000
+    } else {
+        20_000
+    };
     let mut model = connect_model(
         "openai/gpt-6.2-sol",
         None,
@@ -209,7 +215,7 @@ async fn run(scenario: Scenario, outputs: Vec<Vec<Value>>) -> RunResult {
             retry_policy: RetryPolicy::default(),
             timeout_ms: 10_000,
             context_cap: None,
-            input_token_cap: Some(20_000),
+            input_token_cap: Some(input_cap),
             max_output_tokens: Some(64),
             reasoning: None,
         },
@@ -218,8 +224,13 @@ async fn run(scenario: Scenario, outputs: Vec<Vec<Value>>) -> RunResult {
     model.0.config.endpoint = endpoint;
     // Exercise a parallel tool exchange with the loopback provider.
     model.0.config.capabilities.parallel_tool_calls = true;
-    if matches!(scenario, Scenario::CountLimit) {
-        model.0.config.document_limits.max_inputs = 1;
+    match scenario {
+        Scenario::CountLimit => model.0.config.document_limits.max_inputs = 4,
+        Scenario::ByteLimit => {
+            model.0.config.document_limits.max_total_bytes =
+                (2..=5).map(|page| pdf(page).bytes()).sum()
+        }
+        _ => {}
     }
     let runtime = Runtime {
         store: store.clone(),
@@ -435,28 +446,77 @@ async fn measured_media_input_above_the_reservation_never_sends_inference() {
 }
 
 #[tokio::test]
-async fn retained_media_count_triggers_compaction_when_the_pending_exchange_fits() {
-    let result = run(
-        Scenario::CountLimit,
-        vec![
-            vec![call("first", "pdf", 1)],
-            vec![call("second", "pdf", 2)],
-            vec![message("Page one is recorded. Continue with page two.")],
-            vec![message("{\"decision\":\"answered\"}")],
-        ],
-    )
-    .await;
-    assert_eq!(result.run.state, RunState::Terminal(Terminal::Succeeded));
-    let inputs = prompts(&result);
-    assert_eq!(media(inputs[1]).len(), 1);
-    assert!(media(inputs[2]).is_empty());
-    assert_eq!(media(inputs[3]).len(), 1);
-    assert!(json!(inputs[3]).to_string().contains("references only"));
-    assert_eq!(
-        media(inputs[3])[0]["file_data"],
-        format!(
-            "data:application/pdf;base64,{}",
-            STANDARD.encode(pdf_bytes(2))
-        )
-    );
+async fn retained_media_overflow_demotes_oldest_without_compaction_and_reopens_in_place() {
+    for scenario in [Scenario::CountLimit, Scenario::ByteLimit] {
+        let outputs = (1..=5)
+            .map(|page| vec![call(&format!("open-{page}"), "pdf", page)])
+            .chain([
+                vec![call("reopen", "pdf", 1)],
+                vec![message("{\"decision\":\"answered\"}")],
+            ])
+            .collect();
+        let result = run(scenario, outputs).await;
+        assert_eq!(result.run.state, RunState::Terminal(Terminal::Succeeded));
+        assert!(
+            result
+                .operations
+                .iter()
+                .all(|op| op.request.kind != OperationKind::Compaction)
+        );
+        let inputs = prompts(&result);
+        assert!(
+            inputs[..5]
+                .windows(2)
+                .all(|pair| pair[1].starts_with(pair[0]))
+        );
+        let pages: [&[usize]; 7] = [
+            &[],
+            &[1],
+            &[1, 2],
+            &[1, 2, 3],
+            &[1, 2, 3, 4],
+            &[2, 3, 4, 5],
+            &[3, 4, 5, 1],
+        ];
+        for (input, active_pages) in inputs.iter().zip(pages) {
+            let retained = media(input);
+            assert_eq!(retained.len(), active_pages.len());
+            for (item, page) in retained.iter().zip(active_pages) {
+                assert_eq!(
+                    item["file_data"],
+                    format!(
+                        "data:application/pdf;base64,{}",
+                        STANDARD.encode(pdf_bytes(*page))
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            inputs[6].last().unwrap()["content"][0]["type"],
+            "input_file"
+        );
+        let original = inputs[1]
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .unwrap();
+        for input in &inputs[5..] {
+            assert!(input.contains(original));
+        }
+        let reopened = result
+            .operations
+            .iter()
+            .find(|op| op.request.key == "model:7")
+            .unwrap();
+        let mut request: ModelRequest =
+            serde_json::from_value(reopened.request.input.clone()).unwrap();
+        let expected = request.media_slots().unwrap();
+        request
+            .messages
+            .insert(0, Message::text("system", "Role instructions"));
+        request
+            .messages
+            .insert(0, Message::text("developer", "Additional instructions"));
+        assert_eq!(request.media_slots().unwrap()[2..], expected);
+        assert_eq!(result.resolver.resolved.load(Ordering::SeqCst), 18);
+    }
 }

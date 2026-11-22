@@ -545,11 +545,28 @@ fn applied(output: Value) -> ExternalResult {
     }
 }
 impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentView<S, P, R, C> {
+    fn progress(&self, _: &Value, output: &Value) -> Result<Vec<ToolProgress>> {
+        let input = self.input(output["source"].clone())?;
+        let (start, end) = match input.pages {
+            Some(pages) => (u64::from(pages.first), u64::from(pages.last) + 1),
+            None if input.attachment.declaration().mime_type == "application/pdf" => (0, 1),
+            None => (1, 2),
+        };
+        // Use the fixed source identity and a separate path for page coordinates.
+        Ok(vec![ToolProgress::Read {
+            namespace: self.output_access.namespace().clone(),
+            path: format!("document:{}", digest(&json!(input.attachment))),
+            revision: 0,
+            start,
+            end,
+        }])
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "document.view".into(),
             version: format!(
-                "document-view-3:{}",
+                "document-view-4:{}",
                 digest(&json!([
                     self.limits,
                     self.output_access.namespace(),

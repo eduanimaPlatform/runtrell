@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Run-local context: summary, original messages and active input share one CAS.
+use crate::attachments::{MediaStart, tool_results};
 use crate::{data::*, *};
 
 pub(super) struct CheckpointContext<'a, S, C> {
@@ -235,12 +236,19 @@ impl<S: ControlStore, C: Clock> ContextStore for CheckpointContext<'_, S, C> {
             history.data = serde_json::json!({"attachment_history":references});
             messages.push(history);
         }
-        if let Some(policy) = &run.spec.compaction
-            && (policy.preserve_progress || policy.max_without_progress.is_some())
+        if run.spec.max_repeated_reads.is_some()
+            || run.spec.compaction.as_ref().is_some_and(|policy| {
+                policy.preserve_progress || policy.max_without_progress.is_some()
+            })
         {
             let mut progress = super::progress::WorkProgress::load(&cp)?;
             progress.compacted();
-            if policy.preserve_progress {
+            if run
+                .spec
+                .compaction
+                .as_ref()
+                .is_some_and(|policy| policy.preserve_progress)
+            {
                 messages.push(Message::text(
                     "user",
                     format!(
@@ -250,6 +258,19 @@ impl<S: ControlStore, C: Clock> ContextStore for CheckpointContext<'_, S, C> {
                 ));
             }
             progress.save(&mut cp)?;
+        }
+        let mut media_start = MediaStart::load(&cp.payload)?;
+        if media_start != MediaStart::default() {
+            let removed = tool_results(&cp.messages[..tail]).count();
+            if media_start.tool_result < removed {
+                cp.payload
+                    .as_object_mut()
+                    .ok_or(Error::Conflict)?
+                    .remove(MediaStart::KEY);
+            } else {
+                media_start.tool_result -= removed;
+                cp.payload[MediaStart::KEY] = serde_json::json!(media_start);
+            }
         }
         messages.extend_from_slice(&cp.messages[tail..]);
         cp.messages = messages;
@@ -461,13 +482,15 @@ mod tests {
             let cp = store.get(&run).await.unwrap().checkpoint.unwrap();
             if continuation {
                 assert_eq!(
-                    ToolMedia::collect(&cp.messages, &[]).unwrap().attachments,
+                    ToolMedia::collect(&cp.messages, &[], MediaStart::load(&cp.payload).unwrap())
+                        .unwrap()
+                        .attachments,
                     vec![reference.clone()]
                 );
                 continue;
             }
             assert!(
-                ToolMedia::collect(&cp.messages, &[])
+                ToolMedia::collect(&cp.messages, &[], MediaStart::load(&cp.payload).unwrap())
                     .unwrap()
                     .attachments
                     .is_empty()

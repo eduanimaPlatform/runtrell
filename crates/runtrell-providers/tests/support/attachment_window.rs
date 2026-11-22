@@ -756,3 +756,96 @@ async fn pg_page_window(continuation: bool) {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn repeated_document_ranges_without_writes_stop() {
+    let store = Arc::new(memory::MemoryStore::default());
+    let account = store
+        .create_account("tenant", Amount::new(100000, 100000), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new("tenant", "view-loop", account, "Read and save pages");
+    spec.max_repeated_reads = std::num::NonZeroU64::new(3);
+    let handle = store.start(spec).await.unwrap();
+    let clock = TestClock::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    clock.set(now);
+    let claim = store.claim(&handle, "worker", now, 100).await.unwrap();
+    let access = Access::owner(Namespace {
+        owner: handle.clone(),
+        agent: "main".into(),
+    });
+    let data = DataStore::memory(StoragePolicy::default());
+    let file = data
+        .write(&access, "input.pdf", None, &pages_pdf())
+        .await
+        .unwrap();
+    let attachment = Attachment::Stored(ImageReference::Workspace {
+        namespace: access.namespace().clone(),
+        file,
+        mime_type: "application/pdf".into(),
+    });
+    // Two new ranges, then the same ranges in an alternating no-write loop.
+    let script = [(1, 5), (6, 10), (1, 5), (6, 10), (1, 5)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (first, last))| {
+            call(
+                &format!("view-{i}"),
+                "document.view",
+                json!({"attachment":attachment, "pages":{"first":first,"last":last}}),
+            )
+        })
+        .chain([done()])
+        .collect();
+    let (endpoint, http) = super::document_contracts::sequence_server(script).await;
+    let resolver = || ImageResolver {
+        store: data.clone(),
+        policy: FakePolicy::default(),
+        accesses: vec![access.clone()],
+        limits: ImageLimits::default(),
+    };
+    let mut config = model_config(endpoint, handle.clone());
+    // Alternating views also rotate the active media on every turn.
+    config.document_limits.max_inputs = 1;
+    let runtime = Runtime {
+        store: store.clone(),
+        model: ImageModel {
+            inner: Gemini::new(config).unwrap(),
+            resolver: resolver(),
+            runs: store.clone(),
+        },
+        tools: ToolSet::default()
+            .document_view(DocumentView {
+                resolver: resolver(),
+                external: None,
+                runs: store.clone(),
+                clock: clock.clone(),
+                output_access: access,
+                limits: DocumentViewLimits::default(),
+            })
+            .select(StandardTool::DocumentView)
+            .build()
+            .unwrap(),
+        policy: FakePolicy::default(),
+        clock,
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let run = runtime.drive(&claim).await.unwrap();
+    http.abort();
+    assert_eq!(
+        run.state,
+        RunState::Terminal(Terminal::Stalled(ProgressStop::RepeatedRead))
+    );
+    let ops = store.list_operations(&handle).await.unwrap();
+    assert_eq!(
+        ops.iter()
+            .filter(|op| op.request.target == "document.view")
+            .count(),
+        5
+    );
+}

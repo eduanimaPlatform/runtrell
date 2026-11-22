@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0 — media limits and read recovery
+
+- Demote the oldest replayed tool documents and images to their existing text
+  references when model input media exceed size or count limits. Keep the
+  pending tool exchange and host inputs active. Token pressure still triggers
+  context compaction when configured.
+- Allow a recovery pass over the run's own saved file revisions after media
+  demotion or compaction. Further reads of the same covered ranges count toward
+  the stall limit. Document views report coverage of fixed source page ranges
+  so a view-only loop can also stall.
+
 ## 0.7.0 — 2026-11-23 — session media replay
 
 - Replay fixed tool-result documents and images in their original position in

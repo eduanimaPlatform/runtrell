@@ -47,15 +47,22 @@ reconciliation rules.
 ## Progress during compaction
 
 A trusted `Tool::progress` adapter derives observations from the pinned input
-and the settled result. The standard Workspace tools report actual read intervals
-and completed writes, edits and deletes. Overlapping reads on the same file
-revision are merged. A write of previously seen content at the same path
-does not advance the progress counter. A first validation pass for a new
+and the settled result. The standard Workspace tools report actual byte
+intervals and completed writes, edits and deletes. `document.view` reports
+page coverage by fixed source, with page-count inspection tracked separately.
+Overlapping intervals on the same revision are merged. A write of previously
+seen content at the same path does not advance the progress counter. A first
+validation pass for a new
 basis and candidate advances it. The checkpoint persists this accounting with
 the protocol cursor.
 
 `RunSpec.max_repeated_reads` stops after the configured number of consecutive
-completed reads that add no coverage. `CompactionPolicy.max_without_progress`
+completed reads that add no coverage. After a media demotion or completed
+compaction, the run can revisit already-covered ranges of the current
+revisions it wrote in its own namespace. The checkpoint tracks ranges covered
+in that recovery pass. Reading them again counts toward the same limit. An
+exempt read leaves the accumulated repeat count and global progress unchanged.
+`CompactionPolicy.max_without_progress`
 allows that many completed compactions at the same progress point. The run stops if it needs another compaction before new progress. Both are optional. Hosts can match
 `Terminal::Stalled(ProgressStop::RepeatedRead | ProgressStop::Compaction)`
 and `ProgressStop::Validation` directly.

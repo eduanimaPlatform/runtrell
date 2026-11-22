@@ -8,9 +8,9 @@ Authorized stored bytes are prepared once with `ImageModel`, before estimation.
 Images selected by `DocumentView` use the existing `image_inputs` path.
 
 Tool results retain their fixed media references in the transcript and operation
-receipts. Each request in the same session replays the media after the original
-batch of tool results. The batch follows tool result order and introduces each
-fixed reference once. Initial input media is placed with the first user message.
+receipts. Requests replay active media after the batch of tool results that
+introduced them. The batch follows tool result order and introduces each fixed
+reference once. Initial input media is placed with the first user message.
 Provider adapters build the prompt from those fixed positions, so an appended
 turn leaves the preceding input items unchanged when the media transport is stable.
 Stored inputs and external byte inputs use the same bytes on each send. A rotating
@@ -21,10 +21,16 @@ authorization. Compaction summarizes older tool results and preserves their fixe
 references as text. The pending exchange remains replayable. The existing
 transcript purge and phase transition also apply to media references.
 
-Count and byte limits apply to the complete model request. When compaction is
-configured and the pending exchange fits on its own, excess retained media
-triggers the ordinary compaction path. Inputs that cannot fit receive repairable
-tool feedback; the original result remains in its operation receipt.
+Count and byte limits apply to the complete model request. Before preparation
+and token estimation, the driver removes the oldest replayed media from the
+active input until the request fits. The original tool output, text references
+and order remain intact. Retained media keep their positions, and reopening a
+demoted reference introduces it at the new tool exchange. The checkpoint and
+saved model request record the replay boundary for recovery. Host input images
+and the pending exchange stay active. An exchange that cannot fit with the host
+inputs receives repairable tool feedback and keeps the original receipts.
+This works with or without a compaction policy. With a policy, the driver
+checks token pressure against the request after media demotion.
 
 `AttachmentResolver::authorize` checks current trusted Run/operation/destination
 authorization without acquiring content or issuing URLs. `resolve` may perform

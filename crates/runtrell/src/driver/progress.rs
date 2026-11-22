@@ -12,6 +12,7 @@ pub(super) struct WorkProgress {
     epoch: u64,
     repeated_reads: u64,
     reads: BTreeMap<String, ReadCoverage>,
+    recovery_reads: Option<BTreeMap<String, Vec<(u64, u64)>>>,
     writes: BTreeMap<String, ToolProgress>,
     seen_writes: BTreeSet<String>,
     write_calls: BTreeSet<String>,
@@ -26,6 +27,27 @@ struct ReadCoverage {
     revision: u64,
     ranges: Vec<(u64, u64)>,
 }
+
+fn cover(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) -> bool {
+    if start == end || ranges.iter().any(|&(a, b)| a <= start && b >= end) {
+        return false;
+    }
+    ranges.push((start, end));
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (a, b) in ranges.drain(..) {
+        if let Some(last) = merged.last_mut()
+            && last.1 >= a
+        {
+            last.1 = last.1.max(b);
+        } else {
+            merged.push((a, b));
+        }
+    }
+    *ranges = merged;
+    true
+}
+
 impl WorkProgress {
     pub(super) fn load(cp: &Checkpoint) -> Result<Self> {
         let state = &cp.payload["work_progress"];
@@ -41,6 +63,7 @@ impl WorkProgress {
     }
     pub(super) fn apply(
         &mut self,
+        owner: &RunHandle,
         observations: Vec<ToolProgress>,
         limit: Option<NonZeroU64>,
         call_id: &str,
@@ -59,31 +82,26 @@ impl WorkProgress {
                     if start > end {
                         return Err(Error::Conflict);
                     }
-                    read = true;
                     let key = digest(&json!([namespace, path, revision]));
+                    let recovered = if &namespace.owner == owner
+                        && let Some(recovery) = &mut self.recovery_reads
+                        && matches!(
+                            self.writes.get(&digest(&json!([namespace, path]))),
+                            Some(ToolProgress::Write { revision: Some(written), hash: Some(_), .. })
+                                if *written == revision
+                        ) {
+                        cover(recovery.entry(key.clone()).or_default(), start, end)
+                    } else {
+                        false
+                    };
+                    read |= !recovered;
                     let coverage = self.reads.entry(key).or_insert_with(|| ReadCoverage {
                         namespace,
                         path,
                         revision,
                         ranges: vec![],
                     });
-                    if start < end && !coverage.ranges.iter().any(|&(a, b)| a <= start && b >= end)
-                    {
-                        coverage.ranges.push((start, end));
-                        coverage.ranges.sort_unstable();
-                        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(coverage.ranges.len());
-                        for (a, b) in coverage.ranges.drain(..) {
-                            if let Some(last) = merged.last_mut()
-                                && last.1 >= a
-                            {
-                                last.1 = last.1.max(b);
-                            } else {
-                                merged.push((a, b));
-                            }
-                        }
-                        coverage.ranges = merged;
-                        advanced = true;
-                    }
+                    advanced |= cover(&mut coverage.ranges, start, end);
                 }
                 ToolProgress::Write {
                     ref namespace,
@@ -146,6 +164,10 @@ impl WorkProgress {
             1
         };
         self.compaction_epoch = Some(self.epoch);
+        self.context_changed();
+    }
+    pub(super) fn context_changed(&mut self) {
+        self.recovery_reads = Some(BTreeMap::new());
     }
     pub(super) fn projection(&self, cp: &Checkpoint) -> Value {
         json!({
@@ -156,3 +178,6 @@ impl WorkProgress {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

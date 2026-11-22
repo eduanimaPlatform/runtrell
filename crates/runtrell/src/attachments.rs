@@ -100,6 +100,38 @@ pub(crate) struct ToolMedia {
     pub attachments: Vec<Attachment>,
     pub images: Vec<ImageReference>,
 }
+
+/// First live media entry in tool history, in image-then-attachment order.
+/// The result ordinal is independent of system messages added by a host port.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct MediaStart {
+    pub tool_result: usize,
+    pub skip: usize,
+}
+impl MediaStart {
+    pub const KEY: &str = "tool_media_start";
+
+    pub fn load(metadata: &serde_json::Value) -> Result<Self> {
+        metadata
+            .get(Self::KEY)
+            .map(Self::deserialize)
+            .transpose()
+            .map(|start| start.unwrap_or_default())
+            .map_err(|_| Error::Conflict)
+    }
+}
+
+pub(crate) fn pending_media_start(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .rposition(|message| !matches!(message.role.as_str(), "tool" | "system" | "developer"))
+        .map_or(0, |index| index + 1)
+}
+
+pub(crate) fn tool_results(messages: &[Message]) -> impl Iterator<Item = &Message> {
+    messages.iter().filter(|message| message.role == "tool")
+}
+
 impl ToolMedia {
     fn from_message(message: &Message) -> Result<Self> {
         let mut media = Self {
@@ -113,17 +145,80 @@ impl ToolMedia {
         Ok(media)
     }
 
-    pub(crate) fn collect(messages: &[Message], initial_images: &[ImageReference]) -> Result<Self> {
+    fn after_skip(mut self, skip: usize) -> Self {
+        let images = skip.min(self.images.len());
+        self.images.drain(..images);
+        self.attachments
+            .drain(..skip.saturating_sub(images).min(self.attachments.len()));
+        self
+    }
+
+    pub(crate) fn collect(
+        messages: &[Message],
+        initial_images: &[ImageReference],
+        start: MediaStart,
+    ) -> Result<Self> {
         let mut media = Self {
             images: initial_images.to_vec(),
             ..Self::default()
         };
-        for message in messages.iter().filter(|m| m.role == "tool") {
-            let next = Self::from_message(message)?;
+        for (ordinal, message) in tool_results(messages).enumerate().skip(start.tool_result) {
+            let mut next = Self::from_message(message)?;
+            if ordinal == start.tool_result {
+                next = next.after_skip(start.skip);
+            }
             extend_unique(&mut media.images, next.images);
             extend_unique(&mut media.attachments, next.attachments);
         }
         Ok(media)
+    }
+
+    pub(crate) fn fit(
+        messages: &[Message],
+        initial_images: &[ImageReference],
+        start: MediaStart,
+        check: impl Fn(&Self) -> Result<()>,
+    ) -> Result<(Self, MediaStart)> {
+        let media = Self::collect(messages, initial_images, start)?;
+        match check(&media) {
+            Ok(()) => return Ok((media, start)),
+            Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => {}
+            Err(error) => return Err(error),
+        }
+
+        let pending = pending_media_start(messages);
+        // A fresh exchange and host-supplied images must fit together. The
+        // tool admission path provides repair feedback for oversized results.
+        check(&Self::collect(
+            &messages[pending..],
+            initial_images,
+            MediaStart::default(),
+        )?)?;
+
+        for (ordinal, message) in tool_results(&messages[..pending])
+            .enumerate()
+            .skip(start.tool_result)
+        {
+            let oldest = Self::from_message(message)?;
+            let skipped = if ordinal == start.tool_result {
+                start.skip
+            } else {
+                0
+            };
+            for skip in skipped + 1..=oldest.images.len() + oldest.attachments.len() {
+                let next = MediaStart {
+                    tool_result: ordinal,
+                    skip,
+                };
+                let media = Self::collect(messages, initial_images, next)?;
+                match check(&media) {
+                    Ok(()) => return Ok((media, next)),
+                    Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Err(Error::Invalid("MODEL_ATTACHMENT_LIMIT".into()))
     }
 }
 
@@ -171,15 +266,21 @@ impl ModelRequest {
             .map(|i| image_references(&self.messages[i]))
             .transpose()?
             .unwrap_or_default();
+        let start = MediaStart::load(&self.metadata)?;
         for (image, placed) in self.images.iter().zip(&mut images) {
             *placed = initial_images.contains(image);
         }
         let mut batch = Vec::new();
-        for (i, message) in self.messages.iter().enumerate() {
-            if message.role != "tool" {
-                continue;
+        let results = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == "tool");
+        for (ordinal, (i, message)) in results.enumerate().skip(start.tool_result) {
+            let mut media = ToolMedia::from_message(message)?;
+            if ordinal == start.tool_result {
+                media = media.after_skip(start.skip);
             }
-            let media = ToolMedia::from_message(message)?;
             place(
                 &media.images,
                 &self.images,
@@ -311,5 +412,24 @@ impl ResolvedAttachment {
     }
     pub fn data(&self) -> &AttachmentData {
         &self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_exchange_includes_tool_results_before_budget_warning() {
+        let messages = [
+            Message::text("user", "Read the inputs."),
+            Message::text("assistant", ""),
+            Message::text("tool", ""),
+            Message::text("assistant", ""),
+            Message::text("tool", ""),
+            Message::text("tool", ""),
+            Message::text("system", "Budget warning"),
+        ];
+        assert_eq!(pending_media_start(&messages), 4);
     }
 }

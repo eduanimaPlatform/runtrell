@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-use crate::{attachments::ToolMedia, *};
+use crate::{
+    attachments::{MediaStart, ToolMedia, pending_media_start},
+    *,
+};
 use runtrell_protocol::{
     completion::{CompletionResponse, FinishReason, ToolDefinition, Usage as ProtocolUsage},
     message::{AssistantContent, Origin, ToolName},
@@ -1292,7 +1295,7 @@ impl<
                 .map_err(|e| Error::Invalid(e.to_string()))?
         } else {
             bx(|| self.store.warnings(c, self.clock.now())).await?;
-            let current = bx(|| self.store.get(&c.run)).await?;
+            let mut current = bx(|| self.store.get(&c.run)).await?;
             if let Some(cp) = &current.checkpoint {
                 *messages = cp.messages.clone();
             }
@@ -1336,7 +1339,33 @@ impl<
                     images: vec![],
                 }
             } else {
-                let media = ToolMedia::collect(messages, &current.spec.images)?;
+                let cp = current.checkpoint.as_ref().ok_or(Error::Conflict)?;
+                let start = MediaStart::load(&cp.payload)?;
+                let (media, retained) =
+                    ToolMedia::fit(messages, &current.spec.images, start, |media| {
+                        self.model
+                            .check_input_attachments(&media.attachments, &media.images)
+                    })?;
+                let metadata = if retained == MediaStart::default() {
+                    Value::Null
+                } else {
+                    serde_json::json!({MediaStart::KEY:retained})
+                };
+                if retained != start {
+                    let mut cp = cp.clone();
+                    cp.payload[MediaStart::KEY] = serde_json::json!(retained);
+                    if current.spec.max_repeated_reads.is_some() {
+                        let mut progress = progress::WorkProgress::load(&cp)?;
+                        progress.context_changed();
+                        progress.save(&mut cp)?;
+                    }
+                    bx(|| {
+                        self.store
+                            .checkpoint(c, current.revision, cp, self.clock.now())
+                    })
+                    .await?;
+                    current = bx(|| self.store.get(&c.run)).await?;
+                }
                 ModelRequest {
                     attachments: media.attachments,
                     model: self.model.limits().model,
@@ -1352,7 +1381,7 @@ impl<
                         .cloned()
                         .collect(),
                     max_output: 0,
-                    metadata: Value::Null,
+                    metadata,
                     images: media.images,
                 }
             };
@@ -1368,45 +1397,24 @@ impl<
                     current.spec.completion.output_schema.clone()
                 };
                 if let Some(schema) = schema {
-                    req.metadata = serde_json::json!({"provider_options":{"json_schema":schema}});
+                    req.metadata["provider_options"] = serde_json::json!({"json_schema":schema});
                 }
             }
-            let media_overflow = if !ack && current.spec.compaction.is_some() {
-                match self
-                    .model
-                    .check_input_attachments(&req.attachments, &req.images)
-                {
-                    Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => true,
-                    other => {
-                        other?;
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            let quote = if media_overflow {
-                None
-            } else {
-                let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
-                let input = self.model.input_upper_bound(&prepared)?;
-                Some((prepared, input))
-            };
+            let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
+            let input = self.model.input_upper_bound(&prepared)?;
             if !ack
                 && current.spec.compaction.as_ref().is_some_and(|policy| {
-                    quote.as_ref().is_none_or(|(prepared, input)| {
-                        let limits = self.model.limits();
-                        let input_limit = self
-                            .model
-                            .compaction_input_limit(prepared)
-                            .unwrap_or(u64::MAX);
-                        limits
-                            .context
-                            .saturating_sub(limits.max_output)
-                            .min(input_limit)
-                            .saturating_sub(*input)
-                            < policy.min_remaining_tokens
-                    })
+                    let limits = self.model.limits();
+                    let input_limit = self
+                        .model
+                        .compaction_input_limit(&prepared)
+                        .unwrap_or(u64::MAX);
+                    limits
+                        .context
+                        .saturating_sub(limits.max_output)
+                        .min(input_limit)
+                        .saturating_sub(input)
+                        < policy.min_remaining_tokens
                 })
                 && current
                     .checkpoint
@@ -1433,8 +1441,6 @@ impl<
                 // Re-prepare and re-quote from the committed summary on the next pass.
                 return Ok(());
             }
-            let (prepared, input) =
-                quote.ok_or_else(|| Error::Invalid("MODEL_ATTACHMENT_LIMIT".into()))?;
             let (cap, reserve) = bx(|| self.model_budget(c, input)).await?;
             quoted_reserve = Some(reserve);
             let prepared = prepared.with_max_output(cap);
@@ -1940,25 +1946,15 @@ impl<
                 tool: Some(name),
                 data: output.clone(),
             });
-            let media = ToolMedia::collect(&candidate_messages, &current.spec.images)?;
-            let mut admission = self
+            let pending = pending_media_start(&candidate_messages);
+            let media = ToolMedia::collect(
+                &candidate_messages[pending..],
+                &current.spec.images,
+                MediaStart::default(),
+            )?;
+            let admission = self
                 .model
                 .check_input_attachments(&media.attachments, &media.images);
-            if matches!(&admission, Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT")
-                && current.spec.compaction.is_some()
-            {
-                // Compaction keeps the pending exchange intact. Allow it to
-                // clear older media only if this exchange can fit afterward.
-                let start = candidate_messages
-                    .iter()
-                    .rposition(|message| message.role != "tool")
-                    .map_or(0, |i| i + 1);
-                let pending =
-                    ToolMedia::collect(&candidate_messages[start..], &current.spec.images)?;
-                admission = self
-                    .model
-                    .check_input_attachments(&pending.attachments, &pending.images);
-            }
             let (output, answer) = match admission {
                 Ok(()) => (
                     output.clone(),
@@ -2094,6 +2090,7 @@ impl<
             }));
         }
         let stopped = progress.apply(
+            &current.handle,
             tool.progress(input, output)?,
             current.spec.max_repeated_reads,
             call_id,
