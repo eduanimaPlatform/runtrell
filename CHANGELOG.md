@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 — 2026-11-23 — unreleased
+## 0.7.0 — 2026-11-23 — session media replay
 
 - Replay fixed tool-result documents and images in their original position in
   the active session, with current authorization on each request. Compaction
