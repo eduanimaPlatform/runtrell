@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 — 2026-11-23 — unreleased
+
+- Replay fixed tool-result documents and images in their original position in
+  the active session, with current authorization on each request. Compaction
+  keeps earlier media as text references and retains the pending exchange.
+- Size Responses reservations using recorded media sizes and verify the complete
+  input with the provider's token count before sending inference.
+
 ## 0.6.0 — 2026-11-22 — intermediate finalization
 
 - Configure ordered phases within a Run. An intermediate submission seals its

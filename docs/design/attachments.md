@@ -7,18 +7,24 @@ fixed-version contract for documents; no second storage reference format exists.
 Authorized stored bytes are prepared once with `ImageModel`, before estimation.
 Images selected by `DocumentView` use the existing `image_inputs` path.
 
-Tool attachment references remain in messages and operation receipts for history,
-provenance and recovery. Only tool messages after the last final assistant message
-contribute binary inputs to the next request (initial Run images remain explicit
-host inputs). Selection happens before preparation; estimation and sending share
-the same `PreparedModelRequest`. Compaction retains older references as text,
-without reactivating their binary inputs. Reopen a saved fixed-version attachment
-with the same tool when needed again; original-file acquisition is unnecessary.
-Partial assistant responses from `max_tokens` continuations do not close the tool
-exchange: document and image selection stays unchanged across repeated continuations
-and checkpoint recovery, until a final assistant response closes the exchange.
-Provider count/byte limits on a tool exchange produce repairable tool feedback
-asking for a narrower range, without deleting the saved result or raising limits.
+Tool results retain their fixed media references in the transcript and operation
+receipts. Each request in the same session replays the media after the original
+batch of tool results. The batch follows tool result order and introduces each
+fixed reference once. Initial input media is placed with the first user message.
+Provider adapters build the prompt from those fixed positions, so an appended
+turn leaves the preceding input items unchanged when the media transport is stable.
+Stored inputs and external byte inputs use the same bytes on each send. A rotating
+external URL can change the wire prefix while preserving the fixed target.
+
+Each replay prepares or resolves the exact fixed version and checks current
+authorization. Compaction summarizes older tool results and preserves their fixed
+references as text. The pending exchange remains replayable. The existing
+transcript purge and phase transition also apply to media references.
+
+Count and byte limits apply to the complete model request. When compaction is
+configured and the pending exchange fits on its own, excess retained media
+triggers the ordinary compaction path. Inputs that cannot fit receive repairable
+tool feedback; the original result remains in its operation receipt.
 
 `AttachmentResolver::authorize` checks current trusted Run/operation/destination
 authorization without acquiring content or issuing URLs. `resolve` may perform
@@ -39,9 +45,10 @@ are distinct from potentially billable provider inference HTTP requests.
 
 `document.view` accepts an authorized attachment and an optional inclusive,
 one-based page range. For PDF, without a range it returns the page count only.
-With a range it saves a PDF subset as an Artifact, returning `attachments` for the next
-model request. It uses lopdf, rejects encrypted/malformed PDFs and out-of-range
-pages, and bounds input/output bytes and selected pages. The
+With a range it saves a PDF subset as an Artifact and returns `attachments` for
+model history. Reopening the same fixed selection with the same content reuses
+its stored reference. It uses lopdf, rejects encrypted or malformed PDFs and
+out-of-range pages, and bounds input/output bytes and selected pages. The
 [document view transformation](document-view.md) retains visible annotations and
 form appearances/resources while disabling active content; XFA is rejected.
 PNG/JPEG/WebP use existing still-image validation and `image_inputs` (host MIME

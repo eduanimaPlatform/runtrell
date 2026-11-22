@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fixed attachment identity, with optional ephemeral host resolution.
-use crate::{Error, Result, ToolContext, data::content_digest, images::ImageReference};
+use crate::{
+    Error, Message, ModelRequest, Result, ToolContext, data::content_digest, images::ImageReference,
+};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
@@ -66,6 +68,13 @@ pub enum Attachment {
     Stored(ImageReference),
 }
 impl Attachment {
+    pub fn bytes(&self) -> u64 {
+        match self {
+            Self::External(input) => input.bytes,
+            Self::Stored(reference) => reference.bytes(),
+        }
+    }
+
     pub fn declaration(&self) -> ExternalAttachment {
         match self {
             Self::External(input) => input.clone(),
@@ -86,78 +95,144 @@ impl Attachment {
         self.declaration().validate()
     }
 }
-pub(crate) fn model_attachments(messages: &[crate::Message]) -> Result<Vec<Attachment>> {
-    let mut attachments = Vec::new();
-    for message in active_tool_messages(messages) {
-        if let Some(value) = message.data.get("attachments") {
-            let refs: Vec<Attachment> = serde_json::from_value(value.clone())
-                .map_err(|_| Error::Invalid("ATTACHMENT_REFERENCE".into()))?;
-            for reference in refs {
-                if !attachments.contains(&reference) {
-                    attachments.push(reference);
-                }
-            }
-        }
-    }
-    Ok(attachments)
+#[derive(Default)]
+pub(crate) struct ToolMedia {
+    pub attachments: Vec<Attachment>,
+    pub images: Vec<ImageReference>,
 }
-/// A tool exchange ends at a final assistant response. Partial max_tokens
-/// responses retain the exchange, including across checkpoint recovery.
-pub(crate) fn active_tool_messages(
-    messages: &[crate::Message],
-) -> impl Iterator<Item = &crate::Message> {
-    let start = messages
-        .iter()
-        .rposition(|m| {
-            m.role == "assistant" && (m.call_id.is_some() || m.data["continuation"] != true)
-        })
-        .map_or(0, |i| i + 1);
-    messages[start..].iter().filter(|m| m.role == "tool")
+impl ToolMedia {
+    fn from_message(message: &Message) -> Result<Self> {
+        let mut media = Self {
+            images: image_references(message)?,
+            ..Self::default()
+        };
+        if let Some(value) = message.data.get("attachments") {
+            media.attachments = Vec::deserialize(value)
+                .map_err(|_| Error::Invalid("ATTACHMENT_REFERENCE".into()))?;
+        }
+        Ok(media)
+    }
+
+    pub(crate) fn collect(messages: &[Message], initial_images: &[ImageReference]) -> Result<Self> {
+        let mut media = Self {
+            images: initial_images.to_vec(),
+            ..Self::default()
+        };
+        for message in messages.iter().filter(|m| m.role == "tool") {
+            let next = Self::from_message(message)?;
+            extend_unique(&mut media.images, next.images);
+            extend_unique(&mut media.attachments, next.attachments);
+        }
+        Ok(media)
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Message;
-    #[test]
-    fn only_latest_exchange_is_attached_but_history_is_unchanged() {
-        let tool = |id: &str| {
-            let mut m = Message::text("tool", "");
-            m.data = serde_json::json!({"attachments":[Attachment::External(ExternalAttachment {
-                reference_id:id.into(), version:"v1".into(), pages:Some(PageRange {first:1,last:2}),
-                mime_type:"application/pdf".into(), bytes:3, digest:content_digest(b"abc")
-            })]});
-            m
-        };
-        let mut messages = vec![
-            tool("old"),
-            Message::text("assistant", "next"),
-            tool("new"),
-            tool("other"),
-            tool("new"),
-        ];
-        let before = messages.clone();
-        let selected = model_attachments(&messages).unwrap();
-        assert_eq!(
-            selected
-                .iter()
-                .map(|a| a.declaration().reference_id)
-                .collect::<Vec<_>>(),
-            ["new", "other"]
-        );
-        assert_eq!(messages, before);
-        messages.push(Message::text("assistant", "save"));
-        messages.push(Message::text("tool", "saved markdown"));
-        assert!(model_attachments(&messages).unwrap().is_empty());
-        messages.push(tool("old"));
-        assert_eq!(
-            model_attachments(&messages).unwrap()[0]
-                .declaration()
-                .reference_id,
-            "old"
-        );
+fn image_references(message: &Message) -> Result<Vec<ImageReference>> {
+    message
+        .data
+        .get("image_inputs")
+        .map(Vec::deserialize)
+        .transpose()
+        .map(|images| images.unwrap_or_default())
+        .map_err(|_| Error::Invalid("IMAGE_REFERENCE".into()))
+}
+
+fn extend_unique<T: PartialEq>(items: &mut Vec<T>, next: Vec<T>) {
+    for item in next {
+        if !items.contains(&item) {
+            items.push(item);
+        }
     }
 }
+
+/// Index of a declared input in a ModelRequest's flat media lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaInput {
+    Image(usize),
+    Attachment(usize),
+}
+
+impl ModelRequest {
+    /// Media after each message, preceded by a slot for media before any messages.
+    /// Tool results from one parallel exchange stay together before their media.
+    /// Only references included in the request's declared lists can be placed.
+    pub fn media_slots(&self) -> Result<Vec<Vec<MediaInput>>> {
+        let mut slots = vec![Vec::new(); self.messages.len() + 1];
+        if self.images.is_empty() && self.attachments.is_empty() {
+            return Ok(slots);
+        }
+
+        let first_user = self.messages.iter().position(|m| m.role == "user");
+        let initial_slot = first_user.map_or(0, |i| i + 1);
+        let mut images = vec![false; self.images.len()];
+        let mut attachments = vec![false; self.attachments.len()];
+        let initial_images = first_user
+            .filter(|_| !self.images.is_empty())
+            .map(|i| image_references(&self.messages[i]))
+            .transpose()?
+            .unwrap_or_default();
+        for (image, placed) in self.images.iter().zip(&mut images) {
+            *placed = initial_images.contains(image);
+        }
+        let mut batch = Vec::new();
+        for (i, message) in self.messages.iter().enumerate() {
+            if message.role != "tool" {
+                continue;
+            }
+            let media = ToolMedia::from_message(message)?;
+            place(
+                &media.images,
+                &self.images,
+                &mut images,
+                &mut batch,
+                MediaInput::Image,
+            );
+            place(
+                &media.attachments,
+                &self.attachments,
+                &mut attachments,
+                &mut batch,
+                MediaInput::Attachment,
+            );
+            if self
+                .messages
+                .get(i + 1)
+                .is_none_or(|next| next.role != "tool")
+            {
+                slots[i + 1] = std::mem::take(&mut batch);
+            }
+        }
+        // Re-add the pinned images and place explicit host inputs with the first
+        // user message. An image declared in that message stays there on reopen.
+        slots[initial_slot].extend(self.images.iter().enumerate().filter_map(|(i, image)| {
+            (!images[i] || initial_images.contains(image)).then_some(MediaInput::Image(i))
+        }));
+        slots[initial_slot].extend(
+            attachments
+                .iter()
+                .enumerate()
+                .filter_map(|(i, seen)| (!seen).then_some(MediaInput::Attachment(i))),
+        );
+        Ok(slots)
+    }
+}
+
+fn place<T: PartialEq>(
+    references: &[T],
+    declared: &[T],
+    placed: &mut [bool],
+    batch: &mut Vec<MediaInput>,
+    input: fn(usize) -> MediaInput,
+) {
+    for reference in references {
+        if let Some(i) = declared.iter().position(|item| item == reference)
+            && !std::mem::replace(&mut placed[i], true)
+        {
+            batch.push(input(i));
+        }
+    }
+}
+
 pub struct ResolutionError;
 impl std::fmt::Debug for ResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -461,12 +461,17 @@ mod tests {
             let cp = store.get(&run).await.unwrap().checkpoint.unwrap();
             if continuation {
                 assert_eq!(
-                    model_attachments(&cp.messages).unwrap(),
+                    ToolMedia::collect(&cp.messages, &[]).unwrap().attachments,
                     vec![reference.clone()]
                 );
                 continue;
             }
-            assert!(model_attachments(&cp.messages).unwrap().is_empty());
+            assert!(
+                ToolMedia::collect(&cp.messages, &[])
+                    .unwrap()
+                    .attachments
+                    .is_empty()
+            );
             let references = cp
                 .messages
                 .iter()

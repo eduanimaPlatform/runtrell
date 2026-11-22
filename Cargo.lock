@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "runtrell"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "runtrell-postgres"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "libc",
  "runtrell",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "runtrell-protocol"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "fastrand",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "runtrell-providers"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "httpdate",
@@ -1915,7 +1915,7 @@ dependencies = [
 
 [[package]]
 name = "runtrell-testkit"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "runtrell",
@@ -3290,7 +3290,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "runtrell",
  "serde_json",

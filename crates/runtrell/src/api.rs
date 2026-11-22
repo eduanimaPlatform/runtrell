@@ -1453,9 +1453,9 @@ pub trait ModelPort: Send + Sync {
     fn supports_output_schema(&self) -> bool {
         false
     }
-    /// Pure admission check for a tool exchange, without resolving payloads or
-    /// sending inference. Return MODEL_ATTACHMENT_LIMIT for repairable size/count
-    /// failures so the driver can ask the agent to narrow the view.
+    /// Pure admission check for retained model inputs, without resolving payloads
+    /// or sending inference. Return MODEL_ATTACHMENT_LIMIT for size/count
+    /// failures so the driver can compact or return repairable tool feedback.
     fn check_input_attachments(
         &self,
         _attachments: &[crate::attachments::Attachment],
@@ -1504,8 +1504,7 @@ pub trait ModelPort: Send + Sync {
     }
     fn input_upper_bound(&self, request: &PreparedModelRequest) -> Result<u64>;
     /// An independent input ceiling to consider when deciding whether to compact.
-    /// Return None when only the combined context bound applies or the input
-    /// estimate cannot distinguish history growth from media preprocessing.
+    /// Return None when only the combined context bound applies.
     fn compaction_input_limit(&self, _request: &PreparedModelRequest) -> Option<u64> {
         None
     }

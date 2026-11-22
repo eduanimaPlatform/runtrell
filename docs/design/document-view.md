@@ -1,7 +1,7 @@
 # Document views and visible PDF content
 
 The [attachment contract](attachments.md) defines authorization, fixed versions,
-the active tool exchange and saved-result recovery. `DocumentView` uses the
+session replay and saved-result recovery. `DocumentView` uses the
 existing `lopdf` parser and storage references; it does not render or transcribe
 documents. Image inputs reuse the [existing image inspector](images.md).
 

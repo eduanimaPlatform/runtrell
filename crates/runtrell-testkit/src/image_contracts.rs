@@ -641,8 +641,21 @@ pub async fn workflow_reopened<S: ControlStore + 'static>(
         let captures = model.captures.lock().unwrap();
         assert_eq!(captures[0], vec![content_digest(&png()); 2]);
         assert_eq!(captures[1], vec![content_digest(&png()); 3]);
-        assert_eq!(captures[2], vec![content_digest(&png()); 3]);
+        assert_eq!(captures[2], vec![content_digest(&png()); 4]);
     }
+    let requests = ops
+        .iter()
+        .filter(|op| op.request.kind == OperationKind::Model)
+        .map(|op| serde_json::from_value::<ModelRequest>(op.request.input.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let [initial, generated, edited] = requests.as_slice() else {
+        panic!("expected the initial, generated and edited requests");
+    };
+    assert_eq!(initial.images, spec.images);
+    assert!(generated.images.starts_with(&initial.images));
+    assert!(edited.images.starts_with(&generated.images));
+    assert_ne!(edited.images[2], edited.images[3]);
+
     let raw = serde_json::to_string(&ops).unwrap();
     assert!(!raw.contains(&STANDARD.encode(png())));
     assert!(!raw.contains("data_base64"));

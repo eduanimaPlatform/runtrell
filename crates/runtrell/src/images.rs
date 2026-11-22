@@ -17,21 +17,6 @@ pub enum ImageReference {
         mime_type: String,
     },
 }
-pub(crate) fn model_images(run: &RunRecord, messages: &[Message]) -> Result<Vec<ImageReference>> {
-    let mut images = run.spec.images.clone();
-    for message in crate::attachments::active_tool_messages(messages) {
-        if let Some(value) = message.data.get("image_inputs") {
-            let refs: Vec<ImageReference> =
-                serde_json::from_value(value.clone()).map_err(|_| invalid("IMAGE_REFERENCE"))?;
-            for reference in refs {
-                if !images.contains(&reference) {
-                    images.push(reference);
-                }
-            }
-        }
-    }
-    Ok(images)
-}
 impl ImageReference {
     pub fn namespace(&self) -> &Namespace {
         match self {

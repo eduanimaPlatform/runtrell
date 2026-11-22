@@ -34,6 +34,9 @@ mod attachment_window;
 mod completion_contracts;
 #[path = "support/documents.rs"]
 mod document_contracts;
+#[cfg(feature = "openai")]
+#[path = "support/media_replay.rs"]
+mod media_replay;
 #[path = "support/still_images.rs"]
 mod still_images;
 #[path = "support/view_images.rs"]

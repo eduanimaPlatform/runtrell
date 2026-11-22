@@ -19,9 +19,9 @@ impl Adapter {
         images: &[runtrell::images::ImageReference],
     ) -> Result<()> {
         let limit = || Error::Invalid("MODEL_ATTACHMENT_LIMIT".into());
-        let total = attachments.iter().try_fold(0u64, |n, a| {
-            n.checked_add(a.declaration().bytes).ok_or_else(limit)
-        })?;
+        let total = attachments
+            .iter()
+            .try_fold(0u64, |n, a| n.checked_add(a.bytes()).ok_or_else(limit))?;
         if attachments.len() > self.config.document_limits.max_inputs
             || total > self.config.document_limits.max_total_bytes
             || images.len() > self.config.image_limits.max_images
@@ -66,26 +66,21 @@ impl Adapter {
         Ok(support)
     }
     /// Conservative additional JSON bytes. No resolution or request mutation.
-    pub(crate) fn document_bound(&self, request: &PreparedModelRequest) -> Result<usize> {
+    fn document_bound(&self, request: &PreparedModelRequest) -> Result<usize> {
         let inputs = request.attachments();
         if inputs.is_empty() {
             return Ok(0);
         }
-        if (self.config.attachment_resolver.is_none()
-            && inputs.iter().any(|a| matches!(a, Attachment::External(_))))
-            || inputs.len() > self.config.document_limits.max_inputs
+        if self.config.attachment_resolver.is_none()
+            && inputs.iter().any(|a| matches!(a, Attachment::External(_)))
         {
             return Err(invalid());
         }
-        let mut total = 0u64;
         let mut wire = 0usize;
         for input in inputs {
+            let stored = matches!(input, Attachment::Stored(_));
             let input = input.declaration();
             let support = self.document_transports(&input)?;
-            total = total.checked_add(input.bytes).ok_or_else(invalid)?;
-            if total > self.config.document_limits.max_total_bytes {
-                return Err(invalid());
-            }
             let inline = if support.inline_bytes {
                 usize::try_from(input.bytes)
                     .map_err(|_| invalid())?
@@ -95,7 +90,11 @@ impl Adapter {
             } else {
                 0
             };
-            let url = if support.url { MAX_URL_BYTES * 6 } else { 0 };
+            let url = if support.url && !stored {
+                MAX_URL_BYTES * 6
+            } else {
+                0
+            };
             wire = wire
                 .checked_add(inline.max(url))
                 .and_then(|n| n.checked_add(512))
@@ -103,15 +102,27 @@ impl Adapter {
         }
         Ok(wire)
     }
-    pub(crate) fn check_document_wire_bound(
+    pub(crate) fn check_media_wire_bound(
         &self,
         request: &PreparedModelRequest,
         body: &Value,
     ) -> Result<()> {
+        let mut media_bytes = self.document_bound(request)?;
+        for image in &request.images {
+            let inline = usize::try_from(image.bytes())
+                .map_err(|_| invalid())?
+                .div_ceil(3)
+                .checked_mul(4)
+                .ok_or_else(invalid)?;
+            media_bytes = media_bytes
+                .checked_add(inline)
+                .and_then(|n| n.checked_add(512))
+                .ok_or_else(invalid)?;
+        }
         if serde_json::to_vec(body)
             .map_err(|_| invalid())?
             .len()
-            .checked_add(self.document_bound(request)?)
+            .checked_add(media_bytes)
             .is_none_or(|n| n > self.config.max_request_bytes)
         {
             return Err(invalid());
@@ -123,7 +134,6 @@ impl Adapter {
         context: &ToolContext,
         request: &PreparedModelRequest,
     ) -> Result<Vec<ResolvedAttachment>> {
-        self.document_bound(request)?;
         if request.attachments().is_empty() {
             return Ok(vec![]);
         }
@@ -204,39 +214,55 @@ impl Adapter {
         }
         Ok(())
     }
-    pub(crate) fn attach_documents(
+    pub(crate) fn media_item(
         &self,
-        body: &mut Value,
         request: &PreparedModelRequest,
-        resolved: &[ResolvedAttachment],
-    ) {
-        if resolved.is_empty() {
-            return;
-        }
-        let parts: Vec<_> = request.attachments().iter().zip(resolved).map(|(input, result)| {
-            let input = input.declaration();
-            match (self.wire, result.data(), input.mime_type.as_str()) {
-                (Wire::Responses, AttachmentData::Url(url), "application/pdf") => json!({"type":"input_file","file_url":url}),
-                (Wire::Responses, AttachmentData::Bytes(bytes), "application/pdf") => json!({"type":"input_file","filename":"document.pdf","file_data":format!("data:application/pdf;base64,{}",STANDARD.encode(bytes))}),
-                (Wire::Responses, data, _) => {
-                    let url = match data { AttachmentData::Url(url) => url.clone(), AttachmentData::Bytes(bytes) => format!("data:{};base64,{}",input.mime_type,STANDARD.encode(bytes)) };
-                    json!({"type":"input_image","image_url":url})
+        group: &[MediaInput],
+        resolved: Option<&[ResolvedAttachment]>,
+    ) -> Result<Value> {
+        let parts = if let Some(resolved) = resolved {
+            group.iter().map(|input| match *input {
+                MediaInput::Image(index) => {
+                    let image = request.resolved_images().get(index).ok_or_else(invalid)?;
+                    image.validate(&self.config.image_limits)?;
+                    Ok(self.inline_media(image.mime_type(), image.data_base64()))
                 }
-                (Wire::GenerateContent, AttachmentData::Url(url), _) => json!({"fileData":{"mimeType":input.mime_type,"fileUri":url}}),
-                (Wire::GenerateContent, AttachmentData::Bytes(bytes), _) => json!({"inlineData":{"mimeType":input.mime_type,"data":STANDARD.encode(bytes)}}),
-                (Wire::Chat, _, _) => unreachable!("document capability validated before resolution"),
-            }
-        }).collect();
+                MediaInput::Attachment(index) => {
+                    let declaration = request.attachments()[index].declaration();
+                    let attachment = resolved.get(index).ok_or_else(invalid)?;
+                    Ok(match attachment.data() {
+                        AttachmentData::Bytes(bytes) => {
+                            self.inline_media(&declaration.mime_type, &STANDARD.encode(bytes))
+                        }
+                        AttachmentData::Url(url) => match self.wire {
+                            Wire::Responses if declaration.mime_type == "application/pdf" => {
+                                json!({"type":"input_file","file_url":url})
+                            }
+                            Wire::Responses => json!({"type":"input_image","image_url":url}),
+                            Wire::GenerateContent => json!({"fileData":{"mimeType":declaration.mime_type,"fileUri":url}}),
+                            Wire::Chat => return Err(invalid()),
+                        },
+                    })
+                }
+            }).collect::<Result<Vec<_>>>()?
+        } else {
+            vec![Value::Null; group.len()]
+        };
+        Ok(match self.wire {
+            Wire::Responses | Wire::Chat => json!({"role":"user","content":parts}),
+            Wire::GenerateContent => json!({"role":"user","parts":parts}),
+        })
+    }
+
+    fn inline_media(&self, mime: &str, encoded: &str) -> Value {
+        let data_url = || format!("data:{mime};base64,{encoded}");
         match self.wire {
-            Wire::Responses => body["input"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"role":"user","content":parts})),
-            Wire::GenerateContent => body["contents"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"role":"user","parts":parts})),
-            Wire::Chat => (),
+            Wire::Responses if mime == "application/pdf" => {
+                json!({"type":"input_file","filename":"document.pdf","file_data":data_url()})
+            }
+            Wire::Responses => json!({"type":"input_image","image_url":data_url()}),
+            Wire::Chat => json!({"type":"image_url","image_url":{"url":data_url()}}),
+            Wire::GenerateContent => json!({"inlineData":{"mimeType":mime,"data":encoded}}),
         }
     }
 }

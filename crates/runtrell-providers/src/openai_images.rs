@@ -139,7 +139,7 @@ impl OpenAiImages {
             if request.quality().is_none() {
                 body["quality"] = json!("low");
             }
-            self.adapter.managed_quote(&body)?;
+            self.adapter.managed_quote(&body, None)?;
         }
         if serde_json::to_vec(&body).map_err(|_| Error::Storage)?.len() > config.max_request_bytes {
             return Err(Error::Invalid("IMAGE_REQUEST_BYTES_LIMIT".into()));
@@ -178,7 +178,7 @@ impl ImagePort for OpenAiImages {
     fn quote(&self, request: &PreparedImageRequest) -> Result<Amount> {
         let body = self.body(request)?;
         if self.adapter.managed.is_some() {
-            return self.adapter.managed_quote(&body);
+            return self.adapter.managed_quote(&body, None);
         }
         self.adapter.config.capabilities.limits.estimate(
             self.adapter.config.input_token_upper_bound,
@@ -213,7 +213,7 @@ impl ImagePort for OpenAiImages {
         };
         let parsed = match self
             .adapter
-            .send_at_with_usage(context, endpoint, body, &[], normalize)
+            .send_at_with_usage(context, endpoint, body, &[], None, normalize)
             .await?
         {
             HttpResult::Json { value: parsed, .. } => parsed,

@@ -245,7 +245,7 @@ fn model_config(endpoint: String, handle: RunHandle) -> Config {
 }
 
 #[tokio::test]
-async fn image_window_survives_two_continuations_and_closes_after_tool_call() {
+async fn image_replay_survives_two_continuations_and_a_later_tool_call() {
     let store = Arc::new(memory::MemoryStore::default());
     let account = store
         .create_account("tenant", Amount::new(100000, 100000), None)
@@ -345,7 +345,7 @@ async fn image_window_survives_two_continuations_and_closes_after_tool_call() {
             .collect::<Vec<_>>();
         assert_eq!(
             payloads,
-            if (1..=3).contains(&index) {
+            if index > 0 {
                 vec![bytes.clone()]
             } else {
                 vec![]
@@ -364,7 +364,7 @@ async fn image_window_survives_two_continuations_and_closes_after_tool_call() {
             .iter()
             .filter(|o| !o.request.input["images"].as_array().unwrap().is_empty())
             .count(),
-        3
+        4
     );
 }
 
@@ -483,11 +483,12 @@ async fn process_worker() {
             stop,
             continuation: std::env::var("RT_WINDOW_CONTINUATION").unwrap() == "true",
             inner: ImageModel {
-                inner: Gemini::new(model_config(
-                    std::env::var("RT_WINDOW_ENDPOINT").unwrap(),
-                    handle.clone(),
-                ))
-                .unwrap(),
+                inner: {
+                    let mut config =
+                        model_config(std::env::var("RT_WINDOW_ENDPOINT").unwrap(), handle.clone());
+                    config.document_limits.max_inputs = 5;
+                    Gemini::new(config).unwrap()
+                },
                 resolver: resolver(),
                 runs: store.clone(),
             },
@@ -584,11 +585,11 @@ async fn pg_page_window(continuation: bool) {
         }
         script.push(call(&format!("save-{first}"),"files.write",json!({"path":format!("parts/{first}.md"),"expected_revision":null,"text":format!("# Pages {first}-{}\nPAGE_{first:02}\nPAGE_{:02}",first+1,first+1)})));
     }
-    // Reopen the same saved fixed Workspace version: no original-file RPC.
+    // Reopening exactly the same fixed range must reuse its original attachment.
     script.push(call(
         "reopen",
         "document.view",
-        json!({"attachment":attachment,"pages":{"first":1,"last":1}}),
+        json!({"attachment":attachment,"pages":{"first":1,"last":2}}),
     ));
     script.push(call(
         "save-reopen",
@@ -649,38 +650,37 @@ async fn pg_page_window(continuation: bool) {
     );
     let captures = http.await.unwrap();
     assert_eq!(captures.len(), if continuation { 15 } else { 13 });
+    for pair in captures.windows(2) {
+        assert!(
+            pair[1]["contents"]
+                .as_array()
+                .unwrap()
+                .starts_with(pair[0]["contents"].as_array().unwrap())
+        );
+    }
     for (index, request) in captures.iter().enumerate() {
-        let index = if continuation && index > 1 {
+        let exchange = if continuation && index > 1 {
             index.saturating_sub(2).max(1)
         } else {
             index
         };
-        let parts = request["contents"]
+        let payloads = request["contents"]
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|c| c["parts"].as_array().unwrap());
-        let payloads = parts
+            .flat_map(|c| c["parts"].as_array().unwrap())
             .filter_map(|p| p["inlineData"]["data"].as_str())
             .map(|s| STANDARD.decode(s).unwrap())
             .collect::<Vec<_>>();
-        assert!(payloads.len() <= 4);
-        assert!(payloads.iter().map(Vec::len).sum::<usize>() <= 8 * 1024 * 1024);
-        let expected: Vec<u32> = if index % 2 == 1 && index < 10 {
-            vec![index as u32, index as u32 + 1]
-        } else if index == 11 {
-            vec![1]
-        } else {
-            vec![]
-        };
         assert_eq!(
             payloads.len(),
-            usize::from(!expected.is_empty()),
+            exchange.div_ceil(2).min(5),
             "request {index}"
         );
-        if let Some(bytes) = payloads.first() {
+        assert!(payloads.iter().map(Vec::len).sum::<usize>() <= 8 * 1024 * 1024);
+        for (view, bytes) in payloads.iter().enumerate() {
             let doc = lopdf::Document::load_mem(bytes).unwrap();
-            assert_eq!(doc.get_pages().len(), expected.len());
+            assert_eq!(doc.get_pages().len(), 2);
             let content = doc
                 .get_pages()
                 .values()
@@ -690,8 +690,8 @@ async fn pg_page_window(continuation: bool) {
             for page in 1..=10 {
                 assert_eq!(
                     text.contains(&format!("PAGE_{page:02}")),
-                    expected.contains(&page),
-                    "request {index}, page {page}"
+                    (2 * view + 1..=2 * view + 2).contains(&page),
+                    "request {index}, view {view}, page {page}"
                 );
             }
         }
@@ -700,19 +700,24 @@ async fn pg_page_window(continuation: bool) {
     assert_eq!(final_run.state, RunState::Terminal(Terminal::Succeeded));
     let ops = store.list_operations(&handle).await.unwrap();
     assert!(ops.iter().all(|o| o.send_count == 1 && o.settled));
-    let view = ops
+    let selections = ops
         .iter()
-        .find(|o| {
+        .filter(|o| {
             o.request.target == "document.view"
                 && o.request.input["pages"]["first"] == 1
                 && o.request.input["pages"]["last"] == 2
         })
-        .unwrap();
-    let selected: Vec<Attachment> = serde_json::from_value(match view.result.as_ref().unwrap() {
-        ExternalResult::Applied { output, .. } => output["attachments"].clone(),
-        _ => panic!(),
-    })
-    .unwrap();
+        .map(|view| match view.result.as_ref().unwrap() {
+            ExternalResult::Applied { output, .. } => {
+                serde_json::from_value::<Vec<Attachment>>(output["attachments"].clone()).unwrap()
+            }
+            _ => panic!("expected a successful fixed range selection"),
+        })
+        .collect::<Vec<_>>();
+    let [selected, reopened] = selections.as_slice() else {
+        panic!("expected two views of the same range");
+    };
+    assert_eq!(selected, reopened);
     assert_eq!(
         selected[0].declaration().digest,
         content_digest(

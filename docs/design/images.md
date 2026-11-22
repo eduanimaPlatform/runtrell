@@ -12,9 +12,8 @@ tests use loopback transport fixtures.
 
 `ImageReference` wraps `ArtifactRef`, or `FileVersion` plus `Namespace` and MIME.
 `RunSpec.images` pins initial inputs. Tools return `image_inputs` containing these
-same references; the ordinary driver selects the latest tool exchange for the
-next model input using the [attachment window](attachments.md). Earlier references
-remain available as history and can be reopened with the same tool.
+same references. The driver includes them in normal model history using
+[fixed-reference replay](attachments.md).
 Initial message metadata, checkpoints and operation inputs store references and
 hashes, never transport Base64. `ImageResolver` checks Policy, current Run,
 namespace, owner/explicit grant, revision, actual length, SHA-256 and image structure.

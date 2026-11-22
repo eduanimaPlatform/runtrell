@@ -14,15 +14,13 @@ allowed output. Other executable families reserve against the published prompt
 ceiling and can lower context when that ceiling and the allowed output fit.
 
 For OpenAI Responses, the adapter sizes the prepared input, including replayed
-provider items, function definitions and the structured output schema. The text
-estimate uses serialized UTF-8 bytes with headroom for request and item framing
-and is capped by the effective prompt ceiling. PDF extraction and page rendering,
-and image preprocessing and tiling, are metered independently of transport bytes.
-Requests with attachments use the effective prompt ceiling as their conservative
-bound. Compaction and reservation use the same bound. For text, compaction
-measures headroom against both the effective prompt ceiling and the total
-context window. Inputs with active visual media retain the combined-context
-check because the reserved media allowance cannot measure history growth.
+provider items, function definitions and the structured output schema. The
+estimate uses serialized UTF-8 bytes and headroom for framing. For each media
+input it adds the Base64 length derived from the recorded byte size and an
+allowance for preprocessing. This estimate is capped by the effective prompt
+ceiling. Compaction uses both the prompt ceiling and the total context window.
+PDF extraction, page rendering and image tiling can exceed the estimate, so
+the provider's token count is required before inference.
 
 Before inference, the persisted reservation authorizes the adapter to submit the
 final input to the free `POST /v1/responses/input_tokens` endpoint with the same key
@@ -136,9 +134,10 @@ bundled Responses and GenerateContent bindings use authorized inline PDF and
 image bytes. Count, total declared bytes and worst-case JSON wire size are
 checked before reservation. `DocumentView` supports bounded PDF page selection
 and image inputs through [attachments](attachments.md).
-`ModelPort::check_input_attachments` checks tool-exchange count/byte limits
-without resolving data; the driver returns repairable feedback for an oversized
-tool result, preserving its complete operation receipt and textual references.
+`ModelPort::check_input_attachments` checks the retained inputs against count and
+byte limits without resolving data. With compaction enabled, the driver can
+summarize older inputs to admit an exchange that fits on its own. Oversized
+results receive repairable feedback and keep their full receipts and references.
 Provider echoes of a resolved URL, full UTF-8 payload
 or Base64 payload are redacted before saving reply/continuation metadata; this
 does not replace the host's authorization and source-access policy.

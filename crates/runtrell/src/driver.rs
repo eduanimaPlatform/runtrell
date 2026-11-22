@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use crate::*;
+use crate::{attachments::ToolMedia, *};
 use runtrell_protocol::{
     completion::{CompletionResponse, FinishReason, ToolDefinition, Usage as ProtocolUsage},
     message::{AssistantContent, Origin, ToolName},
@@ -1336,8 +1336,9 @@ impl<
                     images: vec![],
                 }
             } else {
+                let media = ToolMedia::collect(messages, &current.spec.images)?;
                 ModelRequest {
-                    attachments: crate::attachments::model_attachments(messages)?,
+                    attachments: media.attachments,
                     model: self.model.limits().model,
                     messages: messages.clone(),
                     tools: descriptors
@@ -1352,7 +1353,7 @@ impl<
                         .collect(),
                     max_output: 0,
                     metadata: Value::Null,
-                    images: images::model_images(&current, messages)?,
+                    images: media.images,
                 }
             };
             if current.spec.completion.provider_format
@@ -1370,21 +1371,42 @@ impl<
                     req.metadata = serde_json::json!({"provider_options":{"json_schema":schema}});
                 }
             }
-            let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
-            let input = self.model.input_upper_bound(&prepared)?;
+            let media_overflow = if !ack && current.spec.compaction.is_some() {
+                match self
+                    .model
+                    .check_input_attachments(&req.attachments, &req.images)
+                {
+                    Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => true,
+                    other => {
+                        other?;
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            let quote = if media_overflow {
+                None
+            } else {
+                let prepared = bx(|| self.model.prepare_request(&current, req)).await?;
+                let input = self.model.input_upper_bound(&prepared)?;
+                Some((prepared, input))
+            };
             if !ack
                 && current.spec.compaction.as_ref().is_some_and(|policy| {
-                    let limits = self.model.limits();
-                    let input_limit = self
-                        .model
-                        .compaction_input_limit(&prepared)
-                        .unwrap_or(u64::MAX);
-                    limits
-                        .context
-                        .saturating_sub(limits.max_output)
-                        .min(input_limit)
-                        .saturating_sub(input)
-                        < policy.min_remaining_tokens
+                    quote.as_ref().is_none_or(|(prepared, input)| {
+                        let limits = self.model.limits();
+                        let input_limit = self
+                            .model
+                            .compaction_input_limit(prepared)
+                            .unwrap_or(u64::MAX);
+                        limits
+                            .context
+                            .saturating_sub(limits.max_output)
+                            .min(input_limit)
+                            .saturating_sub(*input)
+                            < policy.min_remaining_tokens
+                    })
                 })
                 && current
                     .checkpoint
@@ -1411,6 +1433,8 @@ impl<
                 // Re-prepare and re-quote from the committed summary on the next pass.
                 return Ok(());
             }
+            let (prepared, input) =
+                quote.ok_or_else(|| Error::Invalid("MODEL_ATTACHMENT_LIMIT".into()))?;
             let (cap, reserve) = bx(|| self.model_budget(c, input)).await?;
             quoted_reserve = Some(reserve);
             let prepared = prepared.with_max_output(cap);
@@ -1916,10 +1940,25 @@ impl<
                 tool: Some(name),
                 data: output.clone(),
             });
-            let admission = self.model.check_input_attachments(
-                &crate::attachments::model_attachments(&candidate_messages)?,
-                &images::model_images(&current, &candidate_messages)?,
-            );
+            let media = ToolMedia::collect(&candidate_messages, &current.spec.images)?;
+            let mut admission = self
+                .model
+                .check_input_attachments(&media.attachments, &media.images);
+            if matches!(&admission, Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT")
+                && current.spec.compaction.is_some()
+            {
+                // Compaction keeps the pending exchange intact. Allow it to
+                // clear older media only if this exchange can fit afterward.
+                let start = candidate_messages
+                    .iter()
+                    .rposition(|message| message.role != "tool")
+                    .map_or(0, |i| i + 1);
+                let pending =
+                    ToolMedia::collect(&candidate_messages[start..], &current.spec.images)?;
+                admission = self
+                    .model
+                    .check_input_attachments(&pending.attachments, &pending.images);
+            }
             let (output, answer) = match admission {
                 Ok(()) => (
                     output.clone(),
@@ -1928,7 +1967,7 @@ impl<
                 Err(Error::Invalid(code)) if code == "MODEL_ATTACHMENT_LIMIT" => {
                     // Preserve the operation's exact result and expose its references
                     // as text, but do not activate an over-limit binary input.
-                    let feedback = serde_json::json!({"code":code,"repairable":true,"hint":"Open fewer files or a narrower page range with the same tool.","result":output});
+                    let feedback = serde_json::json!({"code":code,"repairable":true,"hint":"Use the retained inputs, or open fewer files or a narrower page range with the same tool.","result":output});
                     if serde_json::to_vec(&feedback)
                         .map_err(|_| Error::Storage)?
                         .len()

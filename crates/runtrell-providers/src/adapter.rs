@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::*;
 use reqwest::{Client, Url, header::HeaderValue};
-use runtrell::*;
+use runtrell::{attachments::ResolvedAttachment, *};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime};
@@ -265,6 +265,15 @@ impl Adapter {
     }
 
     pub(crate) fn body(&self, run: &RunHandle, request: &PreparedModelRequest) -> Result<Value> {
+        self.model_body(run, request, None)
+    }
+
+    fn model_body(
+        &self,
+        run: &RunHandle,
+        request: &PreparedModelRequest,
+        resolved: Option<&[ResolvedAttachment]>,
+    ) -> Result<Value> {
         if *run != self.config.run {
             return Err(Error::PermissionDenied);
         }
@@ -273,7 +282,6 @@ impl Adapter {
                 "attachments on background responses".into(),
             ));
         }
-        self.document_bound(request)?;
         let names = ToolNames::new(request, self.wire)?;
         let c = &self.config.capabilities;
         let l = &c.limits;
@@ -300,20 +308,16 @@ impl Adapter {
         if options.json_schema.is_some() && !c.json_schema {
             return Err(invalid());
         }
-        if !request.resolved_images().is_empty() && !c.images.input {
-            return Err(Error::Unsupported("image_input".into()));
-        }
-        if request.resolved_images().len() > self.config.image_limits.max_images {
-            return Err(Error::Invalid("IMAGE_COUNT_LIMIT".into()));
-        }
-        let images = request.resolved_images();
-        for image in images {
-            image.validate(&self.config.image_limits)?;
-        }
+        self.check_input_attachments(request.attachments(), &request.images)?;
         let mut messages = Vec::new();
         let mut systems = Vec::new();
+        let mut slots = request.media_slots()?.into_iter();
+        let initial = slots.next().ok_or_else(invalid)?;
+        if !initial.is_empty() {
+            messages.push(self.media_item(request, &initial, resolved)?);
+        }
         let mut replaying = false;
-        for m in &request.messages {
+        for (m, after) in request.messages.iter().zip(slots) {
             if m.role == "provider" {
                 let state = self.state(m)?;
                 match self.wire {
@@ -378,13 +382,8 @@ impl Adapter {
                 }
             };
             messages.push(content);
-        }
-        if !images.is_empty() {
-            // Images belong to a new user turn, never to a provider-state envelope.
-            match self.wire {
-                Wire::Responses => messages.push(json!({"role":"user","content":images.iter().map(|i| json!({"type":"input_image","image_url":format!("data:{};base64,{}",i.mime_type(),i.data_base64())})).collect::<Vec<_>>()})),
-                Wire::Chat => messages.push(json!({"role":"user","content":images.iter().map(|i| json!({"type":"image_url","image_url":{"url":format!("data:{};base64,{}",i.mime_type(),i.data_base64())}})).collect::<Vec<_>>()})),
-                Wire::GenerateContent => messages.push(json!({"role":"user","parts":images.iter().map(|i| json!({"inlineData":{"mimeType":i.mime_type(),"data":i.data_base64()}})).collect::<Vec<_>>()})),
+            if !after.is_empty() {
+                messages.push(self.media_item(request, &after, resolved)?);
             }
         }
         let functions: Vec<_> = request.tools.iter().map(|t| Ok(match self.wire {
@@ -462,8 +461,9 @@ impl Adapter {
         request: PreparedModelRequest,
     ) -> Result<ExternalResult> {
         request.validate_for_send()?;
-        let mut body = self.body(&context.claim.run, &request)?;
-        self.check_document_wire_bound(&request, &body)?;
+        let prototype = self.body(&context.claim.run, &request)?;
+        self.check_media_wire_bound(&request, &prototype)?;
+        let input_bound = self.model_input_bound(&prototype, &request)?;
         let resolved = match self.resolve_documents(context, &request).await {
             Ok(resolved) => resolved,
             Err(_) => {
@@ -486,8 +486,22 @@ impl Adapter {
                 });
             }
         };
-        self.attach_documents(&mut body, &request, &resolved);
-        match self.send(context, body, &resolved).await? {
+        let body = if request.images.is_empty() && resolved.is_empty() {
+            prototype
+        } else {
+            self.model_body(&context.claim.run, &request, Some(&resolved))?
+        };
+        match self
+            .send_at_with_usage(
+                context,
+                &self.config.endpoint,
+                body,
+                &resolved,
+                Some(input_bound),
+                |parsed| self.normalized_usage(parsed),
+            )
+            .await?
+        {
             HttpResult::Json {
                 value: parsed,
                 status,
@@ -562,7 +576,7 @@ impl Adapter {
 
     async fn lookup(&self, context: &ToolContext, request: PreparedModelRequest) -> Result<Lookup> {
         let body = self.body(&context.claim.run, &request)?;
-        self.check_document_wire_bound(&request, &body)?;
+        self.check_media_wire_bound(&request, &body)?;
         self.authorize_attachments(context, &request)?;
         let Some(managed) = self.managed.as_ref().filter(|_| self.background()) else {
             return Ok(Lookup::Unknown);
@@ -623,30 +637,21 @@ impl Adapter {
         serde_json::from_slice(&bytes).ok()
     }
 
-    pub(crate) async fn send(
-        &self,
-        context: &ToolContext,
-        body: Value,
-        sensitive: &[runtrell::attachments::ResolvedAttachment],
-    ) -> Result<HttpResult> {
-        self.send_at(context, &self.config.endpoint, body, sensitive)
-            .await
-    }
-    pub(crate) async fn send_at(
-        &self,
-        context: &ToolContext,
-        endpoint: &str,
-        body: Value,
-        sensitive: &[runtrell::attachments::ResolvedAttachment],
-    ) -> Result<HttpResult> {
-        self.send_at_with_usage(context, endpoint, body, sensitive, |parsed| {
-            self.usage(parsed).unwrap_or_else(|_| Usage {
-                model: self.config.capabilities.limits.model.clone(),
-                ..Usage::default()
-            })
+    #[cfg(feature = "gemini")]
+    pub(crate) async fn send(&self, context: &ToolContext, body: Value) -> Result<HttpResult> {
+        self.send_at_with_usage(context, &self.config.endpoint, body, &[], None, |parsed| {
+            self.normalized_usage(parsed)
         })
         .await
     }
+
+    fn normalized_usage(&self, parsed: &Value) -> Usage {
+        self.usage(parsed).unwrap_or_else(|_| Usage {
+            model: self.config.capabilities.limits.model.clone(),
+            ..Usage::default()
+        })
+    }
+
     // The same input fields go to the token-count endpoint and into the
     // estimate. Borrow the payload so counting need not clone media data.
     fn responses_input(body: &Value) -> BTreeMap<&str, &Value> {
@@ -664,36 +669,44 @@ impl Adapter {
         .collect()
     }
 
-    fn model_input_bound(&self, body: &Value, unresolved_attachments: bool) -> Result<u64> {
+    fn model_input_bound(&self, body: &Value, request: &PreparedModelRequest) -> Result<u64> {
         let cap = self.config.input_token_upper_bound;
-        if !self.counts_responses_input() || unresolved_attachments {
+        if !self.counts_responses_input() {
             return Ok(cap);
         }
         let items = |key: &str| body[key].as_array().map_or(0, Vec::len) as u64;
-        let contains_media = body["input"].as_array().into_iter().flatten().any(|item| {
-            let media =
-                |part: &Value| matches!(part["type"].as_str(), Some("input_file" | "input_image"));
-            media(item) || item["content"].as_array().into_iter().flatten().any(media)
-        });
-        if contains_media {
-            // Provider preprocessing turns PDF pages and images into tokens.
-            // Transport size cannot bound extraction, rendering or image tiling.
-            return Ok(cap);
-        }
         let bytes = serde_json::to_vec(&Self::responses_input(body))
             .map_err(|_| invalid())?
             .len() as u64;
-        // One token per UTF-8 byte, with headroom for hidden request and item
-        // framing. The provider count enforces this estimate before inference.
+        // The prototype preserves item framing but omits media transport. Use
+        // the fixed lengths with preprocessing headroom. This estimate is
+        // enforced against the provider's count before paid inference.
+        const PREPROCESSING_TOKENS_PER_MEDIA: u64 = 4096;
+        let media = request
+            .images
+            .iter()
+            .map(|image| image.bytes())
+            .chain(request.attachments().iter().map(|input| input.bytes()))
+            .fold(0u64, |total, bytes| {
+                total.saturating_add(
+                    bytes
+                        .div_ceil(3)
+                        .saturating_mul(4)
+                        .saturating_add(PREPROCESSING_TOKENS_PER_MEDIA),
+                )
+            });
         Ok(cap.min(
-            bytes.saturating_add(256).saturating_add(
-                items("input")
-                    .saturating_add(items("tools"))
-                    .saturating_mul(32),
-            ),
+            bytes
+                .saturating_add(256)
+                .saturating_add(
+                    items("input")
+                        .saturating_add(items("tools"))
+                        .saturating_mul(32),
+                )
+                .saturating_add(media),
         ))
     }
-    pub(crate) fn managed_quote(&self, body: &Value) -> Result<Amount> {
+    pub(crate) fn managed_quote(&self, body: &Value, input_bound: Option<u64>) -> Result<Amount> {
         let managed = self.managed.as_ref().ok_or(Error::ReservationDenied)?;
         if managed.model.image_reservation().is_some() {
             return managed.pricing.estimate_image(
@@ -713,9 +726,10 @@ impl Adapter {
             .or_else(|| body["generationConfig"]["maxOutputTokens"].as_u64())
             .or_else(|| body["max_tokens"].as_u64())
             .unwrap_or(self.config.capabilities.limits.max_output);
-        managed
-            .pricing
-            .estimate(self.model_input_bound(body, false)?, output)
+        managed.pricing.estimate(
+            input_bound.unwrap_or(self.config.input_token_upper_bound),
+            output,
+        )
     }
 
     fn counts_responses_input(&self) -> bool {
@@ -800,7 +814,8 @@ impl Adapter {
         context: &ToolContext,
         endpoint: &str,
         body: Value,
-        sensitive: &[runtrell::attachments::ResolvedAttachment],
+        sensitive: &[ResolvedAttachment],
+        input_bound: Option<u64>,
         normalize: F,
     ) -> Result<HttpResult> {
         if context.claim.run != self.config.run {
@@ -812,7 +827,7 @@ impl Adapter {
         }
         let mut timeout = self.request_timeout(context)?;
         let key = if let Some(managed) = &self.managed {
-            let quote = self.managed_quote(&body)?;
+            let quote = self.managed_quote(&body, input_bound)?;
             context
                 .managed_send
                 .as_ref()
@@ -851,7 +866,7 @@ impl Adapter {
         let mut value = HeaderValue::from_str(&secret).map_err(|_| invalid())?;
         value.set_sensitive(true);
         if self.counts_responses_input() {
-            let bound = self.model_input_bound(&body, false)?;
+            let bound = input_bound.ok_or(Error::ReservationDenied)?;
             let start = Instant::now();
             let count = self
                 .count_responses_input(endpoint, &body, value.clone(), timeout)
@@ -1494,11 +1509,10 @@ macro_rules! adapter {
                     .filter(|connection| connection.model.wire_model() == model)
                     .map(|connection| connection.pricing.clone())
             }
-            fn compaction_input_limit(&self, request: &PreparedModelRequest) -> Option<u64> {
-                (self.0.counts_responses_input()
-                    && request.attachments().is_empty()
-                    && request.resolved_images().is_empty())
-                .then_some(self.0.config.input_token_upper_bound)
+            fn compaction_input_limit(&self, _: &PreparedModelRequest) -> Option<u64> {
+                self.0
+                    .counts_responses_input()
+                    .then_some(self.0.config.input_token_upper_bound)
             }
             fn supports_output_schema(&self) -> bool {
                 self.0.config.capabilities.json_schema
@@ -1523,9 +1537,11 @@ macro_rules! adapter {
                         .clone()
                         .with_max_output(request.max_output.max(ceiling)),
                 )?;
-                self.0.check_document_wire_bound(request, &body)?;
-                self.0
-                    .model_input_bound(&body, !request.attachments().is_empty())
+                self.0.check_media_wire_bound(request, &body)?;
+                for image in request.resolved_images() {
+                    image.validate(&self.0.config.image_limits)?;
+                }
+                self.0.model_input_bound(&body, request)
             }
             fn retry_policy(&self) -> RetryPolicy {
                 self.0.config.retry_policy.clone()

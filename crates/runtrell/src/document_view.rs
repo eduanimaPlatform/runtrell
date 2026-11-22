@@ -697,6 +697,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
         let mut output = json!({"page_count":count,"source":parsed});
         let binding = self.binding(c, &input);
         if let Some(selected) = selected {
+            let selection = digest(&json!([parsed, content_digest(&selected)]));
             let current = self.bound(c, &parsed).await?;
             self.resolver
                 .policy
@@ -707,7 +708,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
                 .stage_named(
                     &self.output_access,
                     ArtifactSpec {
-                        id: format!("document-{binding}"),
+                        id: format!("document-view-{selection}"),
                         media_type: target.mime_type.clone(),
                         class: DataClass::Intermediate,
                     },
