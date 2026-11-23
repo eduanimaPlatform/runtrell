@@ -1019,6 +1019,8 @@ pub enum ImageResponse {
         images: Vec<EncodedImage>,
         usage: Usage,
         failure: Option<String>,
+        /// A model-safe correction for a failed input, returned after settlement.
+        repair_hint: Option<String>,
         retry_after: Option<u64>,
         provider_diagnostic: Option<ProviderDiagnostic>,
     },
@@ -1295,14 +1297,23 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             .authorize(&run, self.name(), "image.save")?;
         let output_mime = request.output_mime();
         let response = self.provider.invoke(c, request).await?;
-        let (images, usage, failure, retry_after, provider_diagnostic) = match response {
+        let (images, usage, failure, repair_hint, retry_after, provider_diagnostic) = match response
+        {
             ImageResponse::Received {
                 images,
                 usage,
                 failure,
+                repair_hint,
                 retry_after,
                 provider_diagnostic,
-            } => (images, usage, failure, retry_after, provider_diagnostic),
+            } => (
+                images,
+                usage,
+                failure,
+                repair_hint,
+                retry_after,
+                provider_diagnostic,
+            ),
             ImageResponse::Unknown => return Ok(ExternalResult::Unknown),
             ImageResponse::UnknownDiagnostic(diagnostic) => {
                 return Ok(ExternalResult::UnknownDiagnostic(diagnostic));
@@ -1311,6 +1322,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         // Unknown usage is never normalized to free. Preserve known results too;
         // Runtime retains the reservation until the usage can be settled.
         let binding = self.binding(c, &input);
+        let repair_hint = failure.as_ref().and(repair_hint);
         let mut failure = failure;
         let mut references = vec![];
         if images.is_empty() || images.len() > self.resolver.limits.max_images {
@@ -1369,12 +1381,12 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         }
         let result = if let Some(code) = failure {
             ExternalResult::Failed {
-                repair_hint: None,
+                repair_hint,
                 physical_evidence: None,
                 code,
                 usage,
                 retry_after,
-                provider_diagnostic,
+                provider_diagnostic: provider_diagnostic.clone(),
             }
         } else {
             ExternalResult::Applied {
@@ -1408,7 +1420,6 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
             )
             .await;
         if stored.is_err() {
-            let diagnostic = result.provider_diagnostic().cloned();
             let usage = match result {
                 ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
                     usage
@@ -1421,7 +1432,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 code: "IMAGE_RECEIPT_SAVE_FAILED".into(),
                 usage,
                 retry_after: None,
-                provider_diagnostic: diagnostic,
+                provider_diagnostic,
             });
         }
         Ok(result)

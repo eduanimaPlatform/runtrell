@@ -61,7 +61,7 @@ type TestTool = ImageTool<Images, DataStore, FakePolicy, MemoryStore, TestClock>
 async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) {
     let store = Arc::new(MemoryStore::default());
     let account = store
-        .create_account("tenant", Amount::new(10000, 10000), None)
+        .create_account("tenant", Amount::new(100_000, 300_000), None)
         .await
         .unwrap();
     let run = store
@@ -310,7 +310,12 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
         };
         assert!(code.contains(expected));
         assert!(!code.contains("TEST-KEY"));
-        assert_eq!(usage.input, None);
+        let expected_usage = if OPENAI && (400..500).contains(&status) {
+            Some(0)
+        } else {
+            None
+        };
+        assert_eq!(usage.input, expected_usage);
         assert_eq!(retry_after, None);
         assert_eq!(task.await.unwrap().len(), 1);
     }

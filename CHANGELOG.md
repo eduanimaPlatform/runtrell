@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0
+
+- Settle definite OpenAI Images request rejections and confirmed pre-send
+  failures at zero usage. Give the model tool feedback for correctable image
+  inputs and keep reservations for ambiguous outcomes.
+- Retain the HTTP status, sanitized provider error identifiers, and validated
+  request ID in failed attempt diagnostics.
+
 ## 0.9.0
 
 - Admit and rejoin child Runs within the active phase of a parent. A phase

@@ -122,12 +122,17 @@ Successful ledger replay runs `Tool::authorize_result` before exposing results.
 
 Known usage with invalid Base64, MIME, byte count, image container structure, dimensions,
 output count or incomplete output is a billed Failed result and settles normally.
-Missing usage and lost/truncated HTTP responses retain reservations. Saved images
-with unknown usage do not release reservations. Input/output image tokens retain
-subset semantics; `image_input_count`/`image_output_count` record wire image counts.
-HTTP errors use existing sanitized Failure classifications; bodies and credentials
-are excluded. Unsupported, PermissionDenied and Invalid (`IMAGE_*` codes) fail
-before send. There is one attempt, no hidden retry, redirect or paid reconstruction.
+OpenAI Images records zero usage for a complete HTTP 4xx structured rejection
+without reported usage or image data, and for confirmed pre-send failures.
+When the provider identifies a correctable image input field, the settled
+failure returns a tool error with a field-specific hint. Received usage takes
+precedence. Missing usage on a 5xx or success response and ambiguous sends,
+including post-send timeouts and truncated responses, retain reservations.
+Input/output image tokens retain subset semantics.
+`image_input_count`/`image_output_count` record image counts.
+Failed attempts retain sanitized provider diagnostics in the operation ledger
+for reconciliation. Preflight validation rejects unsupported or invalid inputs
+before send. Each image attempt sends at most once.
 
 ## Bounds and authorization
 

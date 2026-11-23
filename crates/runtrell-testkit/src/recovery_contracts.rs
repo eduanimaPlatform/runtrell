@@ -211,6 +211,7 @@ pub async fn failed_unknown_retry_and_owner_recovery<S: ControlStore>(
         provider_type: None,
         provider_code: None,
         provider_param: None,
+        request_id: None,
     };
     assert_eq!(
         first
@@ -318,6 +319,7 @@ pub async fn provider_diagnostic_survives_reopen<S: ControlStore>(first: Arc<S>,
         provider_type: None,
         provider_code: None,
         provider_param: None,
+        request_id: None,
     };
     first
         .record(
@@ -384,6 +386,7 @@ pub async fn provider_diagnostic_survives_reopen<S: ControlStore>(first: Arc<S>,
         ),
         provider_code: None,
         provider_param: None,
+        request_id: None,
     };
     let failed = ExternalResult::Failed {
         physical_evidence: None,

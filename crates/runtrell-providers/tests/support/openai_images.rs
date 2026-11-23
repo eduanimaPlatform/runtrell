@@ -195,6 +195,247 @@ async fn openai_malformed_single_result_and_http_spending_errors_keep_usage() {
 }
 
 #[tokio::test]
+async fn managed_openai_image_rejection_releases_reservation_and_returns_feedback() {
+    use runtrell_testkit::FakeModel;
+
+    let (url, http) = server(
+        400,
+        "x-request-id: req_invalid_size\r\n",
+        json!({"error":{
+            "type":"invalid_request_error","code":"invalid_value","param":"size",
+            "message":"TEST-KEY-DO-NOT-PRINT"
+        }}),
+    )
+    .await;
+    let (mut tool, ctx) = fixture(image_config(url.clone()), ImageAction::Generate).await;
+    let handle = ctx.claim.run;
+    let mut provider = Images::connect(
+        "openai/gpt-image-2.6-sunburst",
+        models::OperationKind::RasterGenerate,
+        None,
+        Connection {
+            run: handle.clone(),
+            session: None,
+            credentials: Arc::new(|_| Ok(ApiKey::new("TEST-KEY-DO-NOT-PRINT"))),
+            attachment_resolver: None,
+            retry_policy: RetryPolicy::default(),
+            timeout_ms: 10_000,
+            context_cap: None,
+            input_token_cap: None,
+            max_output_tokens: None,
+            reasoning: None,
+        },
+    )
+    .unwrap();
+    provider.set_fixture_endpoint(image_config(url).endpoint);
+    tool.provider = provider;
+    tool.config.reserve = Amount::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    tool.clock.set(now);
+    let runs = tool.runs.clone();
+    let account = runs.get(&handle).await.unwrap().spec.account;
+    let claim = runs.claim(&handle, "worker", now, 100_000).await.unwrap();
+    let runtime = Runtime {
+        store: runs.clone(),
+        model: FakeModel::scripted(vec![
+            FakeModel::calls(vec![ToolCall {
+                id: "draw".into(),
+                name: "image.generate".into(),
+                arguments: json!({"prompt":"draw","size":"1024x1024"}),
+            }]),
+            FakeModel::decision(json!({"decision":"answered"})),
+        ]),
+        policy: FakePolicy::default(),
+        clock: tool.clock.clone(),
+        tools: vec![tool],
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let run = runtime.drive(&claim).await.unwrap();
+    let operations = runs.list_operations(&handle).await.unwrap();
+    let op = operations
+        .iter()
+        .find(|op| op.request.target == "image.generate")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(op.request.pricing.as_ref().unwrap()).unwrap()["price_id"],
+        "sunburst-generate-tokens"
+    );
+    assert!(op.request.reserve.micro_usd > 0);
+    assert_eq!(op.send_count, 1);
+    assert!(op.settled && !op.unknown_usage, "{op:?}");
+    assert!(matches!(
+        &op.result,
+        Some(ExternalResult::Failed { usage, repair_hint: Some(_), .. })
+            if usage.amount() == Ok(Amount::default())
+    ));
+    let diagnostic = serde_json::to_value(op.provider_diagnostic().unwrap()).unwrap();
+    assert_eq!(diagnostic["http_status"], 400);
+    assert_eq!(diagnostic["provider_type"], "invalid_request_error");
+    assert_eq!(diagnostic["provider_code"], "invalid_value");
+    assert_eq!(diagnostic["request_id"], "req_invalid_size");
+    let totals = runs.account(&account).await.unwrap();
+    assert_eq!(totals.reserved, Amount::default());
+    assert_eq!(totals.unknown, 0);
+    assert_eq!(totals.used, Amount::new(8, 8));
+    assert_eq!(run.state, RunState::Terminal(Terminal::Succeeded));
+    {
+        let requests = runtime.model.requests.lock().unwrap();
+        let feedback = requests[1]
+            .messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .unwrap();
+        assert_eq!(feedback.data["repairable"], true);
+        assert!(feedback.data["hint"].as_str().unwrap().contains("size"));
+        assert!(!feedback.data.to_string().contains("TEST-KEY"));
+        assert!(!feedback.data.to_string().contains("req_invalid_size"));
+    }
+    let requests = http.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /v1/images/generations "));
+}
+
+#[tokio::test]
+async fn openai_failed_image_responses_preserve_transport_evidence() {
+    for (raw, phase, status, request_id) in [
+        ("", ProviderFailurePhase::Send, None, Value::Null),
+        (
+            "HTTP/1.1 200 OK\r\nx-request-id: req_truncated\r\nContent-Length: 20\r\n\r\n{",
+            ProviderFailurePhase::ResponseRead,
+            Some(200),
+            json!("req_truncated"),
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nx-request-id: req_invalid\r\nContent-Length: 4\r\n\r\nnope",
+            ProviderFailurePhase::ResponseDecode,
+            Some(200),
+            json!("req_invalid"),
+        ),
+    ] {
+        let (url, http) = raw_server(raw.into()).await;
+        let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
+        let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
+        let ExternalResult::UnknownDiagnostic(diagnostic) = result else {
+            panic!("expected an ambiguous outcome");
+        };
+        assert_eq!(diagnostic.phase, phase);
+        assert_eq!(diagnostic.http_status, status);
+        assert_eq!(
+            serde_json::to_value(diagnostic).unwrap()["request_id"],
+            request_id
+        );
+        assert_eq!(http.await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn openai_image_size_error_code_can_guide_repair_without_param() {
+    let (url, http) = server(
+        400,
+        "",
+        json!({"error":{"type":"invalid_request_error","code":"invalid_size"}}),
+    )
+    .await;
+    let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
+    let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
+    assert!(matches!(
+        &result,
+        ExternalResult::Failed { usage, repair_hint: Some(hint), .. }
+            if usage.amount() == Ok(Amount::default()) && hint.contains("size")
+    ));
+    assert_eq!(http.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn openai_image_timeout_after_request_body_remains_unknown() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/test", listener.local_addr().unwrap());
+    let http = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut bytes = vec![];
+        stream.read_to_end(&mut bytes).await.unwrap();
+        String::from_utf8(bytes).unwrap()
+    });
+    let mut cfg = image_config(url);
+    cfg.capabilities.limits.timeout = 250;
+    let (tool, ctx) = fixture(cfg, ImageAction::Generate).await;
+    let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
+    let ExternalResult::UnknownDiagnostic(diagnostic) = result else {
+        panic!("expected an ambiguous outcome");
+    };
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::Send);
+    assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Unknown);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), http)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("\"prompt\":\"draw\"")
+    );
+}
+
+#[tokio::test]
+async fn openai_image_diagnostics_omit_echoed_credentials_and_unsafe_ids() {
+    let (url, http) = server(
+        422,
+        "x-request-id: TEST-KEY-DO-NOT-PRINT\r\n",
+        json!({"error":{
+            "type":"invalid_request_error","code":"TEST-KEY-DO-NOT-PRINT",
+            "param":"arbitrary provider text","message":"unfiltered error message"
+        }}),
+    )
+    .await;
+    let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
+    let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
+    assert!(matches!(
+        &result,
+        ExternalResult::Failed { usage, repair_hint: None, .. }
+            if usage.amount() == Ok(Amount::default())
+    ));
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(diagnostic.http_status, Some(422));
+    assert_eq!(
+        diagnostic.provider_type.as_deref(),
+        Some("invalid_request_error")
+    );
+    assert_eq!(diagnostic.provider_code, None);
+    assert_eq!(diagnostic.provider_param, None);
+    assert_eq!(diagnostic.request_id, None);
+    let stored = serde_json::to_string(&result).unwrap();
+    assert!(!stored.contains("TEST-KEY-DO-NOT-PRINT"));
+    assert!(!stored.contains("unfiltered error message"));
+    assert_eq!(http.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn openai_unreachable_image_endpoint_is_a_known_no_send_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/test", listener.local_addr().unwrap());
+    drop(listener);
+    let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
+    let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
+    assert!(
+        matches!(
+            &result,
+            ExternalResult::Failed { usage, repair_hint: None, .. }
+                if usage.amount() == Ok(Amount::default())
+        ),
+        "{result:?}"
+    );
+    let diagnostic = result.provider_diagnostic().unwrap();
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::PreSend);
+    assert_eq!(
+        diagnostic.send_certainty,
+        ProviderSendCertainty::DefinitelyNotSent
+    );
+    assert_eq!(diagnostic.http_status, None);
+}
+
+#[tokio::test]
 async fn openai_mask_foreign_hash_and_output_options_are_rejected_before_send() {
     let (url, task) = server(200, "", image_response()).await;
     let (mut tool, mut ctx) = fixture(image_config(url), ImageAction::Edit).await;
@@ -259,7 +500,7 @@ async fn openai_mask_foreign_hash_and_output_options_are_rejected_before_send() 
 }
 
 #[tokio::test]
-async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation() {
+async fn pg_openai_image_failures_settle_or_hold_with_provider_evidence() {
     use runtrell_postgres::PgStore;
     use runtrell_testkit::FakeModel;
     let database =
@@ -278,6 +519,8 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
         "absent",
         "partial",
         "disconnect",
+        "authentication",
+        "server_error",
     ] {
         let tick = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -328,13 +571,21 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             "partial" => body["usage"] = json!({"input_tokens":3}),
             _ => (),
         }
-        let (endpoint, http) = if case == "disconnect" {
-            raw_server(
-                "HTTP/1.1 200 OK\r\nContent-Length: 900\r\nConnection: close\r\n\r\n{}".into(),
-            )
-            .await
-        } else {
-            server(200, "", body).await
+        let (endpoint, http) = match case {
+            "disconnect" => raw_server(
+                "HTTP/1.1 200 OK\r\nx-request-id: req_pg_image\r\nContent-Length: 900\r\nConnection: close\r\n\r\n{}".into(),
+            ).await,
+            "authentication" => server(
+                401,
+                "x-request-id: req_pg_image\r\n",
+                json!({"error":{"type":"invalid_request_error","code":"invalid_api_key"}}),
+            ).await,
+            "server_error" => server(
+                500,
+                "x-request-id: req_pg_image\r\n",
+                json!({"error":{"type":"server_error","code":"internal_error"}}),
+            ).await,
+            _ => server(200, "x-request-id: req_pg_image\r\n", body).await,
         };
         let mut cfg = image_config(endpoint);
         cfg.run = handle.clone();
@@ -389,7 +640,17 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             .find(|op| op.request.kind == OperationKind::Tool)
             .unwrap();
         assert_eq!(tool_op.send_count, 1);
-        let unknown = matches!(case, "absent" | "partial" | "disconnect");
+        let unknown = matches!(case, "absent" | "partial" | "disconnect" | "server_error");
+        if !matches!(case, "absent" | "partial") {
+            let diagnostic = tool_op.provider_diagnostic().unwrap();
+            let status = match case {
+                "authentication" => 401,
+                "server_error" => 500,
+                _ => 200,
+            };
+            assert_eq!(diagnostic.http_status, Some(status));
+            assert_eq!(diagnostic.request_id.as_deref(), Some("req_pg_image"));
+        }
         let (settled,unsettled):(i64,i64) = sqlx::query_as(&format!("SELECT count(*) FILTER (WHERE settled AND NOT unknown_usage), count(*) FILTER (WHERE unknown_usage) FROM {schema}.attempts")).fetch_one(&pool).await.unwrap();
         let balance = runs.account(&account).await.unwrap();
         if unknown {
@@ -403,14 +664,27 @@ async fn pg_openai_paid_failures_settle_once_and_missing_usage_holds_reservation
             // HTTP body); it cannot authorize a second generation.
             let _ = rt.drive(&claim).await.unwrap();
             assert_eq!(runs.account(&account).await.unwrap(), balance);
+            let persisted = runs
+                .list_operations(&handle)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|op| op.id == tool_op.id)
+                .unwrap();
+            assert_eq!(
+                persisted.provider_diagnostic(),
+                tool_op.provider_diagnostic()
+            );
         } else {
             assert!(matches!(run.state, RunState::Terminal(Terminal::Failed(_))));
             assert!(tool_op.settled);
+            let cost = if case == "authentication" { 0 } else { 8 };
             assert!(
-                matches!(&tool_op.result,Some(ExternalResult::Failed { usage,.. }) if usage.amount() == Ok(Amount::new(8,8)))
+                matches!(&tool_op.result,Some(ExternalResult::Failed { usage,.. }) if usage.amount() == Ok(Amount::new(cost,cost)))
             );
             assert_eq!((settled, unsettled), (2, 0));
-            assert_eq!(balance.used, Amount::new(12, 12));
+            assert_eq!(balance.used, Amount::new(4 + cost, 4 + cost));
+            assert_eq!(balance.reserved, Amount::default());
         }
         assert_eq!(http.await.unwrap().len(), 1);
     }

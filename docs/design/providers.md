@@ -184,9 +184,10 @@ band to the full attempt. Gemini output combines candidate and thinking
 counters. Missing price-sensitive counters or incompatible route evidence keep
 the reservation pending.
 
-HTTP redirects and automatic retries are disabled; one invocation sends at most
-once. Connection/body/JSON failure after starting send remains an unknown result,
-never proof of absence. The result carries `ProviderDiagnostic` with a fixed phase
+HTTP redirects and automatic retries are disabled. One invocation sends at most
+once. A connection establishment failure is a pre-send failure. Loss of the
+response after sending may leave the result unknown. The result carries
+`ProviderDiagnostic` with a fixed phase
 (`pre_send`, `send`, `response_read`, `response_decode`, `http_error`), send certainty,
 and the actual HTTP status when received. `send` has unknown certainty even when a
 local peer observed bytes; `response_read`, `response_decode`, and `http_error` have
@@ -208,7 +209,9 @@ unless the entire value is 1–128 bytes and uses only ASCII letters, digits,
 underscore, period, hyphen, and square brackets; invalid
 values are not truncated. The Gemini field shape follows the
 [Google BadRequest schema](https://developers.google.com/data-manager/api/reference/rest/v1/BadRequest).
-Provider messages, headers, URLs, and bodies are never copied into diagnostics.
+The `x-request-id` response header is captured when it passes the same identifier
+validation. Provider messages, arbitrary headers, URLs, and bodies are excluded
+from diagnostics. See [OpenAI request debugging](https://developers.openai.com/api/reference/overview#debugging-requests).
 
 Explicit HTTP errors retain sanitized classification, status and Retry-After.
 Recognizable spending/balance codes
@@ -217,8 +220,7 @@ or unclassified. Retry-After delta seconds and HTTP dates are converted to the
 runtime delay in milliseconds only for documented retryable failures
 (`ExternalResult::Failed.retry_after`; seconds are multiplied with overflow
 checked, and an unrepresentable accepted header prevents an early retry).
-`ProviderDiagnostic` contains no header values;
-the existing serialized `Failure.retry_after` retains the validated Retry-After value.
+The serialized `Failure.retry_after` retains the validated Retry-After value.
 
 The driver reserves the maximum price before recording the send intent.
 The adapter consumes the single-send authorization before resolving the

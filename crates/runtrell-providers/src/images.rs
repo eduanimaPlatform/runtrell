@@ -114,11 +114,11 @@ impl ImagePort for GeminiImages {
         request: PreparedImageRequest,
     ) -> Result<ImageResponse> {
         let body = self.body(&request)?;
-        let (parsed, status) = match self.0.send(context, body).await? {
+        let (parsed, diagnostic) = match self.0.send(context, body).await? {
             HttpResult::Json {
                 value: parsed,
-                status,
-            } => (parsed, status),
+                diagnostic,
+            } => (parsed, diagnostic),
             HttpResult::Failure(ExternalResult::Failed {
                 code,
                 usage,
@@ -130,6 +130,7 @@ impl ImagePort for GeminiImages {
                     images: vec![],
                     usage,
                     failure: Some(code),
+                    repair_hint: None,
                     retry_after,
                     provider_diagnostic,
                 });
@@ -142,14 +143,7 @@ impl ImagePort for GeminiImages {
         let mut usage = match self.0.usage(&parsed) {
             Ok(u) => u,
             Err(_) => {
-                return Ok(ImageResponse::UnknownDiagnostic(ProviderDiagnostic {
-                    phase: ProviderFailurePhase::ResponseDecode,
-                    send_certainty: ProviderSendCertainty::Sent,
-                    http_status: Some(status),
-                    provider_type: None,
-                    provider_code: None,
-                    provider_param: None,
-                }));
+                return Ok(ImageResponse::UnknownDiagnostic(diagnostic));
             }
         };
         let mut images = vec![];
@@ -201,8 +195,9 @@ impl ImagePort for GeminiImages {
             images,
             usage,
             failure,
+            repair_hint: None,
             retry_after: None,
-            provider_diagnostic: None,
+            provider_diagnostic: Some(diagnostic),
         })
     }
 }

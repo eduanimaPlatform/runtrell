@@ -87,7 +87,12 @@ impl<
         }
         match bx(|| self.store.record(c, id, result.clone(), now)).await {
             Ok(()) => {}
-            Err(Error::UsageUnknown) => return Ok(ExternalResult::Unknown),
+            Err(Error::UsageUnknown) => {
+                return Ok(result
+                    .provider_diagnostic()
+                    .cloned()
+                    .map_or(ExternalResult::Unknown, ExternalResult::UnknownDiagnostic));
+            }
             Err(e) => return Err(e),
         }
         Ok(result)
@@ -539,11 +544,11 @@ impl<
                     return Ok(pending);
                 }
                 Lookup::Unknown => {
-                    bx(|| {
-                        self.store
-                            .record(c, &op.id, ExternalResult::Unknown, self.clock.now())
-                    })
-                    .await?;
+                    let unknown = op
+                        .provider_diagnostic()
+                        .cloned()
+                        .map_or(ExternalResult::Unknown, ExternalResult::UnknownDiagnostic);
+                    bx(|| self.store.record(c, &op.id, unknown, self.clock.now())).await?;
                     return Err(Error::UsageUnknown);
                 }
             }
@@ -587,10 +592,44 @@ impl<
         let mut ctx = ctx;
         ctx.deadline = deadline;
         ctx.managed_send = ManagedSend::new(c, &op);
-        let result = Box::pin(self.bounded(invoke(ctx), deadline))
-            .await
-            .unwrap_or(Ok(ExternalResult::Unknown))
-            .unwrap_or(ExternalResult::Unknown);
+        let send = ctx.managed_send.clone();
+        let result = match Box::pin(self.bounded(invoke(ctx), deadline)).await {
+            Some(Ok(result)) => result,
+            _ if send.is_some() => {
+                // A managed provider cannot send before consuming its grant.
+                let not_sent = send.as_ref().is_some_and(ManagedSend::revoke_unused);
+                let diagnostic = ProviderDiagnostic {
+                    phase: if not_sent {
+                        ProviderFailurePhase::PreSend
+                    } else {
+                        ProviderFailurePhase::Send
+                    },
+                    send_certainty: if not_sent {
+                        ProviderSendCertainty::DefinitelyNotSent
+                    } else {
+                        ProviderSendCertainty::Unknown
+                    },
+                    http_status: None,
+                    provider_type: None,
+                    provider_code: None,
+                    provider_param: None,
+                    request_id: None,
+                };
+                if not_sent {
+                    ExternalResult::Failed {
+                        physical_evidence: None,
+                        code: "PROVIDER_REQUEST_NOT_SENT".into(),
+                        usage: Usage::measured(0, 0, 0),
+                        retry_after: None,
+                        repair_hint: None,
+                        provider_diagnostic: Some(diagnostic),
+                    }
+                } else {
+                    ExternalResult::UnknownDiagnostic(diagnostic)
+                }
+            }
+            _ => ExternalResult::Unknown,
+        };
         self.persist_result(c, &op.id, result).await
     }
     async fn save(

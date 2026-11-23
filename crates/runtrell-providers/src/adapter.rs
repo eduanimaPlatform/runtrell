@@ -49,7 +49,10 @@ struct State {
 }
 #[allow(clippy::large_enum_variant)] // Forward the original settlement receipt inline.
 pub(crate) enum HttpResult {
-    Json { value: Value, status: u16 },
+    Json {
+        value: Value,
+        diagnostic: ProviderDiagnostic,
+    },
     Failure(ExternalResult),
     UnknownDiagnostic(ProviderDiagnostic),
 }
@@ -93,6 +96,7 @@ fn diagnostic(
                 _ => safe_field(&error["param"]),
             })
             .flatten(),
+        request_id: None,
     }
 }
 fn invalid() -> Error {
@@ -498,22 +502,16 @@ impl Adapter {
                 body,
                 &resolved,
                 Some(input_bound),
-                |parsed| self.normalized_usage(parsed),
+                |_, parsed| self.normalized_usage(parsed),
             )
             .await?
         {
             HttpResult::Json {
                 value: parsed,
-                status,
-            } => Ok(self.submit_result(&parsed, &request).unwrap_or_else(|_| {
-                ExternalResult::UnknownDiagnostic(diagnostic(
-                    ProviderFailurePhase::ResponseDecode,
-                    ProviderSendCertainty::Sent,
-                    Some(status),
-                    &Value::Null,
-                    self.wire,
-                ))
-            })),
+                diagnostic,
+            } => Ok(self
+                .submit_result(&parsed, &request)
+                .unwrap_or_else(|_| ExternalResult::UnknownDiagnostic(diagnostic))),
             HttpResult::Failure(result) => Ok(result),
             HttpResult::UnknownDiagnostic(diagnostic) => {
                 Ok(ExternalResult::UnknownDiagnostic(diagnostic))
@@ -639,9 +637,14 @@ impl Adapter {
 
     #[cfg(feature = "gemini")]
     pub(crate) async fn send(&self, context: &ToolContext, body: Value) -> Result<HttpResult> {
-        self.send_at_with_usage(context, &self.config.endpoint, body, &[], None, |parsed| {
-            self.normalized_usage(parsed)
-        })
+        self.send_at_with_usage(
+            context,
+            &self.config.endpoint,
+            body,
+            &[],
+            None,
+            |_, parsed| self.normalized_usage(parsed),
+        )
         .await
     }
 
@@ -772,7 +775,7 @@ impl Adapter {
         value["input_tokens"].as_u64()
     }
 
-    fn unsent(&self, code: &str) -> HttpResult {
+    pub(crate) fn unsent(&self, code: &str) -> HttpResult {
         HttpResult::Failure(ExternalResult::Failed {
             repair_hint: None,
             physical_evidence: None,
@@ -809,7 +812,8 @@ impl Adapter {
         Ok(timeout)
     }
 
-    pub(crate) async fn send_at_with_usage<F: Fn(&Value) -> Usage + Send>(
+    /// Returns `Err` only before submitting the HTTP request.
+    pub(crate) async fn send_at_with_usage<F: Fn(u16, &Value) -> Usage + Send>(
         &self,
         context: &ToolContext,
         endpoint: &str,
@@ -858,12 +862,15 @@ impl Adapter {
         if key.0.is_empty() || endpoint.contains(&key.0) {
             return Err(invalid());
         }
-        let (header, secret) = if self.wire == Wire::GenerateContent {
-            ("x-goog-api-key", key.0)
+        let (header, value) = if self.wire == Wire::GenerateContent {
+            ("x-goog-api-key", HeaderValue::from_str(&key.0))
         } else {
-            ("authorization", format!("Bearer {}", key.0))
+            (
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {}", key.0)),
+            )
         };
-        let mut value = HeaderValue::from_str(&secret).map_err(|_| invalid())?;
+        let mut value = value.map_err(|_| invalid())?;
         value.set_sensitive(true);
         if self.counts_responses_input() {
             let bound = input_bound.ok_or(Error::ReservationDenied)?;
@@ -893,16 +900,48 @@ impl Adapter {
             .body(bytes)
             .send()
             .await;
-        let Ok(mut response) = response else {
-            return Ok(HttpResult::UnknownDiagnostic(diagnostic(
-                ProviderFailurePhase::Send,
-                ProviderSendCertainty::Unknown,
-                None,
-                &Value::Null,
-                self.wire,
-            )));
+        let mut response = match response {
+            Ok(response) => response,
+            Err(e) if e.is_connect() || e.is_builder() => {
+                return Ok(self.unsent("PROVIDER_CONNECTION_NOT_ESTABLISHED"));
+            }
+            Err(_) => {
+                return Ok(HttpResult::UnknownDiagnostic(diagnostic(
+                    ProviderFailurePhase::Send,
+                    ProviderSendCertainty::Unknown,
+                    None,
+                    &Value::Null,
+                    self.wire,
+                )));
+            }
         };
         let status = response.status().as_u16();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|id| SafeProviderField::try_from(id.to_owned()).ok());
+        let response_diagnostic = |phase, parsed: &Value| {
+            let mut diagnostic = diagnostic(
+                phase,
+                ProviderSendCertainty::Sent,
+                Some(status),
+                parsed,
+                self.wire,
+            );
+            diagnostic.request_id = request_id.clone();
+            for field in [
+                &mut diagnostic.provider_type,
+                &mut diagnostic.provider_code,
+                &mut diagnostic.provider_param,
+                &mut diagnostic.request_id,
+            ] {
+                if field.as_deref().is_some_and(|field| field.contains(&key.0)) {
+                    *field = None;
+                }
+            }
+            diagnostic
+        };
         let retry_header_present = response.headers().contains_key("retry-after");
         let retry_header = response
             .headers()
@@ -922,12 +961,9 @@ impl Adapter {
                 }
                 Ok(None) => break,
                 _ => {
-                    return Ok(HttpResult::UnknownDiagnostic(diagnostic(
+                    return Ok(HttpResult::UnknownDiagnostic(response_diagnostic(
                         ProviderFailurePhase::ResponseRead,
-                        ProviderSendCertainty::Sent,
-                        Some(status),
                         &Value::Null,
-                        self.wire,
                     )));
                 }
             }
@@ -936,12 +972,9 @@ impl Adapter {
             Ok(v) => v,
             Err(_) if !(200..300).contains(&status) => Value::Null,
             Err(_) => {
-                return Ok(HttpResult::UnknownDiagnostic(diagnostic(
+                return Ok(HttpResult::UnknownDiagnostic(response_diagnostic(
                     ProviderFailurePhase::ResponseDecode,
-                    ProviderSendCertainty::Sent,
-                    Some(status),
                     &Value::Null,
-                    self.wire,
                 )));
             }
         };
@@ -984,21 +1017,19 @@ impl Adapter {
             return Ok(HttpResult::Failure(ExternalResult::Failed {
                 repair_hint: None,
                 physical_evidence: None,
-                code: serde_json::to_string(&failure).map_err(|_| invalid())?,
-                usage: normalize(&parsed),
+                code: serde_json::to_string(&failure)
+                    .unwrap_or_else(|_| "PROVIDER_HTTP_ERROR".into()),
+                usage: normalize(status, &parsed),
                 retry_after: delay,
-                provider_diagnostic: Some(diagnostic(
+                provider_diagnostic: Some(response_diagnostic(
                     ProviderFailurePhase::HttpError,
-                    ProviderSendCertainty::Sent,
-                    Some(status),
                     &parsed,
-                    self.wire,
                 )),
             }));
         }
         Ok(HttpResult::Json {
             value: parsed,
-            status,
+            diagnostic: response_diagnostic(ProviderFailurePhase::ResponseDecode, &Value::Null),
         })
     }
     fn reply(&self, v: &Value, request: &PreparedModelRequest) -> Result<ExternalResult> {

@@ -190,6 +190,9 @@ impl ImagePort for OpenAiImages {
         context: &ToolContext,
         request: PreparedImageRequest,
     ) -> Result<ImageResponse> {
+        if context.claim.run != self.adapter.config.run {
+            return Err(Error::PermissionDenied);
+        }
         let body = self.body(&request)?;
         let endpoint = if request.images().is_empty() {
             &self.adapter.config.endpoint
@@ -211,12 +214,35 @@ impl ImagePort for OpenAiImages {
             }
             usage
         };
-        let parsed = match self
+        let normalize_failure = |status, response: &Value| {
+            if (400..500).contains(&status)
+                && response["error"].is_object()
+                && response["data"].is_null()
+                && response["usage"].is_null()
+                && response["svg_usage"].is_null()
+            {
+                return Usage {
+                    model: self.adapter.config.capabilities.limits.model.clone(),
+                    cached: Some(0),
+                    cached_image_input: Some(0),
+                    image_input: Some(0),
+                    image_output: Some(0),
+                    quantities: [("text_input_tokens".into(), 0)].into(),
+                    ..Usage::measured(0, 0, 0)
+                };
+            }
+            normalize(response)
+        };
+        let (parsed, diagnostic) = match self
             .adapter
-            .send_at_with_usage(context, endpoint, body, &[], None, normalize)
-            .await?
+            .send_at_with_usage(context, endpoint, body, &[], None, normalize_failure)
+            .await
+            .unwrap_or_else(|_| self.adapter.unsent("IMAGE_REQUEST_NOT_SENT"))
         {
-            HttpResult::Json { value: parsed, .. } => parsed,
+            HttpResult::Json {
+                value: parsed,
+                diagnostic,
+            } => (parsed, diagnostic),
             HttpResult::Failure(ExternalResult::Failed {
                 code,
                 usage,
@@ -224,10 +250,12 @@ impl ImagePort for OpenAiImages {
                 provider_diagnostic,
                 ..
             }) => {
+                let repair_hint = provider_diagnostic.as_ref().and_then(image_input_hint);
                 return Ok(ImageResponse::Received {
                     images: vec![],
                     usage,
                     failure: Some(code),
+                    repair_hint,
                     retry_after,
                     provider_diagnostic,
                 });
@@ -280,8 +308,41 @@ impl ImagePort for OpenAiImages {
             images,
             usage,
             failure,
+            repair_hint: None,
             retry_after: None,
-            provider_diagnostic: None,
+            provider_diagnostic: Some(diagnostic),
         })
     }
+}
+
+fn image_input_hint(diagnostic: &ProviderDiagnostic) -> Option<String> {
+    if !matches!(diagnostic.http_status, Some(400 | 422))
+        || diagnostic
+            .provider_type
+            .as_deref()
+            .is_some_and(|kind| kind != "invalid_request_error")
+    {
+        return None;
+    }
+    let param = diagnostic.provider_param.as_deref().or_else(|| {
+        matches!(
+            diagnostic.provider_code.as_deref(),
+            Some("invalid_size" | "invalid_image_size" | "unsupported_size")
+        )
+        .then_some("size")
+    })?;
+    let input = match param {
+        "size" => "size",
+        "quality" => "quality",
+        "background" => "background",
+        "complexity" => "complexity",
+        "output_format" => "output_format",
+        "prompt" => "prompt",
+        "image" | "images" | "images[0]" | "images[0].image_url" => "references",
+        "svg" | "svg.model" | "svg.reasoning.effort" => "svg",
+        _ => return None,
+    };
+    Some(format!(
+        "The image provider rejected {input}. Revise it using the tool's input schema before trying again."
+    ))
 }

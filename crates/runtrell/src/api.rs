@@ -1006,6 +1006,9 @@ pub struct ProviderDiagnostic {
     pub provider_type: Option<SafeProviderField>,
     pub provider_code: Option<SafeProviderField>,
     pub provider_param: Option<SafeProviderField>,
+    /// A validated provider request ID from the response, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<SafeProviderField>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ExternalResult {
@@ -1237,6 +1240,11 @@ pub struct ManagedSend {
 }
 
 impl ManagedSend {
+    /// Fence any later use and report whether the grant was still unused.
+    pub(crate) fn revoke_unused(&self) -> bool {
+        !self.used.swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
     pub(crate) fn new(claim: &Claim, op: &Operation) -> Option<Self> {
         Some(Self {
             claim: claim.clone(),
