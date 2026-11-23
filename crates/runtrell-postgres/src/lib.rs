@@ -40,6 +40,7 @@ struct Ledger {
     sessions: BTreeMap<String, (u64, u64)>,
     slots: BTreeMap<String, SlotRequest>,
     queue: VecDeque<QueueEntry>,
+    phase_children_pending: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct SlotWire {

@@ -3,7 +3,9 @@
 Phase seals are stored on the Run row. The seal transaction retires previous
 attempt payloads under the Run lock, releases the old claim and slot, and queues
 the handoff. Late observations and reclaimed execution rows are scrubbed in the
-same transaction. See [Intermediate finalization](completion.md#intermediate-finalization).
+same transaction. Child admission uses the same parent lock and scopes identity
+to the current phase. The seal and final completion check descendant state
+under that parent lock before allowing the conversation to close. See [Intermediate finalization](completion.md#intermediate-finalization).
 
 ## Owner commands
 
@@ -120,7 +122,7 @@ connect自体に必要な権限は次の2つだけで、CREATE・ALTER・ownersh
 
 1. 受付identityだけのadvisory lock（start/admit_child）。
 2. 該当session行（sessionの新規業務/確定）。子受付は親/子のsessionをID昇順で先にlockする。
-3. 対象Run行を`FOR UPDATE`。取消・期限/予算終端の伝播は親から子へlockし、各親のlock取得後に子を検索する。子受付も親行をlockするので、検索中に子孫が抜け落ちない。
+3. 対象Run行を`FOR UPDATE`。取消・期限/予算終端およびフェーズ付き親の非成功終端の伝播は親から子へlockし、各親のlock取得後に子を検索する。子受付も親行をlockするので、検索中に子孫が抜け落ちない。
 4. 対象口座と全祖先のIDを不変の親参照から取得し、**口座ID昇順**の一つのSELECTで`FOR UPDATE`。階層の深さによらず全呼出しが同じ順序を使う。
 5. 更新対象slot/queue、容量permit。slotの直接操作はslot keyだけのadvisory lockも使う。
 
@@ -146,7 +148,7 @@ queueの期限切れentryと通常entryは`FOR UPDATE SKIP LOCKED`で選ぶ。�
 | finalize | 未確定操作・予算・receipt/hash/根拠/設定/検証器版、session context、completion/出力/Run終端 |
 | 取消/回収 | 子孫伝播、queue除去、取消/停止/cleanupの独立状態。未精算予約は保持 |
 
-親Policyの認可もtransaction外で行う。admit_childの新規受付と既存要求の再照会を分け、取消し・期限後の既存受付/精算はowner fenceで継続する。祖先Sessionと同じSessionを子が使用する受付は拒否する。祖先のSession/親関係は不変なので参照だけを取得し、逆順の祖先Run lockは追加しない。
+親Policyの認可もtransaction外で行う。admit_childの新規受付と既存要求の再照会を分け、取消し・期限後の精算はowner fenceで継続する。フェーズ付きの親では開いているフェーズに限り新規受付・再照会が可能。祖先Sessionと同じSessionを子が使用する受付は拒否する。祖先のSession/親関係は不変なので参照だけを取得し、逆順の祖先Run lockは追加しない。
 
 外部model/toolのI/O中はDB transactionを保持しない。`synchronous_commit=on`でWAL flush後だけ成功を返し、保存要求の受領・memory更新と耐久保存完了を区別する。SQL/接続/COMMIT応答不明はStorageとし、安定identityから再照会する。自動再送はしない。更新のlock_timeout=5秒、statement_timeout=30秒。disk喪失・非同期failover・任意外部APIとのexactly-onceは保証しない。
 
@@ -199,7 +201,7 @@ AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_account
 `start_in` は RunSpec.account で既存口座を指定でき、RunSpec.parent で親子関係を
 指定する。独立した後続 Run も同じ口座を共有できる。受付の同 key・同内容は
 同じ Run を返し、異内容は Conflict。親の期限適用前の受付内容（request_spec）を保存・比較し、元の child spec を再実行できる。
-`admit_child_in(tx, claim, operation_key, spec, now)` は通常の子受付と同じ親fence・固定入力spec照合・slot・親操作保存を一つのsavepoint内で行う。固定入力は親のChildRun操作、実効受付specは子のrequest_specへ保存する。受付identityは親Run ID・操作key・元request_keyのJSON tupleで分離する。
+`admit_child_in(tx, claim, operation_key, spec, now)` は通常の子受付と同じ親fence・固定入力spec照合・slot・親操作保存を一つのsavepoint内で行う。固定入力のdigestは親のChildRun操作、実効受付specは子のrequest_specへ保存する。受付identityは親Run ID・保存用操作key・元request_keyのJSON tupleで分離する。フェーズ付きの親では保存用操作keyにフェーズを含める。
 通常の trait API と同じ遷移・lock・保存処理を使い、hook/callback は持たない。
 
 host は同じ transaction で独自の SQL を実行し、最後に commit/rollback する。

@@ -301,7 +301,18 @@ fn refresh_settlement(s: &mut Ledger, h: &RunHandle) {
         };
     }
 }
-fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHandle> {
+fn start(
+    s: &mut Ledger,
+    capacity: &Capacity,
+    mut spec: RunSpec,
+    admitted_child: bool,
+) -> Result<RunHandle> {
+    if !admitted_child
+        && let Some(parent) = &spec.parent
+        && get(s, parent)?.phase.is_some()
+    {
+        return Err(Error::Invalid("phased children require admit_child".into()));
+    }
     let original_digest = (spec.transcript == TranscriptPolicy::PurgeOnSuccess)
         .then(|| digest(&serde_json::json!(spec)));
     if spec.scheduling.weight == 0
@@ -406,6 +417,25 @@ fn start(s: &mut Ledger, capacity: &Capacity, mut spec: RunSpec) -> Result<RunHa
     );
     Ok(h)
 }
+fn check_phase_children(s: &Ledger, run: &RunRecord) -> Result<()> {
+    if run.phase.is_some() {
+        let mut parents = vec![&run.handle];
+        while let Some(parent) = parents.pop() {
+            for child in s
+                .runs
+                .values()
+                .filter(|r| r.spec.parent.as_ref() == Some(parent))
+            {
+                if !child.child_ready() {
+                    return Err(Error::Pending("external reconciliation".into()));
+                }
+                parents.push(&child.handle);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn child_spec(run: &RunHandle, operation_key: &str, spec: &RunSpec, parent: &RunSpec) -> RunSpec {
     let mut effective = spec.clone();
     effective.parent = Some(run.clone());
@@ -427,17 +457,16 @@ fn admit_child(
     parent: &RunRecord,
     now: u64,
 ) -> Result<RunHandle> {
-    if parent.phase.is_some() {
-        return Err(Error::Unsupported("children in phased runs".into()));
-    }
+    parent.check_child_phase(now)?;
     if spec.tenant != c.run.tenant {
         return Err(Error::PermissionDenied);
     }
     if operation_key.is_empty() || spec.request_key.is_empty() {
         return Err(Error::Invalid("empty child operation/request key".into()));
     }
+    let operation_key = PhaseState::child_operation_key(parent.phase.as_ref(), operation_key);
     let request = DispatchRequest::new(
-        operation_key,
+        &operation_key,
         OperationKind::ChildRun,
         "child",
         Value::String(digest(&serde_json::json!(spec))),
@@ -445,6 +474,9 @@ fn admit_child(
     );
     let id = format!("{}:{}:1", key(&c.run), operation_key);
     if let Some(op) = s.operations.get(&id) {
+        if op.retired {
+            return Err(Error::Closed);
+        }
         if op.request != request {
             return Err(Error::Conflict);
         }
@@ -479,7 +511,8 @@ fn admit_child(
     let child = start(
         s,
         capacity,
-        child_spec(&c.run, operation_key, &spec, &parent.spec),
+        child_spec(&c.run, &operation_key, &spec, &parent.spec),
+        true,
     )?;
     s.operations.insert(
         id.clone(),
@@ -525,6 +558,7 @@ impl RunStore for MemoryStore {
             for id in ancestors(s, &run.spec.account)? {
                 s.accounts[&id].admission(true)?;
             }
+            check_phase_children(s, &run)?;
             retire_phase_operations(&mut s.operations, &run)?;
             run.seal_phase(expected, output, receipt, now)?;
             for receipt in s
@@ -603,7 +637,7 @@ impl RunStore for MemoryStore {
         })
     }
     async fn start(&self, spec: RunSpec) -> Result<RunHandle> {
-        self.tx(|s| start(s, &self.capacity, spec))
+        self.tx(|s| start(s, &self.capacity, spec, false))
     }
     async fn admit_child(
         &self,
@@ -691,12 +725,12 @@ impl RunStore for MemoryStore {
                 pending.extend(
                     s.runs
                         .values()
-                        .filter(|r| {
-                            r.spec.parent.as_ref() == Some(&h)
-                                && !matches!(r.state, RunState::Terminal(_))
-                        })
+                        .filter(|r| r.spec.parent.as_ref() == Some(&h))
                         .map(|r| r.handle.clone()),
                 );
+                if matches!(get(s, &h)?.state, RunState::Terminal(_)) {
+                    continue;
+                }
                 let has_ops = s
                     .operations
                     .values()
@@ -722,23 +756,24 @@ impl RunStore for MemoryStore {
     }
     async fn terminate(&self, c: &Claim, t: Terminal, now: u64) -> Result<()> {
         self.tx(|s| {
-            fence(s, c, now, false)?;
+            let run = fence(s, c, now, false)?;
             if t == Terminal::Succeeded {
                 return Err(Error::Invalid("requires finalizer".into()));
             }
-            let cascade = matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_));
+            let cascade = run.phase.is_some()
+                || matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_));
             let mut pending = vec![c.run.clone()];
             while let Some(h) = pending.pop() {
                 if cascade {
                     pending.extend(
                         s.runs
                             .values()
-                            .filter(|r| {
-                                r.spec.parent.as_ref() == Some(&h)
-                                    && !matches!(r.state, RunState::Terminal(_))
-                            })
+                            .filter(|r| r.spec.parent.as_ref() == Some(&h))
                             .map(|r| r.handle.clone()),
                     );
+                }
+                if h != c.run && matches!(get(s, &h)?.state, RunState::Terminal(_)) {
+                    continue;
                 }
                 let outstanding = s.operations.values().any(|op| op.run == h && !op.settled);
                 let r = get_mut(s, &h)?;
@@ -764,6 +799,10 @@ impl RunStore for MemoryStore {
             let r = fence(s, c, now, true)?;
             if r.next_phase().is_some() {
                 return Err(Error::Conflict);
+            }
+            check_phase_children(s, &r)?;
+            if phase_child_admissions_pending(&r, s.operations.values()) {
+                return Err(Error::Pending("external reconciliation".into()));
             }
             for id in ancestors(s, &r.spec.account)? {
                 s.accounts[&id].admission(true)?;

@@ -10,3 +10,12 @@ fn intermediate_completion_reopens_only_after_purge() {
         phase_contracts::intermediate_completion_reopens_only_after_purge(store.clone(), store),
     );
 }
+
+#[test]
+fn children_are_bound_to_the_open_phase() {
+    let store = Arc::new(MemoryStore::default());
+    block_on(phase_contracts::children_are_bound_to_the_open_phase(
+        store.clone(),
+        store,
+    ));
+}

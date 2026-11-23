@@ -136,7 +136,13 @@ pub(crate) fn refresh_settlement(s: &mut Ledger, h: &RunHandle) {
         };
     }
 }
-fn start(s: &mut Ledger, mut spec: RunSpec) -> Result<RunHandle> {
+fn start(s: &mut Ledger, mut spec: RunSpec, admitted_child: bool) -> Result<RunHandle> {
+    if !admitted_child
+        && let Some(parent) = &spec.parent
+        && get(s, parent)?.phase.is_some()
+    {
+        return Err(Error::Invalid("phased children require admit_child".into()));
+    }
     let request_spec = spec.clone();
     if spec.scheduling.weight == 0
         || matches!(
@@ -260,17 +266,16 @@ fn admit_child(
     parent: &RunRecord,
     now: u64,
 ) -> Result<RunHandle> {
-    if parent.phase.is_some() {
-        return Err(Error::Unsupported("children in phased runs".into()));
-    }
+    parent.check_child_phase(now)?;
     if spec.tenant != c.run.tenant {
         return Err(Error::PermissionDenied);
     }
     if operation_key.is_empty() || spec.request_key.is_empty() {
         return Err(Error::Invalid("empty child operation/request key".into()));
     }
+    let operation_key = PhaseState::child_operation_key(parent.phase.as_ref(), operation_key);
     let request = DispatchRequest::new(
-        operation_key,
+        &operation_key,
         OperationKind::ChildRun,
         "child",
         Value::String(digest(&serde_json::json!(spec))),
@@ -278,6 +283,9 @@ fn admit_child(
     );
     let id = format!("{}:{}:1", key(&c.run), operation_key);
     if let Some(op) = s.operations.get(&id) {
+        if op.retired {
+            return Err(Error::Closed);
+        }
         if op.request != request {
             return Err(Error::Conflict);
         }
@@ -308,7 +316,11 @@ fn admit_child(
             kind: OperationKind::ChildRun,
         },
     )?;
-    let child = start(s, child_spec(&c.run, operation_key, &spec, &parent.spec))?;
+    let child = start(
+        s,
+        child_spec(&c.run, &operation_key, &spec, &parent.spec),
+        true,
+    )?;
     s.operations.insert(
         id.clone(),
         Operation {
@@ -352,6 +364,9 @@ impl RunStore for PgStore {
             let mut run = fence(s, c, now, true)?;
             for id in ancestors(s, &run.spec.account)? {
                 s.accounts[&id].admission(true)?;
+            }
+            if s.phase_children_pending {
+                return Err(Error::Pending("external reconciliation".into()));
             }
             retire_phase_operations(&mut s.operations, &run)?;
             run.seal_phase(expected, output, receipt, now)?;
@@ -538,12 +553,12 @@ impl RunStore for PgStore {
                 pending.extend(
                     s.runs
                         .values()
-                        .filter(|r| {
-                            r.spec.parent.as_ref() == Some(&h)
-                                && !matches!(r.state, RunState::Terminal(_))
-                        })
+                        .filter(|r| r.spec.parent.as_ref() == Some(&h))
                         .map(|r| r.handle.clone()),
                 );
+                if matches!(get(s, &h)?.state, RunState::Terminal(_)) {
+                    continue;
+                }
                 let has_ops = s
                     .operations
                     .values()
@@ -1258,7 +1273,7 @@ impl PgStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         spec: RunSpec,
     ) -> Result<RunHandle> {
-        self.tx_in(tx, Scope::Start(&spec.clone()), |s| start(s, spec))
+        self.tx_in(tx, Scope::Start(&spec.clone()), |s| start(s, spec, false))
             .await
     }
     /// Stages atomic child admission in the host transaction. Commit belongs to the host.
@@ -1289,50 +1304,45 @@ impl PgStore {
         t: Terminal,
         now: u64,
     ) -> Result<()> {
-        self.tx_in(
-            tx,
-            Scope::Run(
-                &c.run,
-                if matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_)) {
-                    Mode::Tree
-                } else {
-                    Mode::Close
-                },
-            ),
-            |s| {
-                fence(s, c, now, false)?;
-                if t == Terminal::Succeeded {
-                    return Err(Error::Invalid("requires finalizer".into()));
+        let mode = if matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_)) {
+            Mode::Tree
+        } else {
+            Mode::Close
+        };
+        self.tx_in(tx, Scope::Run(&c.run, mode), |s| {
+            let run = fence(s, c, now, false)?;
+            if t == Terminal::Succeeded {
+                return Err(Error::Invalid("requires finalizer".into()));
+            }
+            let cascade = run.phase.is_some()
+                || matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_));
+            let mut pending = vec![c.run.clone()];
+            while let Some(h) = pending.pop() {
+                if cascade {
+                    pending.extend(
+                        s.runs
+                            .values()
+                            .filter(|r| r.spec.parent.as_ref() == Some(&h))
+                            .map(|r| r.handle.clone()),
+                    );
                 }
-                let cascade = matches!(t, Terminal::DeadlineReached | Terminal::BudgetReached(_));
-                let mut pending = vec![c.run.clone()];
-                while let Some(h) = pending.pop() {
-                    if cascade {
-                        pending.extend(
-                            s.runs
-                                .values()
-                                .filter(|r| {
-                                    r.spec.parent.as_ref() == Some(&h)
-                                        && !matches!(r.state, RunState::Terminal(_))
-                                })
-                                .map(|r| r.handle.clone()),
-                        );
-                    }
-                    let outstanding = s.operations.values().any(|op| op.run == h && !op.settled);
-                    let r = get_mut(s, &h)?;
-                    if !matches!(r.state, RunState::Terminal(_)) {
-                        r.state = RunState::Terminal(t.clone());
-                        r.revision += 1;
-                    }
-                    if outstanding {
-                        r.stop = Progress::Pending;
-                        r.cleanup = Progress::Pending;
-                    }
-                    s.queue.retain(|e| e.key != key(&h));
+                if h != c.run && matches!(get(s, &h)?.state, RunState::Terminal(_)) {
+                    continue;
                 }
-                Ok(())
-            },
-        )
+                let outstanding = s.operations.values().any(|op| op.run == h && !op.settled);
+                let r = get_mut(s, &h)?;
+                if !matches!(r.state, RunState::Terminal(_)) {
+                    r.state = RunState::Terminal(t.clone());
+                    r.revision += 1;
+                }
+                if outstanding {
+                    r.stop = Progress::Pending;
+                    r.cleanup = Progress::Pending;
+                }
+                s.queue.retain(|e| e.key != key(&h));
+            }
+            Ok(())
+        })
         .await
     }
     /// Stages successful completion after the normal fencing and receipt checks.
@@ -1352,6 +1362,12 @@ impl PgStore {
             let r = fence(s, c, now, true)?;
             if r.next_phase().is_some() {
                 return Err(Error::Conflict);
+            }
+            if s.phase_children_pending {
+                return Err(Error::Pending("external reconciliation".into()));
+            }
+            if phase_child_admissions_pending(&r, s.operations.values()) {
+                return Err(Error::Pending("external reconciliation".into()));
             }
             for id in ancestors(s, &r.spec.account)? {
                 s.accounts[&id].admission(true)?;

@@ -958,15 +958,19 @@ struct PausedRepairFailure {
     store: Arc<MemoryStore>,
     recorded: Arc<AtomicBool>,
     revoked: Arc<AtomicBool>,
+    correctable: bool,
     calls: Arc<AtomicUsize>,
 }
 
 impl Tool for PausedRepairFailure {
     async fn authorize_input(&self, _: &RunRecord, _: &Value) -> Result<()> {
-        if self.revoked.load(Ordering::SeqCst) {
-            Err(Error::PermissionDenied)
-        } else {
-            Ok(())
+        match (self.revoked.load(Ordering::SeqCst), self.correctable) {
+            (false, _) => Ok(()),
+            (true, false) => Err(Error::PermissionDenied),
+            (true, true) => Err(Error::InvalidToolInput {
+                path: "/artifact".into(),
+                hint: "Choose an authorized artifact.".into(),
+            }),
         }
     }
 
@@ -998,6 +1002,15 @@ impl Tool for PausedRepairFailure {
 
 #[test]
 fn revoked_input_blocks_replay_of_settled_repair_failure() {
+    assert_revocation_blocks_replay(false);
+}
+
+#[test]
+fn typed_rejection_blocks_replay_of_settled_repair_failure() {
+    assert_revocation_blocks_replay(true);
+}
+
+fn assert_revocation_blocks_replay(correctable: bool) {
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let (_, claim) = start(&store).await;
@@ -1019,6 +1032,7 @@ fn revoked_input_blocks_replay_of_settled_repair_failure() {
                 store: store.clone(),
                 recorded: recorded.clone(),
                 revoked: revoked.clone(),
+                correctable,
                 calls: calls.clone(),
             }],
             policy: FakePolicy::default(),
@@ -1054,4 +1068,11 @@ fn revoked_input_blocks_replay_of_settled_repair_failure() {
                 .all(|message| message.role != "tool")
         );
     });
+}
+
+#[test]
+fn correctable_input_authorization() {
+    block_on(tool_failure_contracts::correctable_input_authorization(
+        Arc::new(MemoryStore::default()),
+    ));
 }

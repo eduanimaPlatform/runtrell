@@ -17,12 +17,6 @@ use std::{future::Future, sync::Arc};
 mod context;
 mod progress;
 
-fn child_ready(run: &RunRecord) -> bool {
-    matches!(run.state, RunState::Terminal(_))
-        && matches!(run.settlement, Progress::NotRequired | Progress::Confirmed)
-        && matches!(run.stop, Progress::NotRequired | Progress::Confirmed)
-        && matches!(run.cleanup, Progress::NotRequired | Progress::Confirmed)
-}
 fn child_result(handle: &RunHandle) -> ExternalResult {
     ExternalResult::Applied {
         physical_evidence: None,
@@ -155,7 +149,7 @@ impl<
                     let handle = op.child_handle()?;
                     bx(|| self.store.get(&handle)).await?
                 };
-                if child_ready(&child) {
+                if child.child_ready() {
                     Progress::NotRequired
                 } else {
                     Progress::Pending
@@ -196,6 +190,7 @@ impl<
         .await
     }
     /// Atomically admits a child and retains its slot until terminal reconciliation.
+    /// The logical key is scoped to the parent's current phase, if configured.
     pub async fn spawn_child(&self, c: &Claim, key: &str, spec: RunSpec) -> Result<RunHandle> {
         let parent = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&parent, "child", "child")?;
@@ -203,10 +198,13 @@ impl<
     }
     /// Return the child's saved terminal outcome, or yield the parent execution
     /// permit while its child/cleanup/settlement is still pending. No new work.
+    /// Pass the same logical key used to spawn the child in the current phase.
     pub async fn join_child(&self, c: &Claim, key: &str) -> Result<RunRecord> {
         let parent = bx(|| self.store.check(c, self.clock.now(), false)).await?;
         self.policy.authorize(&parent, "child", "reconcile")?;
-        let op = bx(|| self.store.operation(&c.run, key))
+        parent.check_child_phase(self.clock.now())?;
+        let stored_key = PhaseState::child_operation_key(parent.phase.as_ref(), key);
+        let op = bx(|| self.store.operation(&c.run, &stored_key))
             .await?
             .ok_or(Error::NotFound)?;
         let child = {
@@ -216,16 +214,20 @@ impl<
         if child.spec.parent.as_ref() != Some(&c.run) {
             return Err(Error::Conflict);
         }
-        if !op.settled {
-            if !child_ready(&child) {
-                if !matches!(parent.state, RunState::Terminal(_)) {
-                    let reason = format!("child:{key}");
-                    bx(|| self.store.wait(c, &reason, self.clock.now())).await?;
-                }
-                return Err(Error::Pending(format!("child:{key}")));
+        if !child.child_ready() {
+            let reason = format!("child:{key}");
+            if !matches!(parent.state, RunState::Terminal(_)) {
+                bx(|| self.store.wait(c, &reason, self.clock.now())).await?;
             }
+            return Err(Error::Pending(reason));
+        }
+        if !op.settled {
             self.persist_result(c, &op.id, child_result(&child.handle))
                 .await?;
+        }
+        if parent.phase.is_some() {
+            let current = bx(|| self.store.check(c, self.clock.now(), false)).await?;
+            current.check_child_phase(self.clock.now())?;
         }
         Ok(child)
     }
@@ -308,7 +310,7 @@ impl<
                 if child.spec.parent.as_ref() != Some(&c.run) {
                     return Err(Error::Conflict);
                 }
-                if child_ready(&child) {
+                if child.child_ready() {
                     Lookup::Found(child_result(&child.handle))
                 } else {
                     Lookup::Pending
@@ -882,6 +884,7 @@ impl<
             bx(|| self.reconcile(c)).await?;
             return bx(|| self.store.get(&c.run)).await;
         }
+        r.check_child_phase(self.clock.now())?;
         if bx(|| self.store.list_operations(&c.run))
             .await?
             .iter()
@@ -1054,14 +1057,15 @@ impl<
         let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
         self.policy.authorize(&current, "finalize", "finalize")?;
         bx(|| self.store.finalization_allowed(c, self.clock.now())).await?;
-        if (current.spec.transcript == TranscriptPolicy::PurgeOnSuccess
-            || current.next_phase().is_some())
-            && bx(|| self.store.list_operations(&c.run))
-                .await?
-                .iter()
-                .any(|op| !op.transcript_purge_ready())
-        {
-            return Err(Error::Pending("external reconciliation".into()));
+        let purge = current.spec.transcript == TranscriptPolicy::PurgeOnSuccess
+            || current.next_phase().is_some();
+        if purge || current.phase.is_some() {
+            let operations = bx(|| self.store.list_operations(&c.run)).await?;
+            if (purge && operations.iter().any(|op| !op.transcript_purge_ready()))
+                || phase_child_admissions_pending(&current, operations.iter())
+            {
+                return Err(Error::Pending("external reconciliation".into()));
+            }
         }
         let parsed = schema::parse_json(raw.as_bytes());
         let output = parsed
@@ -1739,6 +1743,9 @@ impl<
                 .ok_or_else(|| Error::Unsupported(name.clone()))?;
             let descriptor = tool.descriptor();
             let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
+            if !current.allows_phase_tool(&descriptor.name) {
+                return Err(Error::PermissionDenied);
+            }
             self.policy
                 .authorize(&current, &descriptor.name, &descriptor.permission)?;
             let prefix = operation_prefix(&current);
@@ -1759,37 +1766,37 @@ impl<
             let mut fresh_quote = None;
             let mut old = None;
             if diagnostics.is_empty() && matches!(call, PendingToolCall::Execute(_)) {
-                // Live admission precedes any input-specific quote. Replaying an
-                // existing operation uses its original reserve and never requotes.
-                tool.authorize_input(&current, &input).await?;
                 old = bx(|| self.store.operation(&c.run, &key)).await?;
-                if let Some(op) = &old
-                    && op.request.input != input
-                {
-                    return Err(Error::Conflict);
-                }
-                if old.is_none() {
-                    match tool.quote(&current, &input).await {
-                        Ok(quote) => fresh_quote = Some(quote),
-                        Err(Error::InvalidToolInput { path, hint }) => {
-                            diagnostics.push(Diagnostic {
-                                repair: DiagnosticRepair::Agent,
-                                observation: None,
-                                code: "TOOL_INPUT_INVALID".into(),
-                                severity: "error".into(),
-                                path,
-                                schema_path: None,
-                                artifact: None,
-                                file: None,
-                                field: None,
-                                span: None,
-                                position: None,
-                                cause: "Tool input rejected by preflight".into(),
-                                hint,
-                            })
-                        }
-                        Err(error) => return Err(error),
+                // Recheck live authorization even for a saved attempt. Only a
+                // new invocation can turn an input denial into model feedback.
+                let authorization = tool.authorize_input(&current, &input).await;
+                let preflight = match (authorization, &old) {
+                    (Ok(()), None) => tool.quote(&current, &input).await.map(Some),
+                    (Ok(()), Some(op)) if op.request.input == input => Ok(None),
+                    (Ok(()), Some(_)) => return Err(Error::Conflict),
+                    (Err(Error::InvalidToolInput { .. }), Some(_)) => {
+                        return Err(Error::PermissionDenied);
                     }
+                    (Err(error), _) => Err(error),
+                };
+                match preflight {
+                    Ok(quote) => fresh_quote = quote,
+                    Err(Error::InvalidToolInput { path, hint }) => diagnostics.push(Diagnostic {
+                        repair: DiagnosticRepair::Agent,
+                        observation: None,
+                        code: "TOOL_INPUT_INVALID".into(),
+                        severity: "error".into(),
+                        path,
+                        schema_path: None,
+                        artifact: None,
+                        file: None,
+                        field: None,
+                        span: None,
+                        position: None,
+                        cause: "Tool input rejected by preflight".into(),
+                        hint,
+                    }),
+                    Err(error) => return Err(error),
                 }
             }
             if !diagnostics.is_empty() {

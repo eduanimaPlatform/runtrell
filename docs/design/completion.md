@@ -121,8 +121,23 @@ Only the host-projected input and the next phase's configured and authorized
 tools enter the new conversation. The last phase uses the Run's regular finalizer
 and terminal transcript retention policy.
 
-The configuration and identifiers contain host metadata. Child admission is
-unavailable from phased Runs.
+Use `Runtime::spawn_child` and `Runtime::join_child` with a current parent
+claim and a stable logical operation key. The store scopes the key to the
+open phase, so a replacement worker can recover the same child within that
+phase and a later phase starts with a fresh namespace. A child inherits the
+parent's budget account and the earlier deadline. Its input comes from its
+own specification.
+
+A seal or final completion waits for all descendants to reach terminal
+outcomes with settlement, stop and cleanup resolved, and for the parent's
+child admissions to settle. Cancel a child explicitly if the phase no longer
+needs its result, then reconcile and retry completion. Parent cancellation
+and non-success termination stop new work in descendants, with outstanding
+work still subject to reconciliation. Sealing retires the parent operations;
+child records retain their own transcript policies. The host must include any
+child-owned payloads and grants that require phase erasure in its purge hook.
+A phased parent's cancelled, expired, pending-purge and terminal states
+prevent admission and join; use reconciliation for outstanding settlement.
 
 `Runtime::drive` returns the Run at `Finalizing` after the intermediate seal.
 The store queues the same Run and releases the active slot. A worker claims it

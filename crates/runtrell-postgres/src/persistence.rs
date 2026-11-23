@@ -230,18 +230,29 @@ impl PgStore {
         }
         Ok(())
     }
-    async fn load_parent_spec(&self, conn: &mut PgConnection, h: &RunHandle) -> Result<RunSpec> {
-        let value: Value = sqlx::query_scalar(&format!(
-            "SELECT spec FROM {}.runs WHERE tenant=$1 AND id=$2",
-            self.schema
+    async fn phase_children_pending(&self, conn: &mut PgConnection, h: &RunHandle) -> Result<bool> {
+        sqlx::query_scalar(&format!(
+            "WITH RECURSIVE descendants AS (
+                SELECT tenant,id,state,stop,cleanup,settlement,erasure
+                FROM {schema}.runs WHERE parent_tenant=$1 AND parent_id=$2
+                UNION ALL
+                SELECT r.tenant,r.id,r.state,r.stop,r.cleanup,r.settlement,r.erasure
+                FROM {schema}.runs r JOIN descendants d
+                    ON r.parent_tenant=d.tenant AND r.parent_id=d.id
+            )
+            SELECT EXISTS (
+                SELECT FROM descendants WHERE erasure='pending' OR NOT (state ? 'Terminal')
+                OR stop #>> '{{}}' NOT IN ('NotRequired','Confirmed')
+                OR cleanup #>> '{{}}' NOT IN ('NotRequired','Confirmed')
+                OR settlement #>> '{{}}' NOT IN ('NotRequired','Confirmed')
+            )",
+            schema = self.schema,
         ))
         .bind(&h.tenant)
         .bind(&h.id)
-        .fetch_optional(conn)
+        .fetch_one(conn)
         .await
-        .map_err(|e| storage("PgStore::load_parent_spec", e))?
-        .ok_or(Error::NotFound)?;
-        decode(value)
+        .map_err(|e| storage("PgStore::phase_children_pending", e))
     }
     async fn load_child(
         &self,
@@ -253,8 +264,24 @@ impl PgStore {
     ) -> Result<Ledger> {
         // Lock identity, both sessions in stable order, parent, accounts, then permits.
         // Reusing scoped loaders below only reacquires locks already held by this tx.
-        let parent = self.load_parent_spec(conn, h).await?;
-        let effective = engine::child_spec(h, operation_key, spec, &parent);
+        let (parent, phase, erasure): (Value, Option<Value>, Option<String>) =
+            sqlx::query_as(&format!(
+                "SELECT spec,phase,erasure FROM {}.runs WHERE tenant=$1 AND id=$2",
+                self.schema
+            ))
+            .bind(&h.tenant)
+            .bind(&h.id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| storage("PgStore::load_child", e))?
+            .ok_or(Error::NotFound)?;
+        if erasure.is_some() {
+            return Err(Error::Closed);
+        }
+        let parent: RunSpec = decode(parent)?;
+        let phase: Option<PhaseState> = decode(phase.unwrap_or(Value::Null))?;
+        let stored_key = PhaseState::child_operation_key(phase.as_ref(), operation_key);
+        let effective = engine::child_spec(h, &stored_key, spec, &parent);
         let spec = &effective;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!(
@@ -276,13 +303,17 @@ impl PgStore {
                 .await?;
         }
         let request = DispatchRequest::new(
-            operation_key,
+            &stored_key,
             OperationKind::ChildRun,
             "child",
             Value::Null,
             Amount::default(),
         );
         let mut parent_state = Box::pin(self.load(conn, Scope::Begin(h, &request), write)).await?;
+        let locked = parent_state.runs.get(&key(h)).ok_or(Error::NotFound)?;
+        if PhaseState::child_operation_key(locked.phase.as_ref(), operation_key) != stored_key {
+            return Err(Error::OwnershipLost);
+        }
         // Session/parent membership is immutable. Read the lineage to reject
         // session predecessor cycles without locking ancestors in reverse order.
         let mut ancestor = parent.parent.clone();
@@ -409,24 +440,27 @@ impl PgStore {
                     s.runs.insert(key(&r.handle), r);
                 }
                 // An existing receipt requires no new admission or parent/session mutation.
-                if s.runs.is_empty() {
+                let new = s.runs.is_empty();
+                if new {
                     self.session(conn, &mut s, &spec.tenant, spec.session.as_deref(), write)
                         .await?;
-                    if let Some(h) = &spec.parent {
-                        for v in self
-                            .rows(
-                                conn,
-                                "runs",
-                                "tenant=$1 AND id=$2",
-                                &[&h.tenant, &h.id],
-                                write,
-                            )
-                            .await?
-                        {
-                            let r = load_run(&mut s, v)?;
-                            s.runs.insert(key(h), r);
-                        }
+                }
+                if let Some(h) = &spec.parent {
+                    for v in self
+                        .rows(
+                            conn,
+                            "runs",
+                            "tenant=$1 AND id=$2",
+                            &[&h.tenant, &h.id],
+                            write && new,
+                        )
+                        .await?
+                    {
+                        let r = load_run(&mut s, v)?;
+                        s.runs.insert(key(h), r);
                     }
+                }
+                if new {
                     self.accounts(conn, &mut s, &spec.account, false).await?;
                 }
             }
@@ -447,6 +481,7 @@ impl PgStore {
                             .await?;
                     }
                 }
+                let mut tree = matches!(mode, Mode::Tree);
                 let mut pending = VecDeque::from([h.clone()]);
                 while let Some(at) = pending.pop_front() {
                     for v in self
@@ -460,15 +495,16 @@ impl PgStore {
                         .await?
                     {
                         let r = load_run(&mut s, v)?;
+                        tree |= at == *h && matches!(mode, Mode::Close) && r.phase.is_some();
                         s.runs.insert(key(&at), r);
-                        if matches!(mode, Mode::Tree) {
+                        if tree {
                             // Discover children only after locking their parent: child admission
                             // takes the same parent lock, so newly committed descendants cannot escape.
                             for v in self
                                 .rows(
                                     conn,
                                     "runs",
-                                    "parent_tenant=$1 AND parent_id=$2 ORDER BY tenant,id",
+                                    "parent_tenant=$1 AND parent_id=$2 AND erasure IS NULL ORDER BY tenant,id",
                                     &[&at.tenant, &at.id],
                                     false,
                                 )
@@ -489,6 +525,13 @@ impl PgStore {
                             let prior = load_run(&mut s, v)?; s.runs.insert(key(&prior.handle),prior);
                         }
                     }
+                    // The parent lock serializes direct child admission. A
+                    // descendant can add work only while nonterminal, which
+                    // this snapshot treats as a pending phase close.
+                    if r.phase.is_some() && matches!(mode, Mode::Finalize | Mode::Phase) {
+                        s.phase_children_pending =
+                            Box::pin(self.phase_children_pending(conn, h)).await?;
+                    }
                     if matches!(
                         mode,
                         Mode::Budget | Mode::Work | Mode::Finalize | Mode::Phase
@@ -496,7 +539,7 @@ impl PgStore {
                         self.accounts(conn, &mut s, &r.spec.account, write).await?;
                     }
                 }
-                let handles: Vec<_> = if matches!(mode, Mode::Tree) {
+                let handles: Vec<_> = if tree {
                     s.runs.values().map(|r| r.handle.clone()).collect()
                 } else {
                     vec![h.clone()]

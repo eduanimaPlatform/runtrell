@@ -37,6 +37,17 @@ pub struct PhaseState {
     pub seals: Vec<PhaseSeal>,
 }
 
+impl PhaseState {
+    /// Resolve a logical child operation key before acquiring the admission locks.
+    #[doc(hidden)]
+    pub fn child_operation_key(phase: Option<&Self>, key: &str) -> String {
+        phase.map_or_else(
+            || key.to_owned(),
+            |phase| format!("phase:{}:child:{key}", phase.seals.len()),
+        )
+    }
+}
+
 impl RunSpec {
     #[doc(hidden)]
     pub fn initialize_phases(&mut self) -> Result<Option<PhaseState>> {
@@ -90,6 +101,27 @@ impl RunRecord {
             || self
                 .active_phase()
                 .is_some_and(|phase| phase.tools.contains(tool))
+    }
+
+    #[doc(hidden)]
+    pub fn check_child_phase(&self, now: u64) -> Result<()> {
+        if self.phase.is_some() {
+            if self.cancel.is_some() || matches!(self.state, RunState::Terminal(_)) {
+                return Err(Error::Closed);
+            }
+            if self.spec.deadline.is_some_and(|deadline| now >= deadline) {
+                return Err(Error::Deadline);
+            }
+            self.phase_work_allowed()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn child_ready(&self) -> bool {
+        matches!(self.state, RunState::Terminal(_))
+            && [&self.settlement, &self.stop, &self.cleanup]
+                .into_iter()
+                .all(|progress| matches!(progress, Progress::NotRequired | Progress::Confirmed))
     }
 
     #[doc(hidden)]
@@ -172,6 +204,21 @@ impl RunRecord {
         self.revision += 1;
         Ok(())
     }
+}
+
+/// Phase completion waits for the child admission to release its lifetime slot.
+#[doc(hidden)]
+pub fn phase_child_admissions_pending<'a>(
+    run: &RunRecord,
+    mut operations: impl Iterator<Item = &'a Operation>,
+) -> bool {
+    run.phase.is_some()
+        && operations.any(|op| {
+            op.run == run.handle
+                && !op.retired
+                && !op.settled
+                && op.request.kind == OperationKind::ChildRun
+        })
 }
 
 /// Retire every attempt in the sealed conversation after checking settlement.

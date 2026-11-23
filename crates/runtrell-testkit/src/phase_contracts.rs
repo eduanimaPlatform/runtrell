@@ -168,3 +168,244 @@ pub async fn intermediate_completion_reopens_only_after_purge<S: ControlStore>(
     assert!(requests[2].images.is_empty());
     assert!(requests[2].attachments.is_empty());
 }
+
+/// Exercise the same phase/child boundary with both control stores.
+pub async fn children_are_bound_to_the_open_phase<S: ControlStore>(
+    store: Arc<S>,
+    reopened: Arc<S>,
+) {
+    let account = store
+        .create_account("t", Amount::new(10_000, 10_000), None)
+        .await
+        .unwrap();
+    let mut spec = RunSpec::new("t", "parent", account.clone(), FIRST_INPUT);
+    spec.deadline = Some(300);
+    spec.phases = ["collect", "publish"]
+        .into_iter()
+        .map(|id| PhaseConfig {
+            id: id.into(),
+            tools: Default::default(),
+            completion: CompletionPolicy::default(),
+        })
+        .collect();
+    let parent = store.start(spec.clone()).await.unwrap();
+    let first = store.claim(&parent, "first", 0, 10).await.unwrap();
+    let child_spec = RunSpec::new("t", "child", "overridden".into(), "child-only prompt");
+    let rt = Runtime {
+        store: reopened.clone(),
+        model: FakeModel::default(),
+        tools: Vec::<BusinessTool>::new(),
+        policy: FakePolicy::default(),
+        clock: TestClock::default(),
+        validator: Arc::new(DecisionValidator::default()),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let (created, duplicate) = tokio::join!(
+        store.admit_child(&first, "review", child_spec.clone(), 0),
+        rt.spawn_child(&first, "review", child_spec.clone())
+    );
+    let child = created.unwrap();
+    assert_eq!(duplicate.unwrap(), child);
+    let initial = store.get(&child).await.unwrap();
+    assert_eq!(initial.spec.parent, Some(parent.clone()));
+    assert_eq!(initial.spec.account, account);
+    assert_eq!(initial.spec.deadline, Some(300));
+    assert_eq!(initial.spec.input, "child-only prompt");
+    assert!(initial.checkpoint.is_none());
+    assert!(initial.phase.is_none());
+    let mut bypass = RunSpec::new("t", "bypass", account.clone(), "direct child");
+    bypass.parent = Some(parent.clone());
+    assert!(store.start(bypass).await.is_err());
+
+    rt.clock.set(10);
+    let current = reopened
+        .claim(&parent, "replacement", 10, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        rt.join_child(&first, "review").await,
+        Err(Error::OwnershipLost)
+    );
+    assert_eq!(
+        rt.spawn_child(&current, "review", child_spec.clone())
+            .await
+            .unwrap(),
+        child
+    );
+    let mut changed = child_spec.clone();
+    changed.input = "different".into();
+    assert_eq!(
+        rt.spawn_child(&current, "review", changed).await,
+        Err(Error::Conflict)
+    );
+    assert!(matches!(
+        rt.join_child(&current, "review").await,
+        Err(Error::Pending(_))
+    ));
+
+    let before = store.get(&parent).await.unwrap();
+    let output = json!({"decision":"sealed"});
+    let receipt = rt.validator.validate(&before, &output).unwrap();
+    assert!(matches!(
+        store
+            .seal_phase(
+                &current,
+                before.revision,
+                output.clone(),
+                receipt.clone(),
+                10
+            )
+            .await,
+        Err(Error::Pending(_))
+    ));
+    assert_eq!(store.get(&parent).await.unwrap(), before);
+    assert!(!store.list_operations(&parent).await.unwrap()[0].settled);
+
+    let child_claim = store.claim(&child, "child-worker", 10, 100).await.unwrap();
+    let attempt = store
+        .begin(
+            &child_claim,
+            DispatchRequest::new(
+                "work",
+                OperationKind::Model,
+                "work",
+                Value::Null,
+                Amount::new(20, 20),
+            ),
+            10,
+        )
+        .await
+        .unwrap();
+    store
+        .mark_sent(&child_claim, &attempt.id, 10)
+        .await
+        .unwrap();
+    store
+        .record(
+            &child_claim,
+            &attempt.id,
+            ExternalResult::Applied {
+                output: json!({"result":"ready"}),
+                usage: Usage::measured(3, 2, 7),
+                physical_evidence: None,
+                external_id: None,
+            },
+            10,
+        )
+        .await
+        .unwrap();
+    let child_record = store.get(&child).await.unwrap();
+    let child_output = json!({"decision":"approved"});
+    let child_receipt = rt.validator.validate(&child_record, &child_output).unwrap();
+    let completion = DecisionFinalizer
+        .finalize(&child_record, child_output, child_receipt)
+        .unwrap();
+    store.finalize(&child_claim, completion, 10).await.unwrap();
+    let joined = rt.join_child(&current, "review").await.unwrap();
+    assert_eq!(joined.state, RunState::Terminal(Terminal::Succeeded));
+    assert_eq!(rt.join_child(&current, "review").await.unwrap(), joined);
+    assert_eq!(
+        store.account(&account).await.unwrap().used,
+        Amount::new(5, 7)
+    );
+    let operation = store.list_operations(&parent).await.unwrap().pop().unwrap();
+    assert!(operation.settled);
+    assert_eq!(operation.send_count, 0);
+
+    let revision = store.get(&parent).await.unwrap().revision;
+    let sealed = store
+        .seal_phase(&current, revision, output, receipt, 10)
+        .await
+        .unwrap();
+    assert!(sealed.checkpoint.is_none());
+    assert!(sealed.spec.input.is_empty());
+    assert!(
+        store
+            .operation(&parent, &operation.request.key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        rt.join_child(&current, "review").await,
+        Err(Error::OwnershipLost)
+    );
+    let next = reopened.claim(&parent, "next", 10, 100).await.unwrap();
+    assert!(matches!(
+        rt.spawn_child(&next, "review", child_spec.clone()).await,
+        Err(Error::Pending(_))
+    ));
+    assert!(matches!(
+        rt.join_child(&next, "review").await,
+        Err(Error::Pending(_))
+    ));
+    let revision = store.get(&parent).await.unwrap().revision;
+    store
+        .open_phase(&next, revision, PhaseInput::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(rt.join_child(&next, "review").await, Err(Error::NotFound));
+    let other = rt
+        .spawn_child(&next, "review", child_spec.clone())
+        .await
+        .unwrap();
+    assert_ne!(other, child);
+
+    let final_record = store.get(&parent).await.unwrap();
+    let final_output = json!({"decision":"complete"});
+    let final_receipt = rt.validator.validate(&final_record, &final_output).unwrap();
+    let final_completion = DecisionFinalizer
+        .finalize(&final_record, final_output, final_receipt)
+        .unwrap();
+    assert!(matches!(
+        store.finalize(&next, final_completion, 10).await,
+        Err(Error::Pending(_))
+    ));
+
+    store.cancel(&parent, "cancelled").await.unwrap();
+    for key in ["review", "new"] {
+        assert_eq!(
+            rt.spawn_child(&next, key, child_spec.clone()).await,
+            Err(Error::Closed)
+        );
+    }
+    assert_eq!(rt.join_child(&next, "review").await, Err(Error::Closed));
+    assert_eq!(
+        store.get(&other).await.unwrap().state,
+        RunState::Terminal(Terminal::Cancelled("cancelled".into()))
+    );
+    rt.reconcile(&next).await.unwrap();
+    assert!(
+        store
+            .list_operations(&parent)
+            .await
+            .unwrap()
+            .iter()
+            .all(|op| op.settled)
+    );
+    assert_eq!(
+        store.account(&account).await.unwrap().used,
+        Amount::new(5, 7)
+    );
+
+    spec.request_key = "failing-parent".into();
+    let failing = store.start(spec).await.unwrap();
+    let claim = store.claim(&failing, "worker", 10, 100).await.unwrap();
+    let child = rt.spawn_child(&claim, "review", child_spec).await.unwrap();
+    let failure = Terminal::Failed("parent stopped".into());
+    store.terminate(&claim, failure.clone(), 10).await.unwrap();
+    assert_eq!(
+        store.get(&child).await.unwrap().state,
+        RunState::Terminal(failure)
+    );
+    assert_eq!(rt.join_child(&claim, "review").await, Err(Error::Closed));
+    rt.reconcile(&claim).await.unwrap();
+    assert!(
+        store
+            .list_operations(&failing)
+            .await
+            .unwrap()
+            .iter()
+            .all(|op| op.settled)
+    );
+}

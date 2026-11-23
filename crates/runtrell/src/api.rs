@@ -1536,6 +1536,12 @@ pub trait Tool: Send + Sync {
     /// Recheck live authorization for this exact model input before either a new
     /// invocation or replaying a settled result into model history. This hook
     /// must not acquire or expose the referenced content.
+    ///
+    /// Return `Error::InvalidToolInput` with a JSON Pointer and a model-safe
+    /// hint for a correctable input to a new call. Runtime answers that call
+    /// with `TOOL_INPUT_INVALID` before quoting or starting an attempt. On a
+    /// saved attempt the same error denies replay. Use `PermissionDenied` for
+    /// Run, principal, phase or grant failures that the model cannot correct.
     fn authorize_input(
         &self,
         _run: &RunRecord,
@@ -1722,13 +1728,15 @@ pub trait RunStore: Send + Sync {
         spec: &RunSpec,
     ) -> impl std::future::Future<Output = Result<Option<RunHandle>>> + Send;
     /// Atomically admit a request or return the run for the same original spec;
-    /// concurrent equal requests must never create more than one run.
+    /// concurrent equal requests must never create more than one run. Children
+    /// of phased Runs must be started with `admit_child`.
     fn start(&self, spec: RunSpec) -> impl std::future::Future<Output = Result<RunHandle>> + Send;
     /// Fence the parent and atomically persist a child, queue entry, lifetime slot,
     /// and its handle in the parent operation. Equal input is idempotent; any
-    /// changed spec (including account/config) conflicts. Existing receipts remain
-    /// readable after cancellation/deadline; only new creation requires an open
-    /// parent. Ancestor Session reuse is rejected. No external send occurs.
+    /// changed spec (including account/config) conflicts. For a phased parent the
+    /// logical key and receipt are scoped to the current open phase. For an
+    /// unphased parent existing receipts remain readable after cancellation or
+    /// deadline. Ancestor Session reuse is rejected. No external send occurs.
     /// Trusted persistence boundary: callers must authorize through Runtime or
     /// host policy before entering the transaction; the store invokes no policy.
     fn admit_child(

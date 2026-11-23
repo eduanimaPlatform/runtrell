@@ -164,3 +164,13 @@ async fn seal_is_atomic_and_disallows_late_payloads_and_retired_replay() {
     );
     assert!(store.late_results(&next, 6).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn children_are_bound_to_the_open_phase() {
+    let (pool, schema, store) = store().await;
+    let reopened = PgStore::connect(pool, &schema, Capacity::default())
+        .await
+        .unwrap();
+    phase_contracts::children_are_bound_to_the_open_phase(Arc::new(store), Arc::new(reopened))
+        .await;
+}

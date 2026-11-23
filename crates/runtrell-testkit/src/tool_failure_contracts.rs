@@ -542,3 +542,141 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         );
     }
 }
+
+struct ScopedInput {
+    quotes: Arc<AtomicUsize>,
+    invocations: Arc<AtomicUsize>,
+}
+
+impl Tool for ScopedInput {
+    fn descriptor(&self) -> ToolDescriptor {
+        BusinessTool::new("scoped_read").descriptor()
+    }
+
+    async fn authorize_input(&self, _: &RunRecord, input: &Value) -> Result<()> {
+        match input["path"].as_str() {
+            Some("visible.txt") => Ok(()),
+            Some("blocked.txt") => Err(Error::InvalidToolInput {
+                path: "/path".into(),
+                hint: "Choose a path in the current tool scope.".into(),
+            }),
+            _ => Err(Error::PermissionDenied),
+        }
+    }
+
+    async fn quote(&self, _: &RunRecord, input: &Value) -> Result<Amount> {
+        assert_eq!(input["path"], "visible.txt");
+        self.quotes.fetch_add(1, Ordering::SeqCst);
+        Ok(Amount::new(10, 10))
+    }
+
+    async fn invoke(&self, _: &ToolContext, input: Value) -> Result<ExternalResult> {
+        assert_eq!(input["path"], "visible.txt");
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Ok(ExternalResult::Applied {
+            physical_evidence: None,
+            output: json!({"found":true}),
+            usage: Usage::measured(1, 1, 2),
+            external_id: None,
+        })
+    }
+
+    async fn lookup(&self, _: &ToolContext, _: Value) -> Result<Lookup> {
+        panic!("input rejection must not trigger lookup")
+    }
+}
+
+pub async fn correctable_input_authorization<S: ControlStore>(store: Arc<S>) {
+    for correctable in [true, false] {
+        let account = store
+            .create_account("t", Amount::new(1000, 1000), None)
+            .await
+            .unwrap();
+        let run = store
+            .start(RunSpec::new(
+                "t",
+                &format!("scoped-input-{correctable}"),
+                account.clone(),
+                "read a file",
+            ))
+            .await
+            .unwrap();
+        let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
+        let quotes = Arc::new(AtomicUsize::new(0));
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let call = |id: &str, path: &str| {
+            FakeModel::calls(vec![ToolCall {
+                id: id.into(),
+                name: "scoped_read".into(),
+                arguments: json!({"path":path}),
+            }])
+        };
+        let model = FakeModel::scripted(vec![
+            call(
+                "reject",
+                if correctable {
+                    "blocked.txt"
+                } else {
+                    "revoked"
+                },
+            ),
+            call("accept", "visible.txt"),
+            FakeModel::decision(json!({"decision":"keep"})),
+        ]);
+        let rt = Runtime {
+            store: store.clone(),
+            model: model.clone(),
+            tools: vec![ScopedInput {
+                quotes: quotes.clone(),
+                invocations: invocations.clone(),
+            }],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let done = rt.drive(&claim).await.unwrap();
+        let cp = done.checkpoint.unwrap();
+        if correctable {
+            let requests = model.requests.lock().unwrap();
+            assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded));
+            assert_eq!(cp.cursor, 5);
+            assert_eq!(cp.payload["tool_repair"]["count"], 1);
+            let feedback = requests[1]
+                .messages
+                .iter()
+                .find(|m| m.role == "tool")
+                .unwrap();
+            assert_eq!(feedback.call_id.as_deref(), Some("reject"));
+            assert_eq!(feedback.data["code"], "TOOL_INPUT_INVALID");
+            assert_eq!(feedback.data["diagnostics"][0]["path"], "/path");
+            assert!(!feedback.data.to_string().contains("blocked.txt"));
+        } else {
+            assert_eq!(
+                done.state,
+                RunState::Terminal(Terminal::Failed("permission denied".into()))
+            );
+            assert_eq!(cp.cursor, 1);
+            assert_eq!(model.requests.lock().unwrap().len(), 1);
+            assert!(cp.messages.iter().all(|m| m.role != "tool"));
+        }
+        let expected = usize::from(correctable);
+        assert_eq!(quotes.load(Ordering::SeqCst), expected);
+        assert_eq!(invocations.load(Ordering::SeqCst), expected);
+        let operations = store.list_operations(&run).await.unwrap();
+        let tool_ops: Vec<_> = operations
+            .iter()
+            .filter(|op| op.request.kind == OperationKind::Tool)
+            .collect();
+        assert_eq!(tool_ops.len(), expected);
+        assert!(
+            tool_ops
+                .iter()
+                .all(|op| op.request.input["path"] == "visible.txt" && op.settled)
+        );
+        assert_eq!(
+            store.account(&account).await.unwrap().reserved,
+            Amount::default()
+        );
+    }
+}

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0
+
+- Admit and rejoin child Runs within the active phase of a parent. A phase
+  closes after its children finish, their work is reconciled, and their
+  admission operations are settled. The next phase can reuse a logical child
+  operation key with a fresh identity.
+- Let tool input authorization return `Error::InvalidToolInput` for a new
+  call the model can correct. The runtime checkpoints `TOOL_INPUT_INVALID`
+  for that call before quoting or starting an attempt.
+
 ## 0.8.0 — media limits and read recovery
 
 - Demote the oldest replayed tool documents and images to their existing text

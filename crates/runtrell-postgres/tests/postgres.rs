@@ -1657,3 +1657,12 @@ fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
         pool.close().await;
     });
 }
+
+#[tokio::test]
+async fn correctable_input_authorization() {
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::tool_failure_contracts::correctable_input_authorization(std::sync::Arc::new(
+        store,
+    ))
+    .await;
+}

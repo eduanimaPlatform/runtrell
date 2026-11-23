@@ -10,7 +10,10 @@ mod erasure;
 mod phase;
 mod transcript;
 pub use erasure::RunPayloadStore;
-pub use phase::{PhaseConfig, PhaseInput, PhaseSeal, PhaseState, retire_phase_operations};
+pub use phase::{
+    PhaseConfig, PhaseInput, PhaseSeal, PhaseState, phase_child_admissions_pending,
+    retire_phase_operations,
+};
 mod driver;
 pub mod memory;
 pub use driver::Runtime;
