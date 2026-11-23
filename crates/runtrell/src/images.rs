@@ -1024,8 +1024,7 @@ pub enum ImageResponse {
         retry_after: Option<u64>,
         provider_diagnostic: Option<ProviderDiagnostic>,
     },
-    Unknown,
-    UnknownDiagnostic(ProviderDiagnostic),
+    Ambiguous(crate::AmbiguousOutcome),
 }
 pub trait ImagePort: Send + Sync {
     fn pricing_snapshot(&self) -> Option<crate::models::PricingSnapshot> {
@@ -1286,7 +1285,13 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
         if let Lookup::Found(result) = self.stored(c, &input).await? {
             return Ok(result);
         }
-        let request = self.prepare(&run, &input).await?;
+        let request = match self.prepare(&run, &input).await {
+            Ok(request) => request,
+            Err(Error::Storage | Error::Deadline | Error::Pending(_)) => {
+                return Ok(ExternalResult::retryable_not_sent());
+            }
+            Err(error) => return Err(error),
+        };
         for image in request.images().iter().chain(request.mask()) {
             self.resolver
                 .authorize_current(&run, image.reference(), "image.send")
@@ -1314,10 +1319,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 retry_after,
                 provider_diagnostic,
             ),
-            ImageResponse::Unknown => return Ok(ExternalResult::Unknown),
-            ImageResponse::UnknownDiagnostic(diagnostic) => {
-                return Ok(ExternalResult::UnknownDiagnostic(diagnostic));
-            }
+            ImageResponse::Ambiguous(outcome) => return Ok(ExternalResult::Ambiguous(outcome)),
         };
         // Unknown usage is never normalized to free. Preserve known results too;
         // Runtime retains the reservation until the usage can be settled.
@@ -1424,7 +1426,7 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool
                 ExternalResult::Applied { usage, .. } | ExternalResult::Failed { usage, .. } => {
                     usage
                 }
-                _ => return Ok(ExternalResult::Unknown),
+                _ => unreachable!("image receipt contains a terminal response"),
             };
             return Ok(ExternalResult::Failed {
                 repair_hint: None,

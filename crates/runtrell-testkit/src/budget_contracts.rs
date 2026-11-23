@@ -29,7 +29,7 @@ pub async fn policies<S: ControlStore>(s: &S) {
     );
     req.quantities.insert("jobs".into(), 1);
     let op = s.begin(&c, req, 0).await.unwrap();
-    s.record(&c, &op.id, ExternalResult::Unknown, 0)
+    s.record(&c, &op.id, crate::ambiguous_fixture(), 0)
         .await
         .unwrap();
     let run = s.get(&h).await.unwrap();

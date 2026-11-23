@@ -101,7 +101,7 @@ fn a14_cleanup_worker_restart_and_duplicate_reconciliation() {
             rt.execute_backend(&c, "code", request(), Amount::new(0, 100), &ledger, &b)
                 .await
                 .unwrap(),
-            ExternalResult::Unknown
+            runtrell_testkit::ambiguous_fixture()
         );
         let before = ledger.pending().await.unwrap();
         assert!(!before[0].resources[&Resource::Disk].released);
@@ -131,7 +131,7 @@ fn lost_acquisition_response_is_found_and_cancelled_without_second_execution() {
             rt.execute_backend(&c, "code", request(), Amount::new(0, 100), &ledger, &b)
                 .await
                 .unwrap(),
-            ExternalResult::Unknown
+            runtrell_testkit::ambiguous_fixture()
         );
         rt.cancel_backend(&c, "code", &ledger, &b).await.unwrap();
         let op = s.operation(&c.run, "code").await.unwrap().unwrap();
@@ -234,7 +234,7 @@ fn lost_acquisition_response_resumes_original_environment() {
             rt.execute_backend(&c, "code", request(), Amount::new(0, 100), &ledger, &b)
                 .await
                 .unwrap(),
-            ExternalResult::Unknown
+            runtrell_testkit::ambiguous_fixture()
         );
         assert!(matches!(
             rt.execute_backend(&c, "code", request(), Amount::new(0, 100), &ledger, &b)
@@ -303,7 +303,10 @@ fn acquisition_timeout_preserves_reservation_and_late_environment() {
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(running.as_mut().poll(&mut cx).is_pending());
         rt.clock.set(5);
-        assert_eq!(running.await.unwrap(), ExternalResult::Unknown);
+        assert_eq!(
+            running.await.unwrap(),
+            runtrell_testkit::ambiguous_fixture()
+        );
         assert_eq!(s.slot_count(OperationKind::Sandbox).await, 1);
         assert_eq!(s.account(&a).await.unwrap().reserved.micro_usd, 100);
         b.delay.store(false, Ordering::SeqCst);

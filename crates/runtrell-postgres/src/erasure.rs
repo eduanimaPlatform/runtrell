@@ -244,7 +244,7 @@ impl PgStore {
                 }
                 op.unsettled_result = None;
                 sqlx::query(&format!(
-                    "UPDATE {}.attempts SET request=$2,result=$3,usage_observations=$4,recovery=$5,unsettled_result=NULL WHERE id=$1",
+                    "UPDATE {}.attempts SET request=$2,result=$3,usage_observations=$4,recovery=$5,unsettled_result=NULL,lookup_failure=NULL WHERE id=$1",
                     self.schema
                 ))
                 .bind(&op.id)
@@ -390,6 +390,12 @@ fn scrub_result(result: ExternalResult) -> ExternalResult {
                 provider_diagnostic: None,
             }
         }
-        _ => ExternalResult::Unknown,
+        ExternalResult::Accepted { .. } => ExternalResult::Accepted {
+            external_id: String::new(),
+        },
+        mut ambiguous @ ExternalResult::Ambiguous(_) => {
+            ambiguous.clear_ambiguity_diagnostic();
+            ambiguous
+        }
     }
 }

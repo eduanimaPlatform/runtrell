@@ -430,7 +430,7 @@ async fn document_mismatch_capabilities_and_bounds_never_send() {
         let model = Gemini::new(c.clone()).unwrap();
         let rejected = model.invoke(&context(), text(declared())).await.unwrap();
         assert!(
-            matches!(&rejected, ExternalResult::Failed { code, usage, .. } if code == "ATTACHMENT_NOT_SENT" && usage == &Usage { model: "host-model".into(), ..Usage::measured(0,0,0) })
+            matches!(&rejected, ExternalResult::Failed { code, usage, .. } if code == "ATTACHMENT_NOT_SENT" && usage == &Usage { model: "host-model".into(), ..Usage::non_billable(NonBillableReason::NotSent) })
         );
         let diagnostic = rejected.provider_diagnostic().expect("pre-send diagnostic");
         assert_eq!(diagnostic.phase, ProviderFailurePhase::PreSend);
@@ -589,6 +589,7 @@ async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
             });
             let mut c = config(endpoint);
             c.run = handle.clone();
+            c.capabilities.limits.timeout = 30_000;
             c.capabilities.documents.pdf = DocumentTransports {
                 url: true,
                 inline_bytes: true,

@@ -222,10 +222,10 @@ async fn jpeg_webp_document_views_reach_each_image_adapter_and_invalid_bytes_are
             let mut bad_range = input;
             bad_range["pages"] = json!({"first":2,"last":2});
             bad_ctx.operation = "invalid-range".into();
-            assert_eq!(
-                tool.invoke(&bad_ctx, bad_range).await.unwrap_err(),
-                Error::Invalid("DOCUMENT_PAGE_RANGE".into())
-            );
+            assert!(matches!(
+                tool.invoke(&bad_ctx, bad_range).await,
+                Err(Error::InvalidToolInput { path, .. }) if path == "/pages"
+            ));
         }
     }
 }

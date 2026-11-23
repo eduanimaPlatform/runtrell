@@ -3,8 +3,16 @@ use crate::*;
 use reqwest::{Client, Url, header::HeaderValue};
 use runtrell::{attachments::ResolvedAttachment, *};
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime};
+use std::{
+    collections::BTreeMap,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Wire {
@@ -53,8 +61,68 @@ pub(crate) enum HttpResult {
         value: Value,
         diagnostic: ProviderDiagnostic,
     },
-    Failure(ExternalResult),
-    UnknownDiagnostic(ProviderDiagnostic),
+    Failure(HttpFailure),
+    Ambiguous(AmbiguousOutcome),
+}
+
+impl HttpResult {
+    fn from_ambiguity(result: ExternalResult) -> Self {
+        let ExternalResult::Ambiguous(outcome) = result else {
+            unreachable!("expected the ambiguity constructor result");
+        };
+        Self::Ambiguous(outcome)
+    }
+}
+
+pub(crate) struct HttpFailure {
+    pub code: String,
+    pub usage: Usage,
+    pub retry_after: Option<u64>,
+    pub diagnostic: ProviderDiagnostic,
+}
+
+impl From<HttpFailure> for ExternalResult {
+    fn from(failure: HttpFailure) -> Self {
+        Self::Failed {
+            physical_evidence: None,
+            code: failure.code,
+            usage: failure.usage,
+            retry_after: failure.retry_after,
+            repair_hint: None,
+            provider_diagnostic: Some(failure.diagnostic),
+        }
+    }
+}
+
+// A request requires its JSON body to execute. Polling this frame is the
+// earliest point at which the transport can write payload bytes.
+struct RequestBody {
+    bytes: Option<bytes::Bytes>,
+    grant: Option<ManagedSend>,
+    released: Arc<AtomicBool>,
+}
+
+impl http_body::Body for RequestBody {
+    type Data = bytes::Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let Some(bytes) = self.bytes.take() else {
+            return Poll::Ready(None);
+        };
+        if self.grant.as_ref().is_some_and(|grant| !grant.begin_body()) {
+            return Poll::Ready(Some(Err(std::io::Error::other("send grant revoked"))));
+        }
+        self.released.store(true, Ordering::Release);
+        Poll::Ready(Some(Ok(http_body::Frame::data(bytes))))
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.bytes.as_ref().map_or(0, |bytes| bytes.len() as u64))
+    }
 }
 fn safe_field(value: &Value) -> Option<SafeProviderField> {
     match value {
@@ -477,7 +545,7 @@ impl Adapter {
                     code: "ATTACHMENT_NOT_SENT".into(),
                     usage: Usage {
                         model: request.model.clone(),
-                        ..Usage::measured(0, 0, 0)
+                        ..Usage::non_billable(NonBillableReason::NotSent)
                     },
                     retry_after: None,
                     provider_diagnostic: Some(diagnostic(
@@ -509,13 +577,34 @@ impl Adapter {
             HttpResult::Json {
                 value: parsed,
                 diagnostic,
-            } => Ok(self
-                .submit_result(&parsed, &request)
-                .unwrap_or_else(|_| ExternalResult::UnknownDiagnostic(diagnostic))),
-            HttpResult::Failure(result) => Ok(result),
-            HttpResult::UnknownDiagnostic(diagnostic) => {
-                Ok(ExternalResult::UnknownDiagnostic(diagnostic))
+            } => {
+                if self.background() && self.background_id(&parsed).is_none() {
+                    return Ok(ExternalResult::ambiguous(
+                        AmbiguityEvidence::Provider(diagnostic),
+                        AmbiguityReason::ResponseIdentityUnverified,
+                    ));
+                }
+                Ok(self.submit_result(&parsed, &request).unwrap_or_else(|_| {
+                    if self.background()
+                        && !matches!(parsed["status"].as_str(), Some("completed" | "incomplete"))
+                    {
+                        ExternalResult::ambiguous(
+                            AmbiguityEvidence::Provider(diagnostic),
+                            AmbiguityReason::ResponseIdentityUnverified,
+                        )
+                    } else {
+                        HttpFailure {
+                            code: "PROVIDER_RESPONSE_INVALID".into(),
+                            usage: self.normalized_usage(&parsed),
+                            retry_after: None,
+                            diagnostic,
+                        }
+                        .into()
+                    }
+                }))
             }
+            HttpResult::Failure(result) => Ok(result.into()),
+            HttpResult::Ambiguous(outcome) => Ok(ExternalResult::Ambiguous(outcome)),
         }
     }
     fn submit_result(
@@ -562,7 +651,7 @@ impl Adapter {
             Some("completed" | "incomplete") => self.reply(value, request),
             Some("failed" | "cancelled") => Ok(ExternalResult::Failed {
                 code: "BACKGROUND_RESPONSE_FAILED".into(),
-                usage: self.usage(value)?,
+                usage: self.normalized_usage(value),
                 repair_hint: None,
                 physical_evidence: None,
                 retry_after: None,
@@ -586,15 +675,20 @@ impl Adapter {
         else {
             return Ok(Lookup::Unknown);
         };
-        let Some(value) = self.poll_response(context, managed, id).await else {
-            return Ok(Lookup::Pending);
+        let value = match self.poll_response(context, managed, id).await {
+            Ok(value) => value,
+            Err(error) => return Ok(Lookup::Unavailable(error)),
         };
         if self.background_id(&value) != Some(id) {
+            return Ok(Lookup::Unavailable(LookupFailure::IdentityMismatch));
+        }
+        if matches!(value["status"].as_str(), Some("queued" | "in_progress")) {
             return Ok(Lookup::Pending);
         }
-        Ok(self
-            .background_terminal(&value, &request)
-            .map_or(Lookup::Pending, Lookup::Found))
+        Ok(self.background_terminal(&value, &request).map_or(
+            Lookup::Unavailable(LookupFailure::ResponseDecode),
+            Lookup::Found,
+        ))
     }
 
     async fn poll_response(
@@ -602,19 +696,23 @@ impl Adapter {
         context: &ToolContext,
         managed: &Managed,
         id: &str,
-    ) -> Option<Value> {
-        let (ApiKey(key, _), timeout) = (
-            (managed.credentials)(managed.model.id()).ok()?,
-            self.request_timeout(context).ok()?,
-        );
+    ) -> std::result::Result<Value, LookupFailure> {
+        let ApiKey(key, _) =
+            (managed.credentials)(managed.model.id()).map_err(|_| LookupFailure::Configuration)?;
+        let timeout = self
+            .request_timeout(context)
+            .map_err(|_| LookupFailure::Transport)?;
         if key.is_empty() || self.config.endpoint.contains(&key) || id.contains(&key) {
-            return None;
+            return Err(LookupFailure::Configuration);
         }
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {key}")).ok()?;
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|_| LookupFailure::Configuration)?;
         authorization.set_sensitive(true);
-        // Use a single validated path segment even when recovering a stored ID.
-        let mut url = Url::parse(&self.config.endpoint).ok()?;
-        url.path_segments_mut().ok()?.push(id);
+        let mut url =
+            Url::parse(&self.config.endpoint).map_err(|_| LookupFailure::Configuration)?;
+        url.path_segments_mut()
+            .map_err(|_| LookupFailure::Configuration)?
+            .push(id);
         let mut response = self
             .client
             .get(url)
@@ -622,17 +720,22 @@ impl Adapter {
             .header("authorization", authorization)
             .send()
             .await
-            .ok()?
-            .error_for_status()
-            .ok()?;
+            .map_err(|_| LookupFailure::Transport)?;
+        if !response.status().is_success() {
+            return Err(LookupFailure::Rejected(response.status().as_u16()));
+        }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.ok()? {
-            if bytes.len().checked_add(chunk.len())? > self.config.max_response_bytes {
-                return None;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| LookupFailure::ResponseRead)?
+        {
+            if chunk.len() > self.config.max_response_bytes.saturating_sub(bytes.len()) {
+                return Err(LookupFailure::ResponseByteLimit);
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).ok()
+        serde_json::from_slice(&bytes).map_err(|_| LookupFailure::ResponseDecode)
     }
 
     #[cfg(feature = "gemini")]
@@ -648,9 +751,10 @@ impl Adapter {
         .await
     }
 
-    fn normalized_usage(&self, parsed: &Value) -> Usage {
+    pub(crate) fn normalized_usage(&self, parsed: &Value) -> Usage {
         self.usage(parsed).unwrap_or_else(|_| Usage {
             model: self.config.capabilities.limits.model.clone(),
+            issue: Some(UsageIssue::Invalid),
             ..Usage::default()
         })
     }
@@ -775,24 +879,96 @@ impl Adapter {
         value["input_tokens"].as_u64()
     }
 
-    pub(crate) fn unsent(&self, code: &str) -> HttpResult {
-        HttpResult::Failure(ExternalResult::Failed {
-            repair_hint: None,
-            physical_evidence: None,
+    pub(crate) fn unsent(&self, code: &str, reason: NonBillableReason) -> HttpResult {
+        HttpResult::Failure(HttpFailure {
             code: code.into(),
             usage: Usage {
                 model: self.config.capabilities.limits.model.clone(),
-                ..Usage::measured(0, 0, 0)
+                ..Usage::non_billable(reason)
             },
             retry_after: None,
-            provider_diagnostic: Some(diagnostic(
+            diagnostic: diagnostic(
                 ProviderFailurePhase::PreSend,
                 ProviderSendCertainty::DefinitelyNotSent,
                 None,
                 &Value::Null,
                 self.wire,
-            )),
+            ),
         })
+    }
+
+    fn responses_envelope_status(value: &Value) -> Option<u16> {
+        let error = &value["error"];
+        match (error["type"].as_str(), error["code"].as_str()) {
+            (_, Some("insufficient_quota" | "billing_hard_limit_reached")) => Some(429),
+            (Some("invalid_request_error"), _) => Some(400),
+            (Some("authentication_error"), _) => Some(401),
+            (Some("permission_error"), _) => Some(403),
+            (Some("rate_limit_error"), _) => Some(429),
+            _ => None,
+        }
+    }
+
+    fn rejects_without_execution(&self, status: u16, effective_status: u16, value: &Value) -> bool {
+        if [
+            "usage",
+            "usageMetadata",
+            "svg_usage",
+            "choices",
+            "output",
+            "candidates",
+            "data",
+            "id",
+            "responseId",
+            "promptFeedback",
+        ]
+        .iter()
+        .any(|key| !value[key].is_null())
+        {
+            return false;
+        }
+        // Authentication and access checks reject before execution, even if
+        // the body cannot be decoded. Other statuses need a matching envelope.
+        if matches!(status, 401 | 403) && value.is_null() {
+            return true;
+        }
+        if !matches!(
+            effective_status,
+            400 | 401 | 402 | 403 | 404 | 413 | 422 | 429
+        ) || (!(200..300).contains(&status) && status != effective_status)
+        {
+            return false;
+        }
+        let error = &value["error"];
+        match self.wire {
+            Wire::Responses => {
+                // The Responses and image wires use textual error codes.
+                error.is_object()
+                    && (!(200..300).contains(&status)
+                        || Self::responses_envelope_status(value) == Some(effective_status))
+            }
+            Wire::Chat => {
+                // A 2xx error on this wire can arrive during generation.
+                !(200..300).contains(&status)
+                    && error["code"].as_u64() == Some(u64::from(effective_status))
+                    && error["metadata"]["provider_name"].is_null()
+                    && error["metadata"]["raw"].is_null()
+                    && error["metadata"]["upstream_id"].is_null()
+            }
+            Wire::GenerateContent => {
+                let expected = match effective_status {
+                    400 => "INVALID_ARGUMENT",
+                    401 => "UNAUTHENTICATED",
+                    403 => "PERMISSION_DENIED",
+                    404 => "NOT_FOUND",
+                    429 => "RESOURCE_EXHAUSTED",
+                    _ => return false,
+                };
+                error["code"].as_u64() == Some(u64::from(effective_status))
+                    && (error["status"] == expected
+                        || (effective_status == 400 && error["status"] == "FAILED_PRECONDITION"))
+            }
+        }
     }
 
     fn request_timeout(&self, context: &ToolContext) -> Result<Duration> {
@@ -827,17 +1003,26 @@ impl Adapter {
         }
         let bytes = serde_json::to_vec(&body).map_err(|_| invalid())?;
         if bytes.len() > self.config.max_request_bytes {
-            return Err(invalid());
+            return Ok(self.unsent("REQUEST_BYTE_LIMIT", NonBillableReason::NotSent));
         }
         let mut timeout = self.request_timeout(context)?;
-        let key = if let Some(managed) = &self.managed {
+        let (key, authorized) = if let Some(managed) = &self.managed {
             let quote = self.managed_quote(&body, input_bound)?;
-            context
+            let grant = context
                 .managed_send
                 .as_ref()
-                .ok_or(Error::ReservationDenied)?
-                .authorize(context, &managed.pricing, quote)?;
-            let key = (managed.credentials)(managed.model.id())?;
+                .ok_or(Error::ReservationDenied)?;
+            grant.check(context, &managed.pricing, quote)?;
+            let key = match (managed.credentials)(managed.model.id()) {
+                Ok(key) => key,
+                Err(Error::PermissionDenied) => return Err(Error::PermissionDenied),
+                Err(_) => {
+                    return Ok(self.unsent(
+                        "CREDENTIAL_UNAVAILABLE",
+                        NonBillableReason::RetryableNotSent,
+                    ));
+                }
+            };
             if self.wire == Wire::Chat {
                 let payer = match managed.model.billing_mode() {
                     Some("routed") => OpenRouterPayer::Credits,
@@ -845,14 +1030,17 @@ impl Adapter {
                     _ => return Err(Error::ReservationDenied),
                 };
                 if key.1 != Some(payer) {
-                    return Ok(self.unsent("OPENROUTER_CREDENTIAL_PAYER_MISMATCH"));
+                    return Ok(self.unsent(
+                        "OPENROUTER_CREDENTIAL_PAYER_MISMATCH",
+                        NonBillableReason::NotSent,
+                    ));
                 }
             }
-            key
+            (key, Some((grant, &managed.pricing, quote)))
         } else {
             #[cfg(test)]
             {
-                self.config.key.clone()
+                (self.config.key.clone(), None)
             }
             #[cfg(not(test))]
             {
@@ -870,7 +1058,9 @@ impl Adapter {
                 HeaderValue::from_str(&format!("Bearer {}", key.0)),
             )
         };
-        let mut value = value.map_err(|_| invalid())?;
+        let Ok(mut value) = value else {
+            return Ok(self.unsent("REQUEST_BUILDER", NonBillableReason::NotSent));
+        };
         value.set_sensitive(true);
         if self.counts_responses_input() {
             let bound = input_bound.ok_or(Error::ReservationDenied)?;
@@ -888,30 +1078,53 @@ impl Adapter {
                 _ => Some("INPUT_TOKEN_COUNT_UNAVAILABLE"),
             };
             if let Some(code) = code {
-                return Ok(self.unsent(code));
+                return Ok(self.unsent(code, NonBillableReason::NotSent));
             }
         }
-        let response = self
+        let released = Arc::new(AtomicBool::new(false));
+        let request = self
             .client
             .post(endpoint)
             .timeout(timeout)
             .header(header, value)
             .header("content-type", "application/json")
-            .body(bytes)
-            .send()
-            .await;
-        let mut response = match response {
+            .body(reqwest::Body::wrap(RequestBody {
+                bytes: Some(bytes.into()),
+                grant: authorized.map(|(grant, _, _)| grant.clone()),
+                released: released.clone(),
+            }))
+            .build();
+        let Ok(request) = request else {
+            return Ok(self.unsent("REQUEST_BUILDER", NonBillableReason::NotSent));
+        };
+        if let Some((grant, price, quote)) = authorized {
+            grant.authorize_tracked(context, price, quote)?;
+        }
+        let mut response = match self.client.execute(request).await {
             Ok(response) => response,
-            Err(e) if e.is_connect() || e.is_builder() => {
-                return Ok(self.unsent("PROVIDER_CONNECTION_NOT_ESTABLISHED"));
+            Err(e)
+                if e.is_connect()
+                    || e.is_builder()
+                    || authorized.map_or_else(
+                        || !released.load(Ordering::Acquire),
+                        |(grant, _, _)| grant.revoke_if_not_sent(),
+                    ) =>
+            {
+                return Ok(self.unsent(
+                    "CONNECTION_NOT_ESTABLISHED",
+                    NonBillableReason::RetryableNotSent,
+                ));
             }
             Err(_) => {
-                return Ok(HttpResult::UnknownDiagnostic(diagnostic(
-                    ProviderFailurePhase::Send,
-                    ProviderSendCertainty::Unknown,
-                    None,
-                    &Value::Null,
-                    self.wire,
+                return Ok(HttpResult::from_ambiguity(ExternalResult::ambiguous(
+                    AmbiguityEvidence::Provider(diagnostic(
+                        ProviderFailurePhase::Send,
+                        ProviderSendCertainty::Unknown,
+                        None,
+                        &Value::Null,
+                        self.wire,
+                    )),
+                    AmbiguityReason::TransportAfterPossibleWrite,
                 )));
             }
         };
@@ -949,41 +1162,77 @@ impl Adapter {
             .and_then(|h| h.to_str().ok())
             .and_then(safe_retry_after);
         let mut bytes = Vec::new();
-        loop {
+        let read_failure = loop {
             match response.chunk().await {
-                Ok(Some(chunk))
-                    if bytes
-                        .len()
-                        .checked_add(chunk.len())
-                        .is_some_and(|n| n <= self.config.max_response_bytes) =>
-                {
-                    bytes.extend_from_slice(&chunk)
+                Ok(Some(chunk)) => {
+                    if chunk.len() > self.config.max_response_bytes.saturating_sub(bytes.len()) {
+                        break Some(ProviderFailurePhase::ResponseByteLimit);
+                    }
+                    bytes.extend_from_slice(&chunk);
                 }
-                Ok(None) => break,
-                _ => {
-                    return Ok(HttpResult::UnknownDiagnostic(response_diagnostic(
-                        ProviderFailurePhase::ResponseRead,
-                        &Value::Null,
+                Ok(None) => break None,
+                Err(_) => break Some(ProviderFailurePhase::ResponseRead),
+            }
+        };
+        let mut parsed: Value = if let Some(phase) = read_failure {
+            if (400..500).contains(&status) || (500..600).contains(&status) {
+                let mut usage = normalize(status, &Value::Null);
+                if self.rejects_without_execution(status, status, &Value::Null) {
+                    usage = Usage::non_billable(NonBillableReason::RejectedBeforeExecution);
+                }
+                return Ok(HttpResult::Failure(HttpFailure {
+                    code: serde_json::to_string(&Failure {
+                        class: classify(status, &Value::Null),
+                        status,
+                        retry_after: retry_header,
+                    })
+                    .map_err(|_| Error::Storage)?,
+                    usage,
+                    retry_after: None,
+                    diagnostic: response_diagnostic(phase, &Value::Null),
+                }));
+            }
+            let evidence = AmbiguityEvidence::Provider(response_diagnostic(phase, &Value::Null));
+            return Ok(HttpResult::from_ambiguity(match phase {
+                ProviderFailurePhase::ResponseByteLimit => {
+                    ExternalResult::ambiguous(evidence, AmbiguityReason::ResponseByteLimit)
+                }
+                _ => ExternalResult::ambiguous(evidence, AmbiguityReason::ResponseLost),
+            }));
+        } else {
+            match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) if !(200..300).contains(&status) => Value::Null,
+                Err(_) => {
+                    return Ok(HttpResult::from_ambiguity(ExternalResult::ambiguous(
+                        AmbiguityEvidence::Provider(response_diagnostic(
+                            ProviderFailurePhase::ResponseDecode,
+                            &Value::Null,
+                        )),
+                        AmbiguityReason::ResponseDecode,
                     )));
                 }
             }
-        }
-        let mut parsed: Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            Err(_) if !(200..300).contains(&status) => Value::Null,
-            Err(_) => {
-                return Ok(HttpResult::UnknownDiagnostic(response_diagnostic(
-                    ProviderFailurePhase::ResponseDecode,
-                    &Value::Null,
-                )));
-            }
         };
         crate::documents::redact_echoes(&mut parsed, sensitive);
+        if self.wire == Wire::Chat
+            && parsed["error"].is_null()
+            && let Some(error) = parsed
+                .pointer("/choices/0/error")
+                .filter(|error| error.is_object())
+        {
+            parsed["error"] = error.clone();
+        }
         if !(200..300).contains(&status) || !parsed["error"].is_null() {
             let effective_status = parsed["error"]["code"]
                 .as_u64()
                 .and_then(|n| u16::try_from(n).ok())
                 .filter(|n| (400..600).contains(n))
+                .or_else(|| {
+                    (self.wire == Wire::Responses && (200..300).contains(&status))
+                        .then(|| Self::responses_envelope_status(&parsed))
+                        .flatten()
+                })
                 .unwrap_or(status);
             let mut class = classify(effective_status, &parsed);
             let retryable = self.wire == Wire::Responses
@@ -1014,17 +1263,20 @@ impl Adapter {
                     .unwrap_or(u64::MAX),
                 false => 0,
             });
-            return Ok(HttpResult::Failure(ExternalResult::Failed {
-                repair_hint: None,
-                physical_evidence: None,
+            let usage = if self.rejects_without_execution(status, effective_status, &parsed) {
+                Usage {
+                    model: self.config.capabilities.limits.model.clone(),
+                    ..Usage::non_billable(NonBillableReason::RejectedBeforeExecution)
+                }
+            } else {
+                normalize(status, &parsed)
+            };
+            return Ok(HttpResult::Failure(HttpFailure {
                 code: serde_json::to_string(&failure)
                     .unwrap_or_else(|_| "PROVIDER_HTTP_ERROR".into()),
-                usage: normalize(status, &parsed),
+                usage,
                 retry_after: delay,
-                provider_diagnostic: Some(response_diagnostic(
-                    ProviderFailurePhase::HttpError,
-                    &parsed,
-                )),
+                diagnostic: response_diagnostic(ProviderFailurePhase::HttpError, &parsed),
             }));
         }
         Ok(HttpResult::Json {
@@ -1034,7 +1286,7 @@ impl Adapter {
     }
     fn reply(&self, v: &Value, request: &PreparedModelRequest) -> Result<ExternalResult> {
         let names = ToolNames::new(request, self.wire)?;
-        let usage = self.usage(v)?;
+        let usage = self.normalized_usage(v);
         let mut text = String::new();
         let mut calls = Vec::new();
         let mut partial_calls = false;
@@ -1094,6 +1346,9 @@ impl Adapter {
             }
             Wire::Chat => {
                 let choice = &v["choices"][0];
+                if !choice.is_object() {
+                    return Err(invalid());
+                }
                 let message = &choice["message"];
                 if let Some(s) = message["content"].as_str() {
                     text = s.into();
@@ -1123,6 +1378,9 @@ impl Adapter {
             }
             Wire::GenerateContent => {
                 let candidate = &v["candidates"][0];
+                if !candidate.is_object() && v["promptFeedback"]["blockReason"].is_null() {
+                    return Err(invalid());
+                }
                 let parts = candidate["content"]["parts"].as_array();
                 if let Some(parts) = parts {
                     for (index, part) in parts.iter().enumerate() {
@@ -1351,7 +1609,14 @@ impl Adapter {
             }
         }
         if let (Some(i), Some(o)) = (u.input, u.output) {
-            u.validate_subsets(i, o)?;
+            if i.checked_add(o).is_none() {
+                u.issue = Some(UsageIssue::ArithmeticOverflow);
+                return Ok(u);
+            }
+            if u.validate_subsets(i, o).is_err() {
+                u.issue = Some(UsageIssue::Invalid);
+                return Ok(u);
+            }
         }
         if self.managed.is_some() {
             let total_path = match self.wire {
@@ -1361,7 +1626,8 @@ impl Adapter {
             if let (Some(total), Some(input), Some(output)) = (n(total_path)?, u.input, u.output)
                 && input.checked_add(output) != Some(total)
             {
-                return Err(invalid());
+                u.issue = Some(UsageIssue::Invalid);
+                return Ok(u);
             }
         }
         if let Some(managed) = &self.managed {
@@ -1392,12 +1658,15 @@ impl Adapter {
             };
             if reported_model.is_none() || route_mismatch || u.unknown_reason.is_some() {
                 u.unknown_reason = Some("MANAGED_ROUTE_MISMATCH".into());
+                u.issue = Some(UsageIssue::ModelBindingMismatch);
             } else {
                 managed.pricing.record_cost(&mut u);
             }
-        } else if let Some(price) = &self.config.capabilities.limits.price
-            && price.model == u.model
-        {
+        } else if let Some(price) = &self.config.capabilities.limits.price {
+            if price.model != u.model {
+                u.issue = Some(UsageIssue::ModelBindingMismatch);
+                return Ok(u);
+            }
             u.micro_usd = match price.cost(&u) {
                 Ok(cost) => Some(cost),
                 Err(Error::UsageUnknown) => None,
@@ -1424,16 +1693,16 @@ fn modality(value: Option<&Value>, modality: &str) -> Result<Option<u64>> {
     Ok(total)
 }
 fn parse_call(id: Option<&str>, name: Option<&str>, arguments: Option<Value>) -> Result<ToolCall> {
-    let (Some(id), Some(name), Some(arguments)) = (id, name, arguments) else {
+    let (Some(id), Some(name)) = (id, name) else {
         return Err(invalid());
     };
-    if id.is_empty() || name.is_empty() || !arguments.is_object() {
+    if id.is_empty() || name.is_empty() {
         return Err(invalid());
     }
     Ok(ToolCall {
         id: id.into(),
         name: name.into(),
-        arguments,
+        arguments: arguments.unwrap_or(Value::Null),
     })
 }
 fn safe_retry_after(value: &str) -> Option<String> {
@@ -1602,7 +1871,7 @@ macro_rules! fixture_adapter {
     ($name:ident, $feature:literal, $wire:ident) => {
         #[cfg(feature = $feature)]
         #[derive(Debug)]
-        pub(crate) struct $name(Adapter);
+        pub(crate) struct $name(pub(crate) Adapter);
         #[cfg(feature = $feature)]
         impl $name {
             pub(crate) fn new(config: Config) -> Result<Self> {

@@ -313,7 +313,7 @@ async fn active_reserved_unknown_and_live_owner_runs_are_unchanged_on_refusal() 
             if mode == "unknown" {
                 e.store.mark_sent(&c, &op.id, 2).await.unwrap();
                 e.store
-                    .record(&c, &op.id, ExternalResult::Unknown, 3)
+                    .record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 3)
                     .await
                     .unwrap();
             }

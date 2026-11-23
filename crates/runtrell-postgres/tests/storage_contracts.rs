@@ -111,7 +111,7 @@ async fn attempt_identity_retry_fencing_and_constraints() {
             .send_count,
         1
     );
-    s.record(&c, &op.id, ExternalResult::Unknown, 0)
+    s.record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
         .await
         .unwrap();
     assert_eq!(s.begin(&c, retry.clone(), 0).await, Err(Error::Conflict));
@@ -249,7 +249,7 @@ async fn ancestor_attribution_rollback_unknown_reopen_and_delete_restriction() {
             .collect::<Vec<_>>()
     );
     s.mark_sent(&c, &op.id, 0).await.unwrap();
-    s.record(&c, &op.id, ExternalResult::Unknown, 0)
+    s.record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
         .await
         .unwrap();
     assert_balance(&s, &ids, Amount::new(10, 10), Amount::default(), 1).await;
@@ -272,7 +272,7 @@ async fn ancestor_attribution_rollback_unknown_reopen_and_delete_restriction() {
     reopened.record(&next, &op.id, paid(), 101).await.unwrap();
     assert_eq!(
         reopened
-            .record(&next, &op.id, ExternalResult::Unknown, 101)
+            .record(&next, &op.id, runtrell_testkit::ambiguous_fixture(), 101)
             .await,
         Err(Error::Conflict)
     );
@@ -344,7 +344,7 @@ async fn saved_paid_result_recovers_without_lookup_or_resend() {
     // A current owner may not replace a complete saved result with different evidence.
     assert_eq!(
         reopened
-            .observe_result(&next, &op.id, ExternalResult::Unknown, 101)
+            .observe_result(&next, &op.id, runtrell_testkit::ambiguous_fixture(), 101)
             .await,
         Err(Error::Conflict)
     );
@@ -364,7 +364,7 @@ async fn saved_paid_result_recovers_without_lookup_or_resend() {
     );
     assert_eq!(
         reopened
-            .record(&next, &op.id, ExternalResult::Unknown, 101)
+            .record(&next, &op.id, runtrell_testkit::ambiguous_fixture(), 101)
             .await,
         Err(Error::Conflict)
     );
@@ -455,7 +455,7 @@ async fn final_catalog() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     for (label, query) in [
         (
             "relations",

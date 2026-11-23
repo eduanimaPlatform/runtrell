@@ -125,7 +125,7 @@ impl Adapter {
             .checked_add(media_bytes)
             .is_none_or(|n| n > self.config.max_request_bytes)
         {
-            return Err(invalid());
+            return Err(Error::RequestByteLimit);
         }
         Ok(())
     }

@@ -9,16 +9,18 @@ description = "Optional provider adapters for the Runtrell agent runtime"
 
 [features]
 default = []
-openai = ["dep:reqwest", "dep:httpdate"]
-gemini = ["dep:reqwest", "dep:httpdate"]
-openrouter = ["dep:reqwest", "dep:httpdate"]
+openai = ["dep:reqwest", "dep:httpdate", "dep:bytes", "dep:http-body"]
+gemini = ["dep:reqwest", "dep:httpdate", "dep:bytes", "dep:http-body"]
+openrouter = ["dep:reqwest", "dep:httpdate", "dep:bytes", "dep:http-body"]
 
 [dependencies]
 thiserror = "2"
-runtrell = { path = "../runtrell", version = "0.10.0" }
+runtrell = { path = "../runtrell", version = "0.11.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
+bytes = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
 httpdate = { version = "1", optional = true }
 base64 = "0.22.1"
 tokio = { version = "1", features = ["time"] }
@@ -27,8 +29,8 @@ tokio = { version = "1", features = ["time"] }
 lopdf = { version = "0.42.0", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-runtrell-testkit = { path = "../runtrell-testkit", version = "0.10.0" }
-runtrell-postgres = { path = "../runtrell-postgres", version = "0.10.0" }
+runtrell-testkit = { path = "../runtrell-testkit", version = "0.11.0" }
+runtrell-postgres = { path = "../runtrell-postgres", version = "0.11.0" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 

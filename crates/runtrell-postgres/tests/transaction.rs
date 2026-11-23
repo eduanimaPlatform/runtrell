@@ -515,7 +515,7 @@ async fn transcript_purge_commits_with_completion_after_the_reservation_settles(
     let op = store.begin(&first, dispatch, 2).await.unwrap();
     store.mark_sent(&first, &op.id, 2).await.unwrap();
     store
-        .record(&first, &op.id, ExternalResult::Unknown, 3)
+        .record(&first, &op.id, runtrell_testkit::ambiguous_fixture(), 3)
         .await
         .unwrap();
     let completion = Completion {

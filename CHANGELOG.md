@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+- Construct ambiguous outcomes with explicit evidence and a closed reason.
+  Inspect usage independently, including pending reports and proven non-billable attempts.
+- Preserve definitive rejections, known results with unresolved usage, and
+  accepted receipts across lookup failures. Report response byte limits separately.
+- Return a retryable tool answer when a transient failure is proven to have
+  occurred before the request could execute. Check scope refusals and correctable inputs separately.
+
 ## 0.10.0
 
 - Settle definite OpenAI Images request rejections and confirmed pre-send

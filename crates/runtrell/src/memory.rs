@@ -534,6 +534,7 @@ fn admit_child(
             finished_at: None,
             usage_observations: vec![],
             unsettled_result: None,
+            lookup_failure: None,
             recovery: None,
         },
     );
@@ -1017,6 +1018,29 @@ impl BudgetAuthority for MemoryStore {
     }
 }
 impl OperationStore for MemoryStore {
+    async fn record_lookup_failure(
+        &self,
+        c: &Claim,
+        id: &str,
+        failure: LookupFailure,
+        now: u64,
+    ) -> Result<()> {
+        self.tx(|s| {
+            fence(s, c, now, false)?;
+            let op = s.operations.get_mut(id).ok_or(Error::NotFound)?;
+            if op.run != c.run {
+                return Err(Error::PermissionDenied);
+            }
+            if op.retired {
+                return Err(Error::Closed);
+            }
+            if !op.settled {
+                op.lookup_failure = Some(failure);
+            }
+            Ok(())
+        })
+    }
+
     async fn observe_result(
         &self,
         c: &Claim,
@@ -1245,6 +1269,7 @@ impl OperationStore for MemoryStore {
                 finished_at: None,
                 usage_observations: vec![],
                 unsettled_result: None,
+                lookup_failure: None,
                 recovery: None,
             };
             s.operations.insert(id, op.clone());
@@ -1362,17 +1387,9 @@ impl OperationStore for MemoryStore {
                 ExternalResult::Applied { .. } => OperationState::Applied,
                 ExternalResult::Accepted { .. } => OperationState::Accepted,
                 ExternalResult::Failed { .. } => OperationState::Failed,
-                ExternalResult::Unknown | ExternalResult::UnknownDiagnostic(_) => {
-                    OperationState::Unknown
-                }
+                ExternalResult::Ambiguous(_) => OperationState::Unknown,
             };
-            let unknown = matches!(
-                result,
-                ExternalResult::Unknown | ExternalResult::UnknownDiagnostic(_)
-            ) || (amount.is_none()
-                && !(matches!(result, ExternalResult::Accepted { .. })
-                    && old.request.reserve == Amount::default()
-                    && old.request.quantities.is_empty()));
+            let unknown = amount.is_none() && !matches!(result, ExternalResult::Accepted { .. });
             for id in ancestors(s, &r.spec.account)? {
                 let a = s.accounts.get_mut(&id).unwrap();
                 if old.unknown_usage {

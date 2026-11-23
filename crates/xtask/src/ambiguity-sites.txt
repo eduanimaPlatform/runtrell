@@ -1,0 +1,12 @@
+# Path, function, closed reason, number of occurrences.
+crates/runtrell-providers/src/adapter.rs invoke ResponseIdentityUnverified 2
+crates/runtrell-providers/src/adapter.rs send_at_with_usage TransportAfterPossibleWrite 1
+crates/runtrell-providers/src/adapter.rs send_at_with_usage ResponseByteLimit 1
+crates/runtrell-providers/src/adapter.rs send_at_with_usage ResponseLost 1
+crates/runtrell-providers/src/adapter.rs send_at_with_usage ResponseDecode 1
+crates/runtrell/src/driver.rs dispatch InvocationInterrupted 1
+crates/runtrell/src/driver.rs record_unconfirmed RecoveryUnconfirmed 1
+crates/runtrell-testkit/src/lib.rs ambiguous_fixture InvocationInterrupted 1
+crates/runtrell-testkit/src/recovery_contracts.rs provider_diagnostic_survives_reopen ResponseLost 1
+crates/runtrell/tests/contracts.rs reservation_is_idempotent_and_unknown_is_not_zero RecoveryUnconfirmed 1
+crates/runtrell/src/driver.rs dispatch ResponseIdentityUnverified 1

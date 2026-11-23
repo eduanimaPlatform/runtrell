@@ -409,9 +409,16 @@ fn partial_usage_keeps_result_evidence_and_resolves_only_by_lookup() {
             )
             .await
             .unwrap(),
-            ExternalResult::Unknown
+            partial.clone()
         );
         let op = s.operation(&c.run, "effect").await.unwrap().unwrap();
+        assert!(matches!(
+            op.usage_outcome(),
+            UsageOutcome::Unresolved {
+                reason: UsageIssue::Missing,
+                ..
+            }
+        ));
         assert_eq!(op.unsettled_result, Some(partial));
         assert_eq!(s.account(&a).await.unwrap().unknown, 1);
         assert_eq!(s.account(&a).await.unwrap().used, Amount::default());

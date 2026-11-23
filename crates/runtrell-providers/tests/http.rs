@@ -14,6 +14,12 @@ mod image_contracts {
     type InputModel = Gemini;
     const MODEL_KIND: &str = "gemini";
     const OPENAI: bool = false;
+    fn set_matrix_fixture_endpoint(provider: &mut Images, endpoint: String) {
+        provider.0.config.endpoint = endpoint;
+    }
+    fn fixture_transport(provider: &mut Images) -> &mut crate::adapter::Adapter {
+        &mut provider.0
+    }
     include!("support/images.rs");
 }
 #[cfg(feature = "openai")]
@@ -22,6 +28,12 @@ mod openai_image_contracts {
     type InputModel = OpenAi;
     const MODEL_KIND: &str = "openai";
     const OPENAI: bool = true;
+    fn set_matrix_fixture_endpoint(provider: &mut Images, endpoint: String) {
+        provider.set_fixture_endpoint(endpoint);
+    }
+    fn fixture_transport(provider: &mut Images) -> &mut crate::adapter::Adapter {
+        &mut provider.adapter
+    }
     include!("support/images.rs");
     include!("support/openai_images.rs");
     include!("support/img26.rs");
@@ -37,6 +49,8 @@ mod document_contracts;
 #[cfg(feature = "openai")]
 #[path = "support/media_replay.rs"]
 mod media_replay;
+#[path = "support/outcomes.rs"]
+mod outcomes;
 #[path = "support/still_images.rs"]
 mod still_images;
 #[path = "support/view_images.rs"]
@@ -145,12 +159,14 @@ async fn sequence_server(
                 bytes.extend_from_slice(&buf[..n]);
                 if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
                     let head = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
-                    let len: usize = head
+                    let len = head
                         .lines()
                         .find_map(|line| line.strip_prefix("content-length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
+                        .map(|length| length.parse::<usize>().unwrap())
+                        .unwrap_or_else(|| {
+                            assert!(head.starts_with("get "));
+                            0
+                        });
                     if bytes.len() >= end + 4 + len {
                         break;
                     }
@@ -405,10 +421,14 @@ async fn only_documented_openai_overload_and_slow_down_enable_runtime_retry() {
             panic!("saved failure")
         };
         assert_eq!(retry_after, expected_delay, "HTTP {status} {error_code}");
-        assert!(
-            usage.input.is_none() && usage.output.is_none(),
-            "unknown counters are retained"
-        );
+        if status == 503 {
+            assert!(matches!(usage.outcome(), UsageOutcome::Unresolved { .. }));
+        } else {
+            assert_eq!(
+                usage.outcome(),
+                UsageOutcome::NonBillable(NonBillableReason::RejectedBeforeExecution)
+            );
+        }
         let failure: Failure = serde_json::from_str(&code).unwrap();
         assert_eq!(
             failure.class == ErrorClass::Retryable,
@@ -696,7 +716,28 @@ async fn provider_diagnostic_rejects_hostile_fields_and_non_json_body() {
 }
 #[cfg(feature = "openai")]
 #[tokio::test]
-async fn provider_success_status_with_invalid_schema_is_response_decode_unknown() {
+async fn rejected_request_settles_without_reported_counters() {
+    let (url, server) = server(
+        403,
+        "",
+        json!({"error":{"type":"invalid_request_error","code":"permission_denied"}}),
+    )
+    .await;
+    let result = OpenAi::new(config(url))
+        .unwrap()
+        .invoke(&context(), text(request()))
+        .await
+        .unwrap();
+    let ExternalResult::Failed { usage, .. } = result else {
+        panic!("expected a definite rejection");
+    };
+    assert_eq!(usage.amount(), Ok(Amount::default()));
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn provider_success_status_with_invalid_schema_preserves_definite_failure() {
     let (url, server) = server(200, "", json!({})).await;
     let result = OpenAi::new(config(url))
         .unwrap()
@@ -709,7 +750,7 @@ async fn provider_success_status_with_invalid_schema_is_response_decode_unknown(
     assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseDecode);
     assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
     assert_eq!(diagnostic.http_status, Some(200));
-    assert!(matches!(result, ExternalResult::UnknownDiagnostic(_)));
+    assert!(matches!(result, ExternalResult::Failed { .. }));
     assert_eq!(server.await.unwrap().len(), 1);
 }
 #[cfg(feature = "gemini")]
@@ -975,8 +1016,10 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>, k
             retry_after, None,
             "header alone does not permit another attempt"
         );
-        assert_eq!(usage.input, None);
-        assert_eq!(usage.output, None);
+        assert!(matches!(
+            usage.outcome(),
+            UsageOutcome::NonBillable(_) | UsageOutcome::Unresolved { .. }
+        ));
         assert_eq!(task.await.unwrap().len(), 1, "hidden retry");
     }
     let date = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(60));
@@ -1043,7 +1086,7 @@ async fn errors<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>, k
         assert_eq!(diagnostic.send_certainty, certainty);
         assert_eq!(diagnostic.phase, phase);
         assert_eq!(diagnostic.http_status, status);
-        assert!(matches!(result, ExternalResult::UnknownDiagnostic(_)));
+        assert!(matches!(result, ExternalResult::Ambiguous(_)));
         assert_eq!(task.await.unwrap().len(), 1, "disconnect retry");
     }
 }
@@ -1238,7 +1281,7 @@ async fn options_and_bounds<T: ModelPort + std::fmt::Debug>(
     let diagnostic = result
         .provider_diagnostic()
         .expect("oversized body diagnostic");
-    assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseRead);
+    assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseByteLimit);
     assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
     assert_eq!(diagnostic.http_status, Some(200));
     for endpoint in [
@@ -2184,16 +2227,17 @@ async fn managed_background_contract<S: ControlStore>(
         "content":[{"type":"output_text","text":"{\"decision\":\"answered\"}"}]}]);
     terminal["usage"] = json!({"input_tokens":100,"input_tokens_details":{"cached_tokens":0,
         "cache_write_tokens":0},"output_tokens":32,"total_tokens":132});
-    let (url, http) = raw_server_with_replies(
-        vec![
+    let (url, http) = sequence_server(vec![
+        (
+            200,
+            "",
             json!({"object":"response.input_tokens","input_tokens":100}),
-            pending("queued"),
-            pending("in_progress"),
-            pending("in_progress"),
-            terminal,
-        ],
-        5,
-    )
+        ),
+        (200, "", pending("queued")),
+        (401, "", json!({"error":{"code":"invalid_key"}})),
+        (200, "", pending("in_progress")),
+        (200, "", terminal),
+    ])
     .await;
 
     let account = store
@@ -2259,6 +2303,18 @@ async fn managed_background_contract<S: ControlStore>(
         store: store.clone(),
         ..runtime
     };
+    assert!(matches!(
+        runtime.drive(&claim).await.unwrap().state,
+        RunState::Waiting(_)
+    ));
+    let after_lookup = store.list_operations(&run).await.unwrap().remove(0);
+    assert_eq!(after_lookup.result, operation.result);
+    assert_eq!(
+        after_lookup.lookup_failure,
+        Some(LookupFailure::Rejected(401))
+    );
+    assert_eq!(after_lookup.usage_outcome(), UsageOutcome::Pending);
+    assert!(!after_lookup.unknown_usage);
     for _ in 0..3 {
         if runtime.drive(&claim).await.unwrap().state == RunState::Terminal(Terminal::Succeeded) {
             break;

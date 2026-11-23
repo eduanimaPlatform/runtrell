@@ -335,7 +335,7 @@ impl<T: Tool> Tool for LoseImageReply<T> {
     async fn invoke(&self, c: &ToolContext, v: Value) -> Result<ExternalResult> {
         let result = self.inner.invoke(c, v).await?;
         if self.lose.swap(false, Ordering::SeqCst) {
-            Ok(ExternalResult::Unknown)
+            Ok(crate::ambiguous_fixture())
         } else {
             Ok(result)
         }

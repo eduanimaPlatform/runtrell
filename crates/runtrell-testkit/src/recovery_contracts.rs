@@ -325,14 +325,17 @@ pub async fn provider_diagnostic_survives_reopen<S: ControlStore>(first: Arc<S>,
         .record(
             &claim,
             &operation.id,
-            ExternalResult::UnknownDiagnostic(diagnostic.clone()),
+            ExternalResult::ambiguous(
+                AmbiguityEvidence::Provider(diagnostic.clone()),
+                AmbiguityReason::ResponseLost,
+            ),
             0,
         )
         .await
         .unwrap();
     // A later lookup that cannot recover the result must not erase transport evidence.
     first
-        .record(&claim, &operation.id, ExternalResult::Unknown, 0)
+        .record(&claim, &operation.id, crate::ambiguous_fixture(), 0)
         .await
         .unwrap();
     let saved = resumed
@@ -577,7 +580,11 @@ pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>)
                 case,
                 "incomplete" | "late" | "price" | "quantity" | "malformed"
             ) {
-                assert_eq!(actual, Err(Error::UsageUnknown));
+                if case == "late" {
+                    assert_eq!(actual, Err(Error::UsageUnknown));
+                } else {
+                    assert_eq!(actual, Ok(result.clone()));
+                }
                 let balance = resumed.account(&account).await.unwrap();
                 assert_eq!(balance.used, Amount::default());
                 assert_eq!(balance.reserved, Amount::new(10, 10));
@@ -585,6 +592,7 @@ pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>)
                 let saved = resumed.operation(&run, "saved").await.unwrap().unwrap();
                 assert!(!saved.settled);
                 if case != "late" {
+                    assert_eq!(saved.result, Some(result.clone()));
                     assert_eq!(saved.unsettled_result, Some(result.clone()));
                 }
                 if case == "malformed" {
@@ -630,13 +638,13 @@ pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>)
             .unwrap();
         assert_eq!(
             resumed
-                .record(&current, &operation.id, ExternalResult::Unknown, 101)
+                .record(&current, &operation.id, crate::ambiguous_fixture(), 101)
                 .await,
             Err(Error::Conflict)
         );
         assert_eq!(
             resumed
-                .observe_result(&current, &operation.id, ExternalResult::Unknown, 101)
+                .observe_result(&current, &operation.id, crate::ambiguous_fixture(), 101)
                 .await,
             Err(Error::Conflict)
         );
@@ -700,7 +708,7 @@ impl ModelPort for PreparedModel {
             .lock()
             .unwrap()
             .push(c.recovery_proof.clone().unwrap());
-        Ok(ExternalResult::Unknown)
+        Ok(crate::ambiguous_fixture())
     }
     async fn lookup(&self, c: &ToolContext, _: PreparedModelRequest) -> Result<Lookup> {
         assert_eq!(
@@ -823,7 +831,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
     );
     assert!(rt.model.seen.lock().unwrap().is_empty());
     rt.model.fail.store(false, Ordering::SeqCst);
-    assert_eq!(dispatch!(), Ok(ExternalResult::Unknown));
+    assert_eq!(dispatch!(), Ok(crate::ambiguous_fixture()));
     let op = s.operation(&h, "prepared").await.unwrap().unwrap();
     assert_eq!(op.request.recovery_until, Some(50));
     assert_eq!(
@@ -895,7 +903,7 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         )
         .await
         .unwrap();
-    assert_eq!(result, ExternalResult::Unknown);
+    assert_eq!(result, crate::ambiguous_fixture());
     let retry = s.operation(&h, "prepared").await.unwrap().unwrap();
     assert_eq!(retry.request.recovery_until, Some(50));
     assert_eq!(
@@ -1014,7 +1022,7 @@ impl Tool for PreparedJob {
             .lock()
             .unwrap()
             .push(c.recovery_proof.clone().unwrap());
-        Ok(ExternalResult::Unknown)
+        Ok(crate::ambiguous_fixture())
     }
     async fn lookup(&self, c: &ToolContext, _: Value) -> Result<Lookup> {
         self.0
@@ -1096,7 +1104,7 @@ pub async fn job_preparation<S: ControlStore>(s: Arc<S>) {
         Amount::default()
     );
     state.fail.store(false, Ordering::SeqCst);
-    assert_eq!(dispatch!(), Ok(ExternalResult::Unknown));
+    assert_eq!(dispatch!(), Ok(crate::ambiguous_fixture()));
     let original = s.operation(&h, "job").await.unwrap().unwrap();
     state.fail.store(true, Ordering::SeqCst);
     assert_eq!(dispatch!(), Err(Error::UsageUnknown));
@@ -1110,7 +1118,7 @@ pub async fn job_preparation<S: ControlStore>(s: Arc<S>) {
         Amount::new(0, 10)
     );
     state.unsent.store(true, Ordering::SeqCst);
-    assert_eq!(dispatch!(), Ok(ExternalResult::Unknown));
+    assert_eq!(dispatch!(), Ok(crate::ambiguous_fixture()));
     assert_eq!(state.prepared.load(Ordering::SeqCst), 2);
     let replayed = s.operation(&h, "job").await.unwrap().unwrap();
     assert_eq!(replayed.request, original.request);

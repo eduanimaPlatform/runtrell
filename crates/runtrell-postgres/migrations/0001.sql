@@ -1,7 +1,7 @@
--- Schema 5 is a fresh schema; no upgrade of prior schemas.
+-- Schema 6 is a fresh schema; no upgrade of prior schemas.
 CREATE TABLE IF NOT EXISTS {{schema}}.schema_config (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    version integer NOT NULL CHECK (version = 5), capacity jsonb NOT NULL
+    version integer NOT NULL CHECK (version = 6), capacity jsonb NOT NULL
 );
 CREATE TABLE IF NOT EXISTS {{schema}}.runs (
     handle jsonb NOT NULL,
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS {{schema}}.attempts (
     settled boolean NOT NULL, unknown_usage boolean NOT NULL, retired boolean NOT NULL DEFAULT false,
     send_generation numeric(20,0), send_count bigint NOT NULL,
     replay_proof_generation numeric(20,0), created_at numeric(20,0) NOT NULL,
-    finished_at numeric(20,0), usage_observations jsonb NOT NULL, unsettled_result jsonb,
+    finished_at numeric(20,0), usage_observations jsonb NOT NULL, unsettled_result jsonb, lookup_failure jsonb,
     recovery jsonb,
     UNIQUE(tenant,run_id,operation_key,attempt),
     FOREIGN KEY(tenant,run_id) REFERENCES {{schema}}.runs(tenant,id)

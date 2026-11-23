@@ -691,9 +691,8 @@ impl ModelPort for LostReply {
     }
 }
 
-/// A provider result that is missing or incomplete is not an operator case: the reopened Run
-/// still looks it up once (no resend, reservation held) and either recovers the reply or ends
-/// with the ordinary `OutcomeUnknown`. It never enters the operator-action wait.
+/// A reopened Run looks up an incomplete response without resending. Missing
+/// usage retains the original receipt and reservation while reconciliation waits.
 pub async fn lost_reply_keeps_lookup_recovery<S: ControlStore + 'static>(
     store: Arc<S>,
     restarted: Arc<S>,
@@ -772,7 +771,7 @@ pub async fn lost_reply_keeps_lookup_recovery<S: ControlStore + 'static>(
         } else {
             assert_eq!(
                 second.state,
-                RunState::Terminal(Terminal::OutcomeUnknown("usage unavailable".into()))
+                RunState::Waiting("external reconciliation".into())
             );
             // Nothing is released or zero-filled: the reservation and unknown mark stay.
             assert_eq!(held.unknown, 1);
@@ -1210,7 +1209,10 @@ pub async fn dependent_resource_extension<S: ControlStore>(first: Arc<S>, second
         )
         .await
         .unwrap();
-    assert_eq!(result, ExternalResult::Unknown);
+    assert_eq!(
+        result.ambiguity().map(AmbiguousOutcome::reason),
+        Some(AmbiguityReason::ResponseIdentityUnverified),
+    );
     assert_eq!(
         second.mark_sent(&claim, &op.id, 8).await,
         Err(Error::Conflict)

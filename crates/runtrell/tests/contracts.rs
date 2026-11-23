@@ -20,9 +20,17 @@ fn reservation_is_idempotent_and_unknown_is_not_zero() {
         );
         let op = s.begin(&claim, request.clone(), 0).await.unwrap();
         assert_eq!(s.begin(&claim, request, 0).await.unwrap(), op);
-        s.record(&claim, &op.id, ExternalResult::Unknown, 0)
-            .await
-            .unwrap();
+        s.record(
+            &claim,
+            &op.id,
+            ExternalResult::ambiguous(
+                AmbiguityEvidence::DispatchRecorded,
+                AmbiguityReason::RecoveryUnconfirmed,
+            ),
+            0,
+        )
+        .await
+        .unwrap();
         let balance = s.account(&account).await.unwrap();
         assert_eq!(balance.reserved, Amount::new(60, 20));
         assert_eq!(balance.used, Amount::default());

@@ -276,7 +276,7 @@ pub async fn dispatch_restart<H: LedgerHarness>() {
         )
         .await
         .unwrap(),
-        ExternalResult::Unknown
+        crate::ambiguous_fixture()
     );
     assert_eq!(
         store.account(&account).await.unwrap().reserved.micro_usd,

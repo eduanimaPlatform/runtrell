@@ -91,7 +91,12 @@ StoredOutputToolはこのhookを内側のToolへ転送する。既定実装は�
 
 `ExternalResult::{Applied,Failed}.physical_evidence`は接続先が報告した物理送信の観測列。各観測は順序番号と不透明bytes、列全体はComplete/Truncatedを持ち、最大256観測・合計65536 bytes、順序番号は狭義増加とする。切詰めはadapterが宣言し、Runtrellは黙って切り捨てず上限違反を拒否する。これは`Operation.usage_observations`（Runtrellの未精算論理結果の使用量履歴）とは別物。結果と一緒にMemory/Pgへ保存し、再照合・同値結果の重複精算防止に使う。証拠bytesをRuntrellが料金へ解釈することはなく、Usageの測定・完全性検査も引き続き必要となる。
 
-Provider adapterの失敗診断は公開`ProviderDiagnostic`を`ExternalResult::Failed.provider_diagnostic`または`ExternalResult::UnknownDiagnostic`に持たせ、Operationの既存result／unsettled_resultと共に保存する。`Operation::provider_diagnostic()`は未精算結果の証拠を優先する。phase、送信確実性、実HTTP statusと制限されたprovider識別子だけを公開し、message、header、URL、bodyは含めない。分類・再試行に使う既存`Failure.status`は本文中の数値codeを反映し得るため、実HTTP statusとは別に扱う。詳細は[providers](providers.md#contract)。
+Provider adapterの失敗診断は公開`ProviderDiagnostic`を`ExternalResult::Failed.provider_diagnostic`または`ExternalResult::Ambiguous` の根拠に持たせ、Operationの既存result／unsettled_resultと共に保存する。`Operation::provider_diagnostic()`は未精算結果の証拠を優先する。phase、送信確実性、実HTTP statusと制限されたprovider識別子だけを公開し、message、header、URL、bodyは含めない。分類・再試行に使う既存`Failure.status`は本文中の数値codeを反映し得るため、実HTTP statusとは別に扱う。詳細は[providers](providers.md#contract)。
+
+- 結果不明は `ExternalResult::ambiguous(evidence, reason)` で構築する。`ambiguity()` から `AmbiguousOutcome::evidence()` と `reason()` を読む。
+- `ExternalResult::usage_outcome()` は実測、非課金、報告待ち、解決不能を返す。`Operation::usage_outcome()` は永続台帳での精算も考慮する。`dispatch` は精算保留でも既知の結果を返す。Run が確定出力を消費する前に精算を確認する。明示された再試行では既存の予算方針で新しい予約を審査する。
+- `Lookup::Unavailable` と `Operation::lookup_failure` は照会時の障害を保持する。照会側の拒否や受信異常から元の結果を作らない。
+- 標準ツールは確実な未送信の一時障害を `ExternalResult::retryable_not_sent()` で返せる。Run はその試行をゼロ精算し、モデルに再試行可能な回答を返す。
 
 公開async traitはSend futureを返す静的dispatch契約。RegisteredToolのerased futureもSendであり、所有したRuntime/claimをmulti-thread Tokioのtokio::spawnへ渡せる。ホストはsupervisor・blocking taskの完了までTokio runtimeを維持する。blocking taskのFuture取消は物理I/Oの取消・保存失敗を意味しない。
 

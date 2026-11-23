@@ -223,6 +223,7 @@ fn img26_owner_recovery_prices_author_without_losing_known_image_cost() {
         created_at: 0,
         finished_at: Some(1),
         usage_observations: vec![],
+        lookup_failure: None,
         unsettled_result: None,
         recovery: None,
     };
@@ -358,6 +359,7 @@ fn img26_zero_cache_prices_image_and_author_evidence() {
         created_at: 0,
         finished_at: Some(1),
         usage_observations: vec![],
+        lookup_failure: None,
         unsettled_result: None,
         recovery: None,
     };

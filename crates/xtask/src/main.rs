@@ -76,11 +76,14 @@ fn read_catalog(text: &str) -> Result<BTreeMap<String, Requirement>, Box<dyn std
     Ok(rows)
 }
 
+mod ambiguity;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
     match std::env::args().nth(1).as_deref() {
+        Some("ambiguity") => ambiguity::check(&root)?,
         Some("models") => {
             let mode = std::env::args().nth(2).ok_or("expected models generate or models check")?;
             let today = std::process::Command::new("date").arg("+%F").output()?;

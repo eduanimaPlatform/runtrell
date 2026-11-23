@@ -190,8 +190,32 @@ impl DispatchRequest {
             && (actual.tokens > self.reserve.tokens || actual.micro_usd > self.reserve.micro_usd)
     }
 
+    pub(crate) fn matches_extension_receipt(&self, result: &ExternalResult) -> bool {
+        match (&self.extension, result) {
+            (
+                Some(extension),
+                ExternalResult::Applied {
+                    external_id, usage, ..
+                },
+            ) => {
+                external_id.as_deref() == Some(&extension.resource_id)
+                    && usage.resource_expires_at_ms == Some(extension.expires_at_ms)
+            }
+            _ => true,
+        }
+    }
+
     /// A local preflight failure can release the reservation with explicit no-send evidence.
     pub fn settlement_result(&self, result: &ExternalResult) -> Result<Option<Amount>> {
+        if let ExternalResult::Failed { usage, .. } = result
+            && let crate::UsageOutcome::NonBillable(reason) = usage.outcome()
+            && (self.extension.is_none()
+                || reason != crate::NonBillableReason::RejectedBeforeExecution)
+            && usage.quantities.values().all(|value| *value == 0)
+            && usage.provider_allowance.is_none()
+        {
+            return Ok(Some(Amount::default()));
+        }
         if let Some(extension) = &self.extension {
             match result {
                 ExternalResult::Applied {
@@ -228,9 +252,13 @@ impl DispatchRequest {
     }
     /// None means incomplete evidence, never measured zero.
     pub fn settlement_amount(&self, usage: &Usage) -> Result<Option<Amount>> {
+        if usage.issue.is_some() {
+            return Ok(None);
+        }
         let mut amount = match usage.amount() {
             Ok(amount) => Some(amount),
             Err(Error::UsageUnknown) => None,
+            Err(Error::Invalid(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
         if !self
@@ -550,6 +578,8 @@ impl Operation {
             || !recovery.basis.bytes().all(|b| b.is_ascii_graphic())
             || recovery.usage.micro_usd.is_some()
             || recovery.usage.unknown_reason.is_some()
+            || recovery.usage.issue.is_some()
+            || recovery.usage.non_billable.is_some()
         {
             return Err(Error::Invalid("settlement recovery".into()));
         }

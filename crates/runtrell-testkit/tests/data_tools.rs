@@ -333,7 +333,7 @@ fn timed_out_validation_remains_unknown_even_after_evidence_arrives() {
             )
             .await
             .unwrap();
-        assert_eq!(result, ExternalResult::Unknown);
+        assert_eq!(result, runtrell_testkit::ambiguous_fixture());
         assert!(matches!(
             tool.lookup(&validation_context(&claim, "validate"), input.clone())
                 .await

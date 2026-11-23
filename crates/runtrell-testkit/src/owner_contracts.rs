@@ -201,7 +201,7 @@ pub async fn resume_budget<S: ControlStore>(store: Arc<S>) {
         }
         let op = bx(|| store.begin(&claim, req, 0)).await.unwrap();
         if unknown {
-            bx(|| store.record(&claim, &op.id, ExternalResult::Unknown, 0))
+            bx(|| store.record(&claim, &op.id, crate::ambiguous_fixture(), 0))
                 .await
                 .unwrap();
         }

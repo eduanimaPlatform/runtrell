@@ -230,7 +230,7 @@ async fn failed_intent_transaction_rolls_back_all_ancestors_and_slot() {
 async fn failed_result_transaction_preserves_unknown_reservation_for_recovery() {
     let (pool, schema, s, a, c) = setup().await;
     let op = s.begin(&c, request("effect", 10), 0).await.unwrap();
-    s.record(&c, &op.id, ExternalResult::Unknown, 0)
+    s.record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
         .await
         .unwrap();
     s.fail_next_write();
@@ -256,14 +256,14 @@ async fn failed_result_transaction_preserves_unknown_reservation_for_recovery() 
             .unwrap()
             .unwrap()
             .result,
-        Some(ExternalResult::Unknown)
+        Some(runtrell_testkit::ambiguous_fixture())
     );
     reopened.record(&c, &op.id, applied(), 0).await.unwrap();
     reopened.record(&c, &op.id, applied(), 0).await.unwrap();
     assert_eq!(reopened.account(&a).await.unwrap().used, Amount::new(2, 2));
     assert_eq!(
         reopened
-            .record(&c, &op.id, ExternalResult::Unknown, 0)
+            .record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
             .await,
         Err(Error::Conflict)
     );
@@ -383,7 +383,7 @@ async fn queue_slots_fairness_and_cleanup_survive_all_connections_being_discarde
     }
     assert_eq!(s.dequeue(0).await.unwrap().unwrap().tenant, "a");
     let op = s.begin(&c, request("sandbox", 10), 0).await.unwrap();
-    s.record(&c, &op.id, ExternalResult::Unknown, 0)
+    s.record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
         .await
         .unwrap();
     s.cancel(&c.run, "stop").await.unwrap();

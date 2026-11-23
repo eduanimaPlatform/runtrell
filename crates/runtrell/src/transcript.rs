@@ -132,7 +132,7 @@ impl ExternalResult {
                 *provider_diagnostic = None;
                 usage.clear_transcript();
             }
-            Self::UnknownDiagnostic(_) => *self = Self::Unknown,
+            Self::Ambiguous(_) => self.clear_ambiguity_diagnostic(),
             _ => {}
         }
     }

@@ -175,6 +175,13 @@ fn disable_active_content(object: &mut lopdf::Object) {
     }
 }
 
+fn invalid_page_range() -> Error {
+    Error::InvalidToolInput {
+        path: "/pages".into(),
+        hint: "Choose a page range within the document and selection limits.".into(),
+    }
+}
+
 /// Parses and subsets with lopdf; None only inspects page count.
 pub fn select_pdf(
     bytes: &[u8],
@@ -199,9 +206,9 @@ pub fn select_pdf(
     let Some(range) = range else {
         return Ok((count, None));
     };
-    range.validate()?;
+    range.validate().map_err(|_| invalid_page_range())?;
     if range.last > count || range.last - range.first + 1 > max_pages {
-        return Err(Error::Invalid("DOCUMENT_PAGE_RANGE".into()));
+        return Err(invalid_page_range());
     }
     let remove: Vec<_> = pages
         .keys()
@@ -378,9 +385,9 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> DocumentView<S, P, 
             return Err(Error::Unsupported("document_view_external_resolver".into()));
         }
         if let Some(pages) = &input.pages {
-            pages.validate()?;
+            pages.validate().map_err(|_| invalid_page_range())?;
             if pages.last - pages.first + 1 > self.limits.max_selected_pages {
-                return Err(Error::Invalid("DOCUMENT_PAGE_RANGE".into()));
+                return Err(invalid_page_range());
             }
         }
         Ok(input)
@@ -443,7 +450,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> DocumentView<S, P, 
             .as_ref()
             .is_some_and(|pages| pages.first != 1 || pages.last != 1)
         {
-            return Err(Error::Invalid("DOCUMENT_PAGE_RANGE".into()));
+            return Err(invalid_page_range());
         }
         let bytes = self
             .resolver
@@ -707,7 +714,7 @@ impl<S: StandardToolStore, P: Policy, R: RunStore, C: Clock> Tool for DocumentVi
                 .as_ref()
                 .is_some_and(|r| r.first != 1 || r.last != 1)
             {
-                return Err(Error::Invalid("DOCUMENT_PAGE_RANGE".into()));
+                return Err(invalid_page_range());
             }
             (1, Some(bytes))
         };

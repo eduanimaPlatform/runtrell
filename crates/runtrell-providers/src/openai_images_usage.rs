@@ -14,7 +14,7 @@
 //! these counters. An explicit zero total or zero image input proves that the
 //! cached-image subset is zero.
 use crate::Config;
-use runtrell::{Error, SvgUsage, Usage};
+use runtrell::{Error, SvgUsage, Usage, UsageIssue};
 #[cfg(test)]
 use runtrell::{Price, SettlementRecovery};
 use serde_json::Value;
@@ -155,6 +155,7 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
     };
     let Some(usage) = response.get("usage").filter(|v| v.is_object()) else {
         u.unknown_reason = Some(REASON_ABSENT.into());
+        u.issue = Some(UsageIssue::Missing);
         return u;
     };
     let parsed = (|| -> Result<_, ()> {
@@ -177,6 +178,7 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
         parsed
     else {
         u.unknown_reason = Some(REASON_MALFORMED.into());
+        u.issue = Some(UsageIssue::Invalid);
         return u;
     };
     // Report every counter the response gives, as given.
@@ -220,11 +222,13 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
         u.image_output = None;
         u.quantities.clear();
         u.unknown_reason = Some(REASON_INCONSISTENT.into());
+        u.issue = Some(UsageIssue::Invalid);
         return u;
     }
     let (Some(_), Some(_), Some(_), Some(_)) = (input, output, in_text, in_image) else {
         attach_price_evidence(config, &mut u, billed_as_requested);
         u.unknown_reason = Some(REASON_INCOMPLETE.into());
+        u.issue = Some(UsageIssue::Incomplete);
         return u;
     };
     // Not filled: `reasoning`. The schema has no such category but also does not say none is
@@ -233,6 +237,7 @@ fn normalize_image(config: &Config, response: &Value) -> Usage {
     if cached_input_never_applies(&limits.model) && billed_as_requested {
         if u.cached.is_some_and(|n| n != 0) || u.cached_image_input.is_some_and(|n| n != 0) {
             u.unknown_reason = Some(REASON_INCONSISTENT.into());
+            u.issue = Some(UsageIssue::Invalid);
             return u;
         }
         u.cached = u.cached.or(Some(0));
@@ -252,6 +257,7 @@ fn price(config: &Config, u: &mut Usage, billed_as_requested: bool) {
     };
     if !billed_as_requested || price.model != u.model {
         u.unknown_reason = Some(REASON_MODEL_UNPRICED.into());
+        u.issue = Some(UsageIssue::ModelBindingMismatch);
         return;
     }
     attach_price_evidence(config, u, billed_as_requested);
@@ -267,8 +273,14 @@ fn price(config: &Config, u: &mut Usage, billed_as_requested: bool) {
                 .into(),
             );
         }
-        Err(Error::ReservationDenied) => u.unknown_reason = Some(REASON_OVERFLOW.into()),
-        Err(_) => u.unknown_reason = Some(REASON_INCONSISTENT.into()),
+        Err(Error::ReservationDenied) => {
+            u.unknown_reason = Some(REASON_OVERFLOW.into());
+            u.issue = Some(UsageIssue::ArithmeticOverflow);
+        }
+        Err(_) => {
+            u.unknown_reason = Some(REASON_INCONSISTENT.into());
+            u.issue = Some(UsageIssue::Invalid);
+        }
     }
 }
 
@@ -299,6 +311,7 @@ pub(crate) fn recovery_for_stored_usage(
     }
     let mut usage = stored.clone();
     usage.unknown_reason = None;
+    usage.issue = None;
     for counter in [&mut usage.cached, &mut usage.cached_image_input] {
         match counter {
             None => *counter = Some(0),

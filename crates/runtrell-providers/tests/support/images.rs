@@ -70,11 +70,24 @@ async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) 
         .unwrap();
     let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
     c.run = run.clone();
+    let tool = image_tool(store, run, c, action);
+    let context = ToolContext {
+        managed_send: None,
+        claim,
+        permission: tool.descriptor().permission,
+        account_binding: "images".into(),
+        ..context()
+    };
+    (tool, context)
+}
+fn image_tool<S: ControlStore>(
+    store: Arc<S>, run: RunHandle, c: Config, action: ImageAction,
+) -> ImageTool<Images, DataStore, FakePolicy, S, TestClock> {
     let access = Access::owner(Namespace {
         owner: run,
         agent: "main".into(),
     });
-    let tool = ImageTool {
+    ImageTool {
         provider: Images::new(c).unwrap(),
         resolver: ImageResolver {
             store: DataStore::memory(StoragePolicy::default()),
@@ -90,16 +103,42 @@ async fn fixture(mut c: Config, action: ImageAction) -> (TestTool, ToolContext) 
             reserve: Amount::new(2048, 2048),
             timeout: 30_000,
         },
-    };
-    let context = ToolContext {
-        managed_send: None,
-        claim,
-        permission: tool.descriptor().permission,
-        account_binding: "images".into(),
-        ..context()
-    };
-    (tool, context)
+    }
 }
+
+pub(super) async fn invoke_outcome_case<S: ControlStore>(
+    store: Arc<S>, context: ToolContext, config: Config, mut input: Value,
+    case: runtrell_testkit::outcome_contracts::OutcomeCase,
+    edit: bool,
+) -> Result<ExternalResult> {
+    use runtrell_testkit::outcome_contracts::OutcomeCase;
+    let mut c = image_config(config.endpoint);
+    c.run = config.run;
+    let action = if edit { ImageAction::Edit } else { ImageAction::Generate };
+    let mut tool = image_tool(store, context.claim.run.clone(), c, action);
+    if edit {
+        let staged = ArtifactStore::stage_named(
+            &tool.resolver.store,
+            &tool.output_access,
+            ArtifactSpec { id: "fixture-input".into(), media_type: "image/png".into(), class: DataClass::Intermediate },
+            &png(), 0,
+        ).await?;
+        let reference = ArtifactStore::save(&tool.resolver.store, &tool.output_access, staged, 0).await?;
+        input["references"] = json!([ImageReference::Artifact(reference)]);
+    }
+    if matches!(case, OutcomeCase::Builder) {
+        set_matrix_fixture_endpoint(&mut tool.provider, "not a URL".into());
+    }
+    let adapter = fixture_transport(&mut tool.provider);
+    match case {
+        OutcomeCase::RequestByteLimit => adapter.config.max_request_bytes = 1,
+        OutcomeCase::ResponseByteLimit | OutcomeCase::OversizedRejection => adapter.config.max_response_bytes = 1024,
+        _ => {}
+    }
+    tool.clock.set(1);
+    tool.invoke(&ToolContext { permission: tool.descriptor().permission, ..context }, input).await
+}
+
 #[tokio::test]
 async fn model_size_capability_rejects_before_send_and_guides_repair() {
     let (url, task) = server(200, "", image_response()).await;
@@ -352,7 +391,7 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
     assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseRead);
     assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Sent);
     assert_eq!(diagnostic.http_status, Some(200));
-    assert!(matches!(result, ExternalResult::UnknownDiagnostic(_)));
+    assert!(matches!(result, ExternalResult::Ambiguous(_)));
     assert_eq!(task.await.unwrap().len(), 1);
 }
 #[tokio::test]

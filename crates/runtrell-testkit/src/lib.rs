@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Credential-free host adapters; no private repositories or network access.
 pub mod driver_contracts;
+pub mod outcome_contracts;
 pub mod owner_contracts;
 pub mod phase_contracts;
 pub mod tool_failure_contracts;
@@ -138,7 +139,7 @@ impl ModelPort for FakeModel {
             .unwrap()
             .insert(ctx.operation.clone(), result.clone());
         if self.lose_response.swap(false, Ordering::SeqCst) {
-            Ok(ExternalResult::Unknown)
+            Ok(crate::ambiguous_fixture())
         } else {
             Ok(result)
         }
@@ -218,7 +219,7 @@ impl Tool for BusinessTool {
             output
         };
         if self.lose_response.swap(false, Ordering::SeqCst) {
-            return Ok(ExternalResult::Unknown);
+            return Ok(crate::ambiguous_fixture());
         }
         if self.accepted.load(Ordering::SeqCst) {
             return Ok(ExternalResult::Accepted { external_id: key });
@@ -361,3 +362,11 @@ pub mod image_contracts;
 pub mod repair_contracts;
 pub mod settlement_contracts;
 pub mod time_contracts;
+
+// An intentionally unresolved receipt for recovery contract fixtures.
+pub fn ambiguous_fixture() -> ExternalResult {
+    ExternalResult::ambiguous(
+        AmbiguityEvidence::InvocationStarted,
+        AmbiguityReason::InvocationInterrupted,
+    )
+}

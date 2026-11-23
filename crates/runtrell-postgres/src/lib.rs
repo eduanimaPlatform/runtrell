@@ -85,7 +85,7 @@ const SCHEMA_TABLES: [&str; 16] = [
     "queue_policy",
     "executions",
 ];
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 impl PgStore {
     fn new(pool: PgPool, schema: &str, capacity: Capacity) -> Result<Self> {

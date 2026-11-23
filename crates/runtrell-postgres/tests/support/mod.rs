@@ -175,6 +175,15 @@ impl BudgetAuthority for TestPg {
     }
 }
 impl OperationStore for TestPg {
+    async fn record_lookup_failure(
+        &self,
+        claim: &Claim,
+        id: &str,
+        failure: LookupFailure,
+        now: u64,
+    ) -> Result<()> {
+        self.0.record_lookup_failure(claim, id, failure, now).await
+    }
     async fn owner_receipt(&self, key: &str) -> Result<Option<OwnerReceipt>> {
         self.0.owner_receipt(key).await
     }

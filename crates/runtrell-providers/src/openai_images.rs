@@ -2,7 +2,7 @@
 #[cfg(test)]
 use crate::adapter::Wire;
 use crate::{
-    adapter::{Adapter, HttpResult},
+    adapter::{Adapter, HttpFailure, HttpResult},
     *,
 };
 use runtrell::{images::*, *};
@@ -12,7 +12,7 @@ use serde_json::json;
 /// full generations endpoint and model. No mask, remote lookup or hidden retry.
 #[derive(Debug)]
 pub struct OpenAiImages {
-    adapter: Adapter,
+    pub(crate) adapter: Adapter,
     edits_endpoint: String,
 }
 impl OpenAiImages {
@@ -142,7 +142,7 @@ impl OpenAiImages {
             self.adapter.managed_quote(&body, None)?;
         }
         if serde_json::to_vec(&body).map_err(|_| Error::Storage)?.len() > config.max_request_bytes {
-            return Err(Error::Invalid("IMAGE_REQUEST_BYTES_LIMIT".into()));
+            return Err(Error::RequestByteLimit);
         }
         Ok(body)
     }
@@ -214,56 +214,34 @@ impl ImagePort for OpenAiImages {
             }
             usage
         };
-        let normalize_failure = |status, response: &Value| {
-            if (400..500).contains(&status)
-                && response["error"].is_object()
-                && response["data"].is_null()
-                && response["usage"].is_null()
-                && response["svg_usage"].is_null()
-            {
-                return Usage {
-                    model: self.adapter.config.capabilities.limits.model.clone(),
-                    cached: Some(0),
-                    cached_image_input: Some(0),
-                    image_input: Some(0),
-                    image_output: Some(0),
-                    quantities: [("text_input_tokens".into(), 0)].into(),
-                    ..Usage::measured(0, 0, 0)
-                };
-            }
-            normalize(response)
-        };
         let (parsed, diagnostic) = match self
             .adapter
-            .send_at_with_usage(context, endpoint, body, &[], None, normalize_failure)
-            .await
-            .unwrap_or_else(|_| self.adapter.unsent("IMAGE_REQUEST_NOT_SENT"))
+            .send_at_with_usage(context, endpoint, body, &[], None, |_, response| {
+                normalize(response)
+            })
+            .await?
         {
             HttpResult::Json {
                 value: parsed,
                 diagnostic,
             } => (parsed, diagnostic),
-            HttpResult::Failure(ExternalResult::Failed {
+            HttpResult::Failure(HttpFailure {
                 code,
                 usage,
                 retry_after,
-                provider_diagnostic,
-                ..
+                diagnostic,
             }) => {
-                let repair_hint = provider_diagnostic.as_ref().and_then(image_input_hint);
+                let repair_hint = image_input_hint(&diagnostic);
                 return Ok(ImageResponse::Received {
                     images: vec![],
                     usage,
                     failure: Some(code),
                     repair_hint,
                     retry_after,
-                    provider_diagnostic,
+                    provider_diagnostic: Some(diagnostic),
                 });
             }
-            HttpResult::UnknownDiagnostic(diagnostic) => {
-                return Ok(ImageResponse::UnknownDiagnostic(diagnostic));
-            }
-            _ => return Ok(ImageResponse::Unknown),
+            HttpResult::Ambiguous(outcome) => return Ok(ImageResponse::Ambiguous(outcome)),
         };
         let mut usage = normalize(&parsed);
         let mut failure = None;

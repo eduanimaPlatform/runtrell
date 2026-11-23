@@ -86,13 +86,7 @@ impl<
             bx(|| self.store.observe_result(c, id, result.clone(), now)).await?;
         }
         match bx(|| self.store.record(c, id, result.clone(), now)).await {
-            Ok(()) => {}
-            Err(Error::UsageUnknown) => {
-                return Ok(result
-                    .provider_diagnostic()
-                    .cloned()
-                    .map_or(ExternalResult::Unknown, ExternalResult::UnknownDiagnostic));
-            }
+            Ok(()) | Err(Error::UsageUnknown) => {}
             Err(e) => return Err(e),
         }
         Ok(result)
@@ -278,7 +272,9 @@ impl<
                 if let Some(result) = saved {
                     Lookup::Found(result)
                 } else {
-                    bx(|| self.model.lookup(&ctx, request)).await?
+                    bx(|| self.model.lookup(&ctx, request))
+                        .await
+                        .unwrap_or_else(Self::lookup_error)
                 }
             } else if op.request.kind == OperationKind::Tool
                 || (op.request.kind == OperationKind::Sandbox && op.request.scope.is_some())
@@ -303,7 +299,9 @@ impl<
                 if let Some(result) = saved {
                     Lookup::Found(result)
                 } else {
-                    tool.lookup(&tool_context, op.request.input.clone()).await?
+                    tool.lookup(&tool_context, op.request.input.clone())
+                        .await
+                        .unwrap_or_else(Self::lookup_error)
                 }
             } else if let Some(result) = saved {
                 Lookup::Found(result)
@@ -323,7 +321,10 @@ impl<
             } else {
                 continue;
             };
-            if let Lookup::Found(result) = found {
+            self.remember_lookup_failure(c, &op, &found).await?;
+            if let Lookup::Found(result) = found
+                && Self::can_adopt_lookup_result(&op, &result)
+            {
                 self.persist_result(c, &op.id, result).await?;
             }
         }
@@ -497,14 +498,25 @@ impl<
         if recovery {
             let found = Box::pin(lookup(ctx.clone()))
                 .await
-                .unwrap_or(Lookup::Unknown);
+                .unwrap_or_else(Self::lookup_error);
             // Fence after lookup even when no result was found.
             bx(|| self.store.check(c, self.clock.now(), false)).await?;
-            match found {
-                Lookup::Found(result) => {
+            self.remember_lookup_failure(c, &op, &found).await?;
+            let known = [op.unsettled_result.as_ref(), op.result.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|result| result.ambiguity().is_none());
+            match (found, known) {
+                (Lookup::Found(result), _) if Self::can_adopt_lookup_result(&op, &result) => {
                     return self.persist_result(c, &op.id, result).await;
                 }
-                Lookup::NotFound { scope } => {
+                (_, Some(result)) => {
+                    if op.result.as_ref() == Some(result) {
+                        return Ok(result.clone());
+                    }
+                    return self.persist_result(c, &op.id, result.clone()).await;
+                }
+                (Lookup::NotFound { scope }, None) => {
                     let r = bx(|| self.store.check(c, self.clock.now(), true)).await?;
                     self.policy.authorize(&r, &op.request.target, permission)?;
                     if let Err(error) = bx(|| {
@@ -514,41 +526,16 @@ impl<
                     .await
                     {
                         if error == Error::UsageUnknown {
-                            bx(|| {
-                                self.store.record(
-                                    c,
-                                    &op.id,
-                                    ExternalResult::Unknown,
-                                    self.clock.now(),
-                                )
-                            })
-                            .await?;
+                            self.record_unconfirmed(c, &op).await?;
                         }
                         return Err(error);
                     }
                 }
-                Lookup::Pending => {
-                    let pending = match op.result {
-                        Some(ExternalResult::Accepted { external_id }) => {
-                            ExternalResult::Accepted { external_id }
-                        }
-                        _ => ExternalResult::Accepted {
-                            external_id: op.id.clone(),
-                        },
-                    };
-                    bx(|| {
-                        self.store
-                            .record(c, &op.id, pending.clone(), self.clock.now())
-                    })
-                    .await?;
-                    return Ok(pending);
+                (Lookup::Pending, None) => {
+                    return Err(Error::Pending("external reconciliation".into()));
                 }
-                Lookup::Unknown => {
-                    let unknown = op
-                        .provider_diagnostic()
-                        .cloned()
-                        .map_or(ExternalResult::Unknown, ExternalResult::UnknownDiagnostic);
-                    bx(|| self.store.record(c, &op.id, unknown, self.clock.now())).await?;
+                (Lookup::Unknown | Lookup::Unavailable(_) | Lookup::Found(_), None) => {
+                    self.record_unconfirmed(c, &op).await?;
                     return Err(Error::UsageUnknown);
                 }
             }
@@ -593,45 +580,127 @@ impl<
         ctx.deadline = deadline;
         ctx.managed_send = ManagedSend::new(c, &op);
         let send = ctx.managed_send.clone();
-        let result = match Box::pin(self.bounded(invoke(ctx), deadline)).await {
-            Some(Ok(result)) => result,
-            _ if send.is_some() => {
-                // A managed provider cannot send before consuming its grant.
-                let not_sent = send.as_ref().is_some_and(ManagedSend::revoke_unused);
-                let diagnostic = ProviderDiagnostic {
-                    phase: if not_sent {
-                        ProviderFailurePhase::PreSend
-                    } else {
-                        ProviderFailurePhase::Send
-                    },
-                    send_certainty: if not_sent {
-                        ProviderSendCertainty::DefinitelyNotSent
-                    } else {
-                        ProviderSendCertainty::Unknown
-                    },
-                    http_status: None,
-                    provider_type: None,
-                    provider_code: None,
-                    provider_param: None,
-                    request_id: None,
-                };
-                if not_sent {
-                    ExternalResult::Failed {
-                        physical_evidence: None,
-                        code: "PROVIDER_REQUEST_NOT_SENT".into(),
-                        usage: Usage::measured(0, 0, 0),
-                        retry_after: None,
-                        repair_hint: None,
-                        provider_diagnostic: Some(diagnostic),
-                    }
-                } else {
-                    ExternalResult::UnknownDiagnostic(diagnostic)
-                }
+        let mut started = false;
+        let invoked = Box::pin(self.bounded(
+            async {
+                started = true;
+                invoke(ctx).await
+            },
+            deadline,
+        ))
+        .await;
+        let domain_error = op.request.kind != OperationKind::Sandbox;
+        let result = match invoked {
+            Some(Ok(result)) if !op.request.matches_extension_receipt(&result) => {
+                ExternalResult::ambiguous(
+                    AmbiguityEvidence::ReceiptObserved,
+                    AmbiguityReason::ResponseIdentityUnverified,
+                )
             }
-            _ => ExternalResult::Unknown,
+            Some(Ok(result)) => result,
+            Some(Err(Error::InvalidToolInput { path, hint })) if domain_error => {
+                Self::invocation_rejected("TOOL_INPUT_INVALID", Some(format!("{path}: {hint}")))
+            }
+            Some(Err(Error::PermissionDenied)) if domain_error => {
+                Self::invocation_rejected("PERMISSION_DENIED", None)
+            }
+            Some(Err(Error::NotFound)) if domain_error => {
+                Self::invocation_rejected("RESOURCE_NOT_FOUND", None)
+            }
+            Some(Err(Error::RequestByteLimit)) if domain_error => {
+                Self::invocation_rejected("REQUEST_BYTE_LIMIT", None)
+            }
+            Some(Err(Error::Unsupported(_))) if domain_error => {
+                Self::invocation_rejected("UNSUPPORTED_OPERATION", None)
+            }
+            _ if !started || send.as_ref().is_some_and(ManagedSend::revoke_if_not_sent) => {
+                ExternalResult::retryable_not_sent()
+            }
+            _ => ExternalResult::ambiguous(
+                AmbiguityEvidence::InvocationStarted,
+                AmbiguityReason::InvocationInterrupted,
+            ),
         };
         self.persist_result(c, &op.id, result).await
     }
+
+    fn lookup_error(error: Error) -> Lookup {
+        Lookup::Unavailable(match error {
+            Error::PermissionDenied => LookupFailure::PermissionDenied,
+            Error::Invalid(_) | Error::Unsupported(_) => LookupFailure::Configuration,
+            _ => LookupFailure::Transport,
+        })
+    }
+
+    async fn remember_lookup_failure(
+        &self,
+        claim: &Claim,
+        op: &Operation,
+        lookup: &Lookup,
+    ) -> Result<()> {
+        if let Lookup::Unavailable(failure) = lookup {
+            bx(|| {
+                self.store
+                    .record_lookup_failure(claim, &op.id, failure.clone(), self.clock.now())
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn can_adopt_lookup_result(op: &Operation, result: &ExternalResult) -> bool {
+        if result.ambiguity().is_some() || !op.request.matches_extension_receipt(result) {
+            return false;
+        }
+        match op.unsettled_result.as_ref().or(op.result.as_ref()) {
+            Some(ExternalResult::Applied { .. }) => {
+                matches!(result, ExternalResult::Applied { .. })
+            }
+            Some(ExternalResult::Failed { .. }) => matches!(result, ExternalResult::Failed { .. }),
+            _ => true,
+        }
+    }
+
+    async fn record_unconfirmed(&self, claim: &Claim, op: &Operation) -> Result<()> {
+        if op.result.is_none() && op.unsettled_result.is_none() {
+            let result = ExternalResult::ambiguous(
+                AmbiguityEvidence::DispatchRecorded,
+                AmbiguityReason::RecoveryUnconfirmed,
+            );
+            self.persist_result(claim, &op.id, result).await?;
+        }
+        Ok(())
+    }
+
+    fn invocation_rejected(code: &str, repair_hint: Option<String>) -> ExternalResult {
+        ExternalResult::Failed {
+            physical_evidence: None,
+            code: code.into(),
+            usage: Usage::non_billable(NonBillableReason::RejectedBeforeExecution),
+            retry_after: None,
+            repair_hint,
+            provider_diagnostic: None,
+        }
+    }
+
+    async fn require_settlement(&self, claim: &Claim, key: &str) -> Result<()> {
+        let operation = bx(|| self.store.operation(&claim.run, key))
+            .await?
+            .ok_or(Error::Conflict)?;
+        if !operation.settled
+            && !matches!(
+                operation.result,
+                Some(ExternalResult::Failed {
+                    retry_after: Some(_),
+                    ..
+                })
+            )
+        {
+            return Err(Error::Pending("external reconciliation".into()));
+        }
+        Ok(())
+    }
+
     async fn save(
         &self,
         c: &Claim,
@@ -890,9 +959,10 @@ impl<
                     Some(Terminal::BudgetReached(e.to_string()))
                 }
                 Error::UsageUnknown => Some(Terminal::OutcomeUnknown(e.to_string())),
-                Error::PermissionDenied | Error::Unsupported(_) | Error::Invalid(_) => {
-                    Some(Terminal::Failed(e.to_string()))
-                }
+                Error::PermissionDenied
+                | Error::Unsupported(_)
+                | Error::Invalid(_)
+                | Error::RequestByteLimit => Some(Terminal::Failed(e.to_string())),
                 _ => None,
             };
             if let Some(t) = terminal {
@@ -1544,6 +1614,7 @@ impl<
             .map_err(|e| Error::Invalid(e.to_string()))?;
         let restricted = request.tools != descriptors || pending_ack(&current)?.is_some();
         let lookup_request = PreparedModelRequest::for_lookup(invoke_request.clone())?;
+        let dispatch_key = dispatch.key.clone();
         let result = bx(|| {
             self.dispatch(
                 c,
@@ -1573,6 +1644,7 @@ impl<
             )
         })
         .await?;
+        self.require_settlement(c, &dispatch_key).await?;
         let output = completed(result)?;
         let reply: ModelReply =
             serde_json::from_value(output).map_err(|e| Error::Invalid(e.to_string()))?;
@@ -1919,27 +1991,51 @@ impl<
                 )
             })
             .await?;
+            self.require_settlement(c, &key).await?;
             if let ExternalResult::Failed {
                 code,
-                repair_hint: Some(hint),
+                usage,
+                repair_hint,
                 retry_after: None,
                 ..
             } = &result
+                && (repair_hint.is_some()
+                    || usage.non_billable == Some(NonBillableReason::RetryableNotSent))
             {
                 if tool.operation_kind() != OperationKind::Tool {
                     return Err(Error::Invalid(code.clone()));
                 }
-                let output = serde_json::json!({"code":code,"repairable":true,"hint":hint});
+                let retryable = usage.non_billable == Some(NonBillableReason::RetryableNotSent);
+                let kind = if retryable {
+                    ToolErrorKind::Network
+                } else {
+                    ToolErrorKind::InvalidArgs
+                };
+                let mut output = serde_json::json!({
+                    "code": code,
+                    "repairable": true,
+                    "hint": repair_hint.as_deref().unwrap_or("The request was not sent. Try again.")
+                });
+                if retryable {
+                    output["retryable"] = true.into();
+                }
                 if serde_json::to_vec(&output)
                     .map_err(|_| Error::Storage)?
                     .len()
                     > descriptor.max_output_bytes
                 {
-                    return Err(Error::Invalid("tool output exceeds declared limit".into()));
+                    output.as_object_mut().ok_or(Error::Storage)?.remove("hint");
+                    if serde_json::to_vec(&output)
+                        .map_err(|_| Error::Storage)?
+                        .len()
+                        > descriptor.max_output_bytes
+                    {
+                        return Err(Error::Invalid("tool output exceeds declared limit".into()));
+                    }
                 }
                 let current = bx(|| self.store.check(c, self.clock.now(), true)).await?;
                 let mut cp = self
-                    .prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":tool_input,"code":code,"repairable":true,"hint":hint}))
+                    .prepare_tool_repair(c, &current, serde_json::json!({"tool":name,"candidate":tool_input,"code":code,"repairable":true,"hint": output["hint"]}))
                     .await?;
                 let op = bx(|| self.store.operation(&c.run, &key))
                     .await?
@@ -1956,7 +2052,7 @@ impl<
                     data: output.clone(),
                 });
                 run.answer(call.answer(ToolResult::failed(ToolExecutionError::new(
-                    ToolErrorKind::InvalidArgs,
+                    kind,
                     output.to_string(),
                 ))))
                 .map_err(|e| Error::Invalid(e.to_string()))?;
@@ -2362,9 +2458,7 @@ fn completed(result: ExternalResult) -> Result<Value> {
             ..
         } => Err(Error::Pending("retry backoff".into())),
         ExternalResult::Failed { code, .. } => Err(Error::Invalid(code)),
-        ExternalResult::Accepted { .. }
-        | ExternalResult::Unknown
-        | ExternalResult::UnknownDiagnostic(_) => {
+        ExternalResult::Accepted { .. } | ExternalResult::Ambiguous(_) => {
             Err(Error::Pending("external reconciliation".into()))
         }
     }
@@ -2492,6 +2586,7 @@ impl<
             )
         })
         .await?;
+        self.require_settlement(c, key).await?;
         let reply: ModelReply = serde_json::from_value(completed(result)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         bx(|| self.store.check(c, self.clock.now(), true)).await?;

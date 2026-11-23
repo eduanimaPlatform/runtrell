@@ -42,6 +42,8 @@ pub enum Error {
     QueueTimeout,
     #[error("machine wait: {0}")]
     Pending(String),
+    #[error("request exceeds its byte limit")]
+    RequestByteLimit,
     #[error("not found")]
     NotFound,
     #[error("invalid input: {0}")]
@@ -126,6 +128,12 @@ pub struct Usage {
     /// only when they deliberately keep a value unknown; it never turns unknown into 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_reason: Option<UnknownReason>,
+    /// Proof that this attempt incurred no provider or tool charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_billable: Option<NonBillableReason>,
+    /// A typed explanation when reported counters cannot be settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<UsageIssue>,
     /// Billing evidence supplied by a trusted verifier for this provider receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_allowance: Option<Box<crate::models::ProviderAllowanceEvidence>>,
@@ -143,6 +151,37 @@ pub struct PriceEvidence {
     pub output_micro_usd: Option<u64>,
 }
 impl Usage {
+    pub fn non_billable(reason: NonBillableReason) -> Self {
+        Self {
+            non_billable: Some(reason),
+            ..Self::measured(0, 0, 0)
+        }
+    }
+
+    pub fn outcome(&self) -> UsageOutcome<'_> {
+        if let Some(reason) = self.non_billable
+            && self.amount() == Ok(Amount::default())
+        {
+            return UsageOutcome::NonBillable(reason);
+        }
+        if self.amount().is_ok() {
+            return UsageOutcome::Measured(self);
+        }
+        UsageOutcome::Unresolved {
+            reason: self
+                .issue
+                .unwrap_or_else(|| match (self.input, self.output) {
+                    (None, None) => UsageIssue::Missing,
+                    (Some(_), Some(_)) if self.micro_usd.is_none() => {
+                        UsageIssue::PricingUnavailable
+                    }
+                    (Some(_), Some(_)) => UsageIssue::Invalid,
+                    _ => UsageIssue::Incomplete,
+                }),
+            reported: Some(self),
+        }
+    }
+
     pub fn measured(input: u64, output: u64, cost: u64) -> Self {
         Self {
             input: Some(input),
@@ -169,6 +208,9 @@ impl Usage {
         Ok(())
     }
     pub fn amount(&self) -> Result<Amount> {
+        if self.issue.is_some() {
+            return Err(Error::UsageUnknown);
+        }
         let image_cost = self.micro_usd.ok_or(Error::UsageUnknown)?;
         let svg_cost = match &self.svg_usage {
             None => 0,
@@ -957,6 +999,7 @@ pub enum ProviderFailurePhase {
     PreSend,
     Send,
     ResponseRead,
+    ResponseByteLimit,
     ResponseDecode,
     HttpError,
 }
@@ -1010,6 +1053,75 @@ pub struct ProviderDiagnostic {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<SafeProviderField>,
 }
+/// Evidence available when an operation's effect cannot be determined.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AmbiguityEvidence {
+    Provider(ProviderDiagnostic),
+    InvocationStarted,
+    DispatchRecorded,
+    ReceiptWriteAttempted,
+    ReceiptObserved,
+}
+
+/// Why the effect is unresolved. Usage has its own classification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AmbiguityReason {
+    TransportAfterPossibleWrite,
+    ResponseLost,
+    ResponseDecode,
+    ResponseByteLimit,
+    ResponseIdentityUnverified,
+    InvocationInterrupted,
+    ReceiptCommitUnconfirmed,
+    RecoveryUnconfirmed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmbiguousOutcome {
+    evidence: AmbiguityEvidence,
+    reason: AmbiguityReason,
+}
+
+impl AmbiguousOutcome {
+    pub fn evidence(&self) -> &AmbiguityEvidence {
+        &self.evidence
+    }
+
+    pub fn reason(&self) -> AmbiguityReason {
+        self.reason
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NonBillableReason {
+    NotSent,
+    RetryableNotSent,
+    RejectedBeforeExecution,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsageIssue {
+    Missing,
+    Incomplete,
+    Invalid,
+    PricingUnavailable,
+    OutcomeUnresolved,
+    SettlementUnverified,
+    ArithmeticOverflow,
+    ModelBindingMismatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageOutcome<'a> {
+    Measured(&'a Usage),
+    NonBillable(NonBillableReason),
+    Pending,
+    Unresolved {
+        reason: UsageIssue,
+        reported: Option<&'a Usage>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ExternalResult {
     Applied {
@@ -1035,19 +1147,64 @@ pub enum ExternalResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_diagnostic: Option<ProviderDiagnostic>,
     },
-    Unknown,
-    /// Unknown result with transport evidence; reservation and recovery semantics
-    /// are identical to `Unknown`.
-    UnknownDiagnostic(ProviderDiagnostic),
+    Ambiguous(AmbiguousOutcome),
 }
 impl ExternalResult {
+    pub fn ambiguous(evidence: AmbiguityEvidence, reason: AmbiguityReason) -> Self {
+        Self::Ambiguous(AmbiguousOutcome { evidence, reason })
+    }
+
+    pub fn ambiguity(&self) -> Option<&AmbiguousOutcome> {
+        match self {
+            Self::Ambiguous(outcome) => Some(outcome),
+            _ => None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn clear_ambiguity_diagnostic(&mut self) {
+        if let Self::Ambiguous(outcome) = self
+            && let AmbiguityEvidence::Provider(diagnostic) = &mut outcome.evidence
+        {
+            diagnostic.provider_type = None;
+            diagnostic.provider_code = None;
+            diagnostic.provider_param = None;
+            diagnostic.request_id = None;
+        }
+    }
+
+    pub fn usage_outcome(&self) -> UsageOutcome<'_> {
+        match self {
+            Self::Accepted { .. } => UsageOutcome::Pending,
+            Self::Ambiguous(_) => UsageOutcome::Unresolved {
+                reason: UsageIssue::OutcomeUnresolved,
+                reported: None,
+            },
+            Self::Applied { usage, .. } | Self::Failed { usage, .. } => usage.outcome(),
+        }
+    }
+
+    pub fn retryable_not_sent() -> Self {
+        Self::Failed {
+            physical_evidence: None,
+            code: "REQUEST_NOT_SENT".into(),
+            usage: Usage::non_billable(NonBillableReason::RetryableNotSent),
+            retry_after: None,
+            repair_hint: None,
+            provider_diagnostic: None,
+        }
+    }
+
     pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
         match self {
             Self::Failed {
                 provider_diagnostic,
                 ..
             } => provider_diagnostic.as_ref(),
-            Self::UnknownDiagnostic(diagnostic) => Some(diagnostic),
+            Self::Ambiguous(outcome) => match outcome.evidence() {
+                AmbiguityEvidence::Provider(diagnostic) => Some(diagnostic),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1086,6 +1243,9 @@ pub struct Operation {
     pub finished_at: Option<u64>,
     pub usage_observations: Vec<Usage>,
     pub unsettled_result: Option<ExternalResult>,
+    /// Most recent lookup failure, recorded separately from the invocation receipt.
+    #[serde(default)]
+    pub lookup_failure: Option<LookupFailure>,
     /// Present only when the owner settled this operation through
     /// [`OperationStore::settle_recovered`]; keeps the old usage, the price basis and
     /// the new usage.
@@ -1112,8 +1272,21 @@ impl Operation {
             OperationKind::Model | OperationKind::Compaction
         ) && self.is_unsent_intent()
     }
-    /// Read persisted evidence even if an outward result was reduced to `Unknown`
-    /// while usage settlement remains pending.
+    /// Usage evidence in the context of the durable operation and its settlement.
+    pub fn usage_outcome(&self) -> UsageOutcome<'_> {
+        let Some(result) = self.unsettled_result.as_ref().or(self.result.as_ref()) else {
+            return UsageOutcome::Pending;
+        };
+        match result.usage_outcome() {
+            UsageOutcome::Measured(usage) if !self.settled => UsageOutcome::Unresolved {
+                reason: UsageIssue::SettlementUnverified,
+                reported: Some(usage),
+            },
+            outcome => outcome,
+        }
+    }
+
+    /// Read the diagnostic retained alongside the result and settlement evidence.
     pub fn provider_diagnostic(&self) -> Option<&ProviderDiagnostic> {
         self.unsettled_result
             .as_ref()
@@ -1136,6 +1309,13 @@ impl Operation {
                 Some(ExternalResult::Failed {
                     retry_after: None,
                     repair_hint: Some(_),
+                    ..
+                }) | Some(ExternalResult::Failed {
+                    usage: Usage {
+                        non_billable: Some(NonBillableReason::RetryableNotSent),
+                        ..
+                    },
+                    retry_after: None,
                     ..
                 })
             )
@@ -1183,6 +1363,18 @@ impl Operation {
         .then_some(result))
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LookupFailure {
+    PermissionDenied,
+    Rejected(u16),
+    Configuration,
+    Transport,
+    ResponseRead,
+    ResponseDecode,
+    ResponseByteLimit,
+    IdentityMismatch,
+}
+
 // Keep lookup results inline: callers forward the receipt directly to atomic settlement.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1191,6 +1383,7 @@ pub enum Lookup {
     Pending,
     Unknown,
     NotFound { scope: String },
+    Unavailable(LookupFailure),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
@@ -1235,14 +1428,39 @@ pub struct ManagedSend {
     attempt: u32,
     pricing: Box<crate::models::PricingSnapshot>,
     reserve: Amount,
-    used: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stage: std::sync::Arc<std::sync::atomic::AtomicU8>,
     poll_id: Option<String>,
 }
 
 impl ManagedSend {
-    /// Fence any later use and report whether the grant was still unused.
-    pub(crate) fn revoke_unused(&self) -> bool {
-        !self.used.swap(true, std::sync::atomic::Ordering::AcqRel)
+    const UNUSED: u8 = 0;
+    const UNTRACKED_SEND: u8 = 1;
+    const AWAITING_BODY: u8 = 2;
+    const BODY_RELEASED: u8 = 3;
+    const REVOKED: u8 = 4;
+
+    /// Revoke further use if the adapter has not released its request body.
+    pub fn revoke_if_not_sent(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.stage
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |stage| {
+                matches!(stage, Self::UNUSED | Self::AWAITING_BODY).then_some(Self::REVOKED)
+            })
+            .is_ok()
+    }
+
+    /// Release a required request body to the HTTP transport, unless revoked.
+    /// Once released, cancellation cannot prove the request was never written.
+    pub fn begin_body(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.stage
+            .compare_exchange(
+                Self::AWAITING_BODY,
+                Self::BODY_RELEASED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     pub(crate) fn new(claim: &Claim, op: &Operation) -> Option<Self> {
@@ -1252,7 +1470,7 @@ impl ManagedSend {
             attempt: op.request.attempt,
             pricing: op.request.pricing.clone()?,
             reserve: op.request.reserve,
-            used: Default::default(),
+            stage: Default::default(),
             poll_id: None,
         })
     }
@@ -1287,8 +1505,29 @@ impl ManagedSend {
             .filter(|_| self.matches(context, pricing))
     }
 
-    /// Consume the grant immediately before resolving credentials for a send.
+    /// Consume the grant at the handoff of a prepared request for sending.
     pub fn authorize(
+        &self,
+        context: &ToolContext,
+        pricing: &crate::models::PricingSnapshot,
+        required: Amount,
+    ) -> Result<()> {
+        self.consume(context, pricing, required, Self::UNTRACKED_SEND)
+    }
+
+    /// Authorize an HTTP request whose required body calls `begin_body` before
+    /// releasing any payload to the transport.
+    pub fn authorize_tracked(
+        &self,
+        context: &ToolContext,
+        pricing: &crate::models::PricingSnapshot,
+        required: Amount,
+    ) -> Result<()> {
+        self.consume(context, pricing, required, Self::AWAITING_BODY)
+    }
+
+    /// Check the binding before doing local preparation, without consuming it.
+    pub fn check(
         &self,
         context: &ToolContext,
         pricing: &crate::models::PricingSnapshot,
@@ -1299,10 +1538,25 @@ impl ManagedSend {
             || self.poll_id.is_some()
             || self.reserve.tokens < required.tokens
             || self.reserve.micro_usd < required.micro_usd
-            || self.used.swap(true, Ordering::AcqRel)
+            || self.stage.load(Ordering::Acquire) != Self::UNUSED
         {
             return Err(Error::ReservationDenied);
         }
+        Ok(())
+    }
+
+    fn consume(
+        &self,
+        context: &ToolContext,
+        pricing: &crate::models::PricingSnapshot,
+        required: Amount,
+        stage: u8,
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        self.check(context, pricing, required)?;
+        self.stage
+            .compare_exchange(Self::UNUSED, stage, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::ReservationDenied)?;
         Ok(())
     }
 }
@@ -1599,6 +1853,13 @@ pub trait Tool: Send + Sync {
         async move { Ok(Progress::Unknown) }
     }
     fn descriptor(&self) -> ToolDescriptor;
+    /// Return a receipt for a known effect or rejection. The runtime classifies
+    /// `InvalidToolInput`, `PermissionDenied`, `NotFound`, `RequestByteLimit` and
+    /// `Unsupported` as pre-effect errors. Use those variants only when the
+    /// request has been rejected before execution.
+    ///
+    /// A transient pre-send fault can return `ExternalResult::retryable_not_sent`.
+    /// An effect that may have happened requires `ExternalResult::ambiguous`.
     fn invoke(
         &self,
         context: &ToolContext,
@@ -1855,6 +2116,14 @@ pub trait OperationStore: Send + Sync {
         claim: &Claim,
         id: &str,
         result: ExternalResult,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    /// Record a failed lookup under the active claim, without changing the receipt.
+    fn record_lookup_failure(
+        &self,
+        claim: &Claim,
+        id: &str,
+        failure: LookupFailure,
         now: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
     fn proven_unsent(

@@ -94,6 +94,7 @@ jobs:
           cargo run -p xtask --locked -- models check
           cargo run -p xtask --locked -- trace
           cargo run -p xtask --locked -- hashes
+          cargo run -p xtask --locked -- ambiguity
           git diff --exit-code -- README.md docs/design/requirements-trace.md
       - name: Package inventory
         if: matrix.feature == 'default'

@@ -2,7 +2,7 @@
 #[cfg(test)]
 use crate::adapter::Wire;
 use crate::{
-    adapter::{Adapter, HttpResult},
+    adapter::{Adapter, HttpFailure, HttpResult},
     *,
 };
 use runtrell::{images::*, *};
@@ -75,7 +75,7 @@ impl GeminiImages {
         }
         let body = json!({"contents":[{"role":"user","parts":parts}],"generationConfig":{"responseModalities":["TEXT","IMAGE"],"candidateCount":1,"maxOutputTokens":config.capabilities.limits.max_output}});
         if serde_json::to_vec(&body).map_err(|_| Error::Storage)?.len() > config.max_request_bytes {
-            return Err(Error::Invalid("IMAGE_REQUEST_BYTES_LIMIT".into()));
+            return Err(Error::RequestByteLimit);
         }
         Ok(body)
     }
@@ -119,12 +119,11 @@ impl ImagePort for GeminiImages {
                 value: parsed,
                 diagnostic,
             } => (parsed, diagnostic),
-            HttpResult::Failure(ExternalResult::Failed {
+            HttpResult::Failure(HttpFailure {
                 code,
                 usage,
                 retry_after,
-                provider_diagnostic,
-                ..
+                diagnostic,
             }) => {
                 return Ok(ImageResponse::Received {
                     images: vec![],
@@ -132,20 +131,12 @@ impl ImagePort for GeminiImages {
                     failure: Some(code),
                     repair_hint: None,
                     retry_after,
-                    provider_diagnostic,
+                    provider_diagnostic: Some(diagnostic),
                 });
             }
-            HttpResult::UnknownDiagnostic(diagnostic) => {
-                return Ok(ImageResponse::UnknownDiagnostic(diagnostic));
-            }
-            _ => return Ok(ImageResponse::Unknown),
+            HttpResult::Ambiguous(outcome) => return Ok(ImageResponse::Ambiguous(outcome)),
         };
-        let mut usage = match self.0.usage(&parsed) {
-            Ok(u) => u,
-            Err(_) => {
-                return Ok(ImageResponse::UnknownDiagnostic(diagnostic));
-            }
-        };
+        let mut usage = self.0.normalized_usage(&parsed);
         let mut images = vec![];
         let mut failure = None;
         if let Some(candidates) = parsed["candidates"].as_array() {

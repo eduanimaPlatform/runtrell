@@ -354,7 +354,7 @@ fn invalid_partial_usage_and_unknown_hold_reservation() {
         let s = MemoryStore::default();
         let (_, c, a) = started(&s, "unknown", 100).await;
         let op = s.begin(&c, req("a", 30, 20), 0).await.unwrap();
-        s.record(&c, &op.id, ExternalResult::Unknown, 0)
+        s.record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
             .await
             .unwrap();
         for usage in [

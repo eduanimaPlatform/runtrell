@@ -1,4 +1,4 @@
-# PostgreSQL adapter（schema 5）
+# PostgreSQL adapter（schema 6）
 
 Phase seals are stored on the Run row. The seal transaction retires previous
 attempt payloads under the Run lock, releases the old claim and slot, and queues
@@ -182,7 +182,7 @@ throughput試験だけを選択した実行（24 Run、各20 renew、各条件48
 
 ## 2e：耐久ExecutionLedger
 
-PgStoreはExecutionLedgerを実装する。schema 5の同じ0001.sqlへexecutionsを追加し、旧schema検出・移行は追加しない。台帳はRunStore/OperationStoreと別の保存境界であり、外部取得前にintentのCOMMITを待つ。通常のSandbox受付・予約後のintent未保存は、既存operationから同じidentityで再照合する。台帳のCOMMITは業務成功や費用精算のreceiptではない。
+PgStoreはExecutionLedgerを実装する。schema 6の同じ0001.sqlへexecutionsを追加し、旧schema検出・移行は追加しない。台帳はRunStore/OperationStoreと別の保存境界であり、外部取得前にintentのCOMMITを待つ。通常のSandbox受付・予約後のintent未保存は、既存operationから同じidentityで再照合する。台帳のCOMMITは業務成功や費用精算のreceiptではない。
 
 ownerとcontext_operation、requestは不変。tenant/run_idはownerのgenerated列で検索し、全体records復元はしない。insertは同じPKの要求同値だけ冪等に返す。CASは対象行だけをFOR UPDATEし、Memoryと共通のExecutionRecord::advanceでrevision・取消・観測・資源条件/receiptを検証する。reclaimed列は同じtransactionでresourcesから算出し、pending()は未回収部分indexを使える管理検索とする。各資源の解放条件と確認はresources、証拠となる最新backend観測/費用はobservationに保存する。取消だけでは解放しない。
 
@@ -192,7 +192,7 @@ Memory/Pgに同一6件の契約suiteを適用する（固定入力/identity、CA
 
 ## 予算・受付方針
 
-AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_accountsのJSONB列へ保存し、既存の全祖先lock順と同じtransactionで更新する。Run方針はspec、優先度/公平性の重みはqueue_entries.schedulingへ保存する。queue内の選択はMemoryと同じbudget::queue_indexを使う。schema 5は空namespace用であり、過去schemaの移行・互換読込みは追加しない。
+AccountPolicyと追加数量の予約/使用/配送済み警告はbudget_accountsのJSONB列へ保存し、既存の全祖先lock順と同じtransactionで更新する。Run方針はspec、優先度/公平性の重みはqueue_entries.schedulingへ保存する。queue内の選択はMemoryと同じbudget::queue_indexを使う。schema 6は空namespace用であり、過去schemaの移行・互換読込みは追加しない。
 
 ## Host-owned transaction
 

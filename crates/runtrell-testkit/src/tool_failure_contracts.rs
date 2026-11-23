@@ -16,8 +16,22 @@ impl Tool for ClassifiedFailure {
         descriptor
     }
     async fn invoke(&self, _: &ToolContext, _: Value) -> Result<ExternalResult> {
+        match self.mode {
+            "invoke_permission" => return Err(Error::PermissionDenied),
+            "invoke_invalid" => {
+                return Err(Error::InvalidToolInput {
+                    path: "/value".into(),
+                    hint: "Provide a valid value.".into(),
+                });
+            }
+            "pre_send" => {
+                self.clock.set(233);
+                return Ok(ExternalResult::retryable_not_sent());
+            }
+            _ => {}
+        }
         if self.mode == "unknown" {
-            return Ok(ExternalResult::Unknown);
+            return Ok(crate::ambiguous_fixture());
         }
         if self.mode == "deadline" {
             self.clock.set(1);
@@ -41,6 +55,9 @@ pub async fn failure_boundaries<S: ControlStore>(store: Arc<S>) {
     for mode in [
         "storage",
         "permission",
+        "invoke_permission",
+        "invoke_invalid",
+        "pre_send",
         "unclassified",
         "unknown",
         "retry",
@@ -56,7 +73,7 @@ pub async fn failure_boundaries<S: ControlStore>(store: Arc<S>) {
             spec.deadline = Some(1);
         }
         let run = store.start(spec).await.unwrap();
-        let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
+        let claim = store.claim(&run, "worker", 0, 1_000).await.unwrap();
         let clock = TestClock::default();
         let model = FakeModel::scripted(vec![
             FakeModel::calls(vec![ToolCall {
@@ -81,17 +98,60 @@ pub async fn failure_boundaries<S: ControlStore>(store: Arc<S>) {
         let done = rt.drive(&claim).await.unwrap();
         match mode {
             "unknown" | "retry" => assert!(matches!(done.state, RunState::Waiting(_))),
+            "invoke_invalid" | "pre_send" => {
+                assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded))
+            }
             "deadline" => assert_eq!(done.state, RunState::Terminal(Terminal::DeadlineReached)),
             _ => assert!(matches!(
                 done.state,
                 RunState::Terminal(Terminal::Failed(_))
             )),
         }
-        assert_eq!(model.requests.lock().unwrap().len(), 1, "{mode}");
-        assert!(
-            done.checkpoint.unwrap().payload["tool_repair"].is_null(),
-            "{mode}"
-        );
+        let answered = matches!(mode, "invoke_invalid" | "pre_send");
+        {
+            let requests = model.requests.lock().unwrap();
+            assert_eq!(requests.len(), if answered { 2 } else { 1 }, "{mode}");
+            if answered {
+                let response = requests[1]
+                    .messages
+                    .iter()
+                    .find(|message| message.role == "tool")
+                    .unwrap();
+                if mode == "pre_send" {
+                    assert_eq!(response.data["retryable"], true);
+                } else {
+                    assert_eq!(response.data["code"], "TOOL_INPUT_INVALID");
+                }
+            } else {
+                assert!(
+                    done.checkpoint.unwrap().payload["tool_repair"].is_null(),
+                    "{mode}"
+                );
+            }
+        }
+        let expected = if mode == "unknown" {
+            let op = store
+                .list_operations(&run)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|op| op.request.kind == OperationKind::Tool)
+                .unwrap();
+            vec![outcome_contracts::OutcomeException {
+                key: op.request.key,
+                kind: OperationKind::Tool,
+                state: OperationState::Unknown,
+                ambiguity: Some(AmbiguityReason::InvocationInterrupted),
+                usage_issue: Some(UsageIssue::OutcomeUnresolved),
+                unknown_usage: true,
+                unsettled: true,
+                operator_action: false,
+            }]
+        } else {
+            vec![]
+        };
+        outcome_contracts::assert_no_unexpected_ambiguity(store.as_ref(), &run, &expected, false)
+            .await;
     }
 }
 

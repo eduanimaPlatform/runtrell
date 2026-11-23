@@ -196,6 +196,15 @@ async fn openai_malformed_single_result_and_http_spending_errors_keep_usage() {
 
 #[tokio::test]
 async fn managed_openai_image_rejection_releases_reservation_and_returns_feedback() {
+    managed_image_feedback(false).await;
+}
+
+#[tokio::test]
+async fn managed_image_pre_send_failure_returns_retryable_feedback() {
+    managed_image_feedback(true).await;
+}
+
+async fn managed_image_feedback(pre_send: bool) {
     use runtrell_testkit::FakeModel;
 
     let (url, http) = server(
@@ -209,6 +218,7 @@ async fn managed_openai_image_rejection_releases_reservation_and_returns_feedbac
     .await;
     let (mut tool, ctx) = fixture(image_config(url.clone()), ImageAction::Generate).await;
     let handle = ctx.claim.run;
+    let transport_clock = tool.clock.clone();
     let mut provider = Images::connect(
         "openai/gpt-image-2.6-sunburst",
         models::OperationKind::RasterGenerate,
@@ -216,7 +226,13 @@ async fn managed_openai_image_rejection_releases_reservation_and_returns_feedbac
         Connection {
             run: handle.clone(),
             session: None,
-            credentials: Arc::new(|_| Ok(ApiKey::new("TEST-KEY-DO-NOT-PRINT"))),
+            credentials: Arc::new(move |_| {
+                if pre_send {
+                    transport_clock.set(transport_clock.now() + 233);
+                    return Err(Error::Deadline);
+                }
+                Ok(ApiKey::new("TEST-KEY-DO-NOT-PRINT"))
+            }),
             attachment_resolver: None,
             retry_policy: RetryPolicy::default(),
             timeout_ms: 10_000,
@@ -267,16 +283,23 @@ async fn managed_openai_image_rejection_releases_reservation_and_returns_feedbac
     assert!(op.request.reserve.micro_usd > 0);
     assert_eq!(op.send_count, 1);
     assert!(op.settled && !op.unknown_usage, "{op:?}");
+    let diagnostic = op.provider_diagnostic().unwrap();
+    if pre_send {
+        assert_eq!(op.usage_outcome(), UsageOutcome::NonBillable(NonBillableReason::RetryableNotSent));
+        assert_eq!(diagnostic.phase, ProviderFailurePhase::PreSend);
+        assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::DefinitelyNotSent);
+    } else {
     assert!(matches!(
         &op.result,
         Some(ExternalResult::Failed { usage, repair_hint: Some(_), .. })
             if usage.amount() == Ok(Amount::default())
     ));
-    let diagnostic = serde_json::to_value(op.provider_diagnostic().unwrap()).unwrap();
+    let diagnostic = serde_json::to_value(diagnostic).unwrap();
     assert_eq!(diagnostic["http_status"], 400);
     assert_eq!(diagnostic["provider_type"], "invalid_request_error");
     assert_eq!(diagnostic["provider_code"], "invalid_value");
     assert_eq!(diagnostic["request_id"], "req_invalid_size");
+    }
     let totals = runs.account(&account).await.unwrap();
     assert_eq!(totals.reserved, Amount::default());
     assert_eq!(totals.unknown, 0);
@@ -290,13 +313,23 @@ async fn managed_openai_image_rejection_releases_reservation_and_returns_feedbac
             .find(|m| m.role == "tool")
             .unwrap();
         assert_eq!(feedback.data["repairable"], true);
-        assert!(feedback.data["hint"].as_str().unwrap().contains("size"));
+        if pre_send {
+            assert_eq!(feedback.data["retryable"], true);
+            assert_eq!(feedback.data["code"], "CREDENTIAL_UNAVAILABLE");
+        } else {
+            assert!(feedback.data["hint"].as_str().unwrap().contains("size"));
+        }
         assert!(!feedback.data.to_string().contains("TEST-KEY"));
         assert!(!feedback.data.to_string().contains("req_invalid_size"));
     }
     let requests = http.await.unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(requests[0].starts_with("POST /v1/images/generations "));
+    assert_eq!(requests.len(), usize::from(!pre_send));
+    if let Some(request) = requests.first() {
+        assert!(request.starts_with("POST /v1/images/generations "));
+    }
+    runtrell_testkit::outcome_contracts::assert_no_unexpected_ambiguity(
+        runs.as_ref(), &handle, &[], false,
+    ).await;
 }
 
 #[tokio::test]
@@ -319,9 +352,10 @@ async fn openai_failed_image_responses_preserve_transport_evidence() {
         let (url, http) = raw_server(raw.into()).await;
         let (tool, ctx) = fixture(image_config(url), ImageAction::Generate).await;
         let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
-        let ExternalResult::UnknownDiagnostic(diagnostic) = result else {
+        let ExternalResult::Ambiguous(_) = &result else {
             panic!("expected an ambiguous outcome");
         };
+    let diagnostic = result.provider_diagnostic().unwrap();
         assert_eq!(diagnostic.phase, phase);
         assert_eq!(diagnostic.http_status, status);
         assert_eq!(
@@ -364,9 +398,10 @@ async fn openai_image_timeout_after_request_body_remains_unknown() {
     cfg.capabilities.limits.timeout = 250;
     let (tool, ctx) = fixture(cfg, ImageAction::Generate).await;
     let result = tool.invoke(&ctx, json!({"prompt":"draw"})).await.unwrap();
-    let ExternalResult::UnknownDiagnostic(diagnostic) = result else {
+    let ExternalResult::Ambiguous(_) = &result else {
         panic!("expected an ambiguous outcome");
     };
+    let diagnostic = result.provider_diagnostic().unwrap();
     assert_eq!(diagnostic.phase, ProviderFailurePhase::Send);
     assert_eq!(diagnostic.send_certainty, ProviderSendCertainty::Unknown);
     assert!(
