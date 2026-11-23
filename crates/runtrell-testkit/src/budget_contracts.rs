@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Adapter-independent budget guarantees and selectable policy contracts.
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::*;
 use serde_json::json;
 
@@ -77,6 +78,14 @@ pub async fn policies<S: ControlStore>(s: &S) {
     assert_eq!(s.begin(&c, third, 0).await, Err(Error::ReservationDenied));
     assert!(!s.account(&a).await.unwrap().exhausted);
     assert_eq!(s.account(&a).await.unwrap().reserved, Amount::new(0, 60));
+    expect_operations(
+        &h,
+        [OutcomeException::unresolved(
+            "unknown",
+            OperationKind::Tool,
+            AmbiguityReason::InvocationInterrupted,
+        )],
+    );
 }
 
 pub fn image_price() {
@@ -789,4 +798,12 @@ pub async fn model_quote_race<S: ControlStore + 'static>(s: std::sync::Arc<S>) {
     fn other_run(c: &Claim) -> RunHandle {
         c.run.clone()
     }
+    expect_operations(
+        &rt.clock.other.run,
+        [OutcomeException::unsettled(
+            "racer",
+            OperationKind::Tool,
+            OperationState::Intent,
+        )],
+    );
 }

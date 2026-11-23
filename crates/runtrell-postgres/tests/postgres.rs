@@ -1,24 +1,29 @@
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::*;
 use runtrell_postgres::PgStore;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::test]
 async fn file_execution_failures_are_model_repairable() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::tool_failure_contracts::file_repairs(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn file_repair_preserves_limits_and_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::tool_failure_contracts::repair_stops(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn tool_failures_preserve_stop_and_reconciliation_boundaries() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::tool_failure_contracts::failure_boundaries(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn saved_file_failure_recovers_without_reexecution() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, store, _, _) = setup().await;
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let pool = PgPoolOptions::new()
@@ -38,31 +43,37 @@ async fn saved_file_failure_recovers_without_reexecution() {
 
 #[tokio::test]
 async fn driver_token_continuation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::driver_contracts::token_continuation(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn driver_continuation_budget_and_host_limit() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::driver_contracts::continuation_stops(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn driver_continuation_deadline() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::driver_contracts::continuation_deadline(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn driver_host_receipt_classification() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::driver_contracts::receipt_classification(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn driver_tool_schema_repairs() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::driver_contracts::tool_repairs(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
 async fn driver_automatic_context_reopens_with_independent_pool() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use std::sync::Arc;
     let (pool, schema, store, _, _) = setup().await;
     let store = Arc::new(store);
@@ -83,6 +94,7 @@ async fn driver_automatic_context_reopens_with_independent_pool() {
 
 #[tokio::test]
 async fn empty_database_initializes_and_reopens() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL")
         .expect("RUNTRELL_TEST_DATABASE_URL must name the dedicated disposable database");
     let pool = PgPoolOptions::new()
@@ -147,6 +159,7 @@ fn applied() -> ExternalResult {
 
 #[tokio::test]
 async fn stale_response_is_durable_observation_without_settlement() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, c) = setup().await;
     let op = s.begin(&c, request("effect", 10), 0).await.unwrap();
     s.mark_sent(&c, &op.id, 0).await.unwrap();
@@ -191,6 +204,7 @@ async fn stale_response_is_durable_observation_without_settlement() {
 
 #[tokio::test]
 async fn failed_intent_transaction_rolls_back_all_ancestors_and_slot() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, c) = setup().await;
     // Use an additional account ancestry in the same durable namespace.
     let child = s
@@ -228,6 +242,7 @@ async fn failed_intent_transaction_rolls_back_all_ancestors_and_slot() {
 
 #[tokio::test]
 async fn failed_result_transaction_preserves_unknown_reservation_for_recovery() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, c) = setup().await;
     let op = s.begin(&c, request("effect", 10), 0).await.unwrap();
     s.record(&c, &op.id, runtrell_testkit::ambiguous_fixture(), 0)
@@ -271,6 +286,7 @@ async fn failed_result_transaction_preserves_unknown_reservation_for_recovery() 
 
 #[tokio::test]
 async fn independent_connections_compete_for_all_ancestor_balances() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, _, _) = setup().await;
     let root = s
         .create_account("*", Amount::new(100, 100), None)
@@ -333,10 +349,24 @@ async fn independent_connections_compete_for_all_ancestor_balances() {
         reopened.slot_count(OperationKind::Sandbox).await.unwrap(),
         1
     );
+    let (winner, key) = if x.is_ok() {
+        (&h1, "one")
+    } else {
+        (&h2, "two")
+    };
+    expect_operations(
+        winner,
+        [OutcomeException::unsettled(
+            key,
+            OperationKind::Sandbox,
+            OperationState::Intent,
+        )],
+    );
 }
 
 #[tokio::test]
 async fn parallel_claim_has_one_winner_and_failed_handoff_has_no_generation_change() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, _, c) = setup().await;
     let other = PgStore::initialize(pool.clone(), &schema, Capacity::default())
         .await
@@ -367,6 +397,7 @@ async fn parallel_claim_has_one_winner_and_failed_handoff_has_no_generation_chan
 
 #[tokio::test]
 async fn queue_slots_fairness_and_cleanup_survive_all_connections_being_discarded() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, c) = setup().await;
     for (key, tenant) in [("a1", "a"), ("a2", "a"), ("b1", "b"), ("c1", "c")] {
         s.enqueue(QueueEntry {
@@ -425,6 +456,7 @@ async fn queue_slots_fairness_and_cleanup_survive_all_connections_being_discarde
 
 #[tokio::test]
 async fn different_tokio_runtimes_share_one_durable_reservation_authority() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, c) = setup().await;
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let mut threads = vec![];
@@ -470,6 +502,19 @@ async fn different_tokio_runtimes_share_one_durable_reservation_authority() {
     assert!(results.iter().filter(|r| r.is_ok()).count() <= 3);
     assert!(results.iter().any(|r| r.is_ok()));
     assert!(s.account(&a).await.unwrap().reserved.tokens <= 900);
+    let admitted = results
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.is_ok())
+        .map(|(n, _)| {
+            OutcomeException::unsettled(
+                &format!("r{n}"),
+                OperationKind::Model,
+                OperationState::Intent,
+            )
+        })
+        .collect::<Vec<_>>();
+    expect_operations(&c.run, admitted);
     assert!(
         results
             .iter()
@@ -482,6 +527,7 @@ async fn different_tokio_runtimes_share_one_durable_reservation_authority() {
 
 #[tokio::test]
 async fn invalid_schema_and_capacity_disagreement_are_rejected() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, _, _, _) = setup().await;
     for name in [
         "",
@@ -530,6 +576,7 @@ fn runtime(
 
 #[tokio::test]
 async fn separate_agent_runtimes_cannot_double_reserve_and_loser_never_invokes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -587,10 +634,24 @@ async fn separate_agent_runtimes_cannot_double_reserve_and_loser_never_invokes()
         rt1.store.account(&a).await.unwrap().reserved,
         Amount::new(70, 70)
     );
+    let (winner, key) = if x.is_ok() {
+        (&h1, "one")
+    } else {
+        (&h2, "two")
+    };
+    expect_operations(
+        winner,
+        [OutcomeException::unsettled(
+            key,
+            OperationKind::Sandbox,
+            OperationState::Accepted,
+        )],
+    );
 }
 
 #[tokio::test]
 async fn fresh_pool_and_agent_runtime_recover_lost_reply_without_second_model_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_testkit::FakeModel;
     use std::sync::{Arc, atomic::Ordering};
     let (pool, schema, s, a, c) = setup().await;
@@ -644,6 +705,7 @@ async fn fresh_pool_and_agent_runtime_recover_lost_reply_without_second_model_se
 
 #[tokio::test]
 async fn sql_failure_at_start_checkpoint_cancel_and_finalize_is_not_success() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_testkit::{DecisionFinalizer, DecisionValidator};
     let (pool, schema, s, a, c) = setup().await;
     let spec = RunSpec::new("t", "failed-start", a, "new");
@@ -698,6 +760,7 @@ async fn sql_failure_at_start_checkpoint_cancel_and_finalize_is_not_success() {
 
 #[tokio::test]
 async fn concurrent_start_deduplicates_and_rejects_different_digest() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, _) = setup().await;
     let second = PgStore::initialize(pool, &schema, Capacity::default())
         .await
@@ -713,6 +776,7 @@ async fn concurrent_start_deduplicates_and_rejects_different_digest() {
 
 #[tokio::test]
 async fn dropped_save_request_does_not_acknowledge_or_partially_accept_run() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, a, _) = setup().await;
     let session = "save-barrier";
     sqlx::query(&format!(
@@ -757,6 +821,7 @@ async fn dropped_save_request_does_not_acknowledge_or_partially_accept_run() {
 
 #[tokio::test]
 async fn cancel_and_finalize_use_one_transaction_order_across_pools() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_testkit::{DecisionFinalizer, DecisionValidator};
     let (pool, schema, s, _, c) = setup().await;
     let second = PgStore::initialize(pool, &schema, Capacity::default())
@@ -792,6 +857,7 @@ async fn cancel_and_finalize_use_one_transaction_order_across_pools() {
 
 #[tokio::test]
 async fn every_slot_kind_enforces_global_tenant_and_run_limits() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, _, _, _) = setup().await;
     let mut capacity = Capacity::default();
     let kinds = [
@@ -841,6 +907,7 @@ async fn every_slot_kind_enforces_global_tenant_and_run_limits() {
 
 #[tokio::test]
 async fn locked_free_permits_wait_instead_of_reporting_backpressure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, _, _, _) = setup().await;
     let mut cap = Capacity::default();
     cap.global.insert(OperationKind::Tool, 1);
@@ -902,6 +969,7 @@ async fn locked_free_permits_wait_instead_of_reporting_backpressure() {
 
 #[tokio::test]
 async fn permit_lock_timeout_is_storage_and_rolls_back_partial_allocation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, _, _, _) = setup().await;
     let mut cap = Capacity::default();
     cap.global.insert(OperationKind::Tool, 1);
@@ -946,6 +1014,7 @@ async fn permit_lock_timeout_is_storage_and_rolls_back_partial_allocation() {
 
 #[tokio::test]
 async fn concurrent_slot_acquisitions_never_exceed_any_scope_limit() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, _, _, _) = setup().await;
     for limits in [[3, 64, 64], [64, 3, 64], [64, 64, 3]] {
         let mut cap = Capacity::default();
@@ -992,6 +1061,7 @@ async fn concurrent_slot_acquisitions_never_exceed_any_scope_limit() {
 
 #[tokio::test]
 async fn terminal_run_slot_left_by_crashed_worker_is_rediscoverable() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_testkit::{DecisionFinalizer, DecisionValidator};
     let (pool, schema, s, _, c) = setup().await;
     let before = s.get(&c.run).await.unwrap();
@@ -1020,6 +1090,7 @@ async fn terminal_run_slot_left_by_crashed_worker_is_rediscoverable() {
 
 #[tokio::test]
 async fn unrelated_run_update_finishes_while_another_run_row_is_locked() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s, _, c) = setup().await;
     let a = s
         .create_account("other", Amount::new(1000, 1000), None)
@@ -1081,6 +1152,7 @@ async fn parallel_store() -> (sqlx::PgPool, String, PgStore) {
 
 #[tokio::test]
 async fn many_runs_reserve_shared_ancestors_without_double_spend_or_deadlock() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, s) = parallel_store().await;
     let root = s
         .create_account("*", Amount::new(400, 400), None)
@@ -1142,7 +1214,17 @@ async fn many_runs_reserve_shared_ancestors_without_double_spend_or_deadlock() {
             .unwrap()
             .unwrap()
         {
-            Ok(_) => accepted += 1,
+            Ok(op) => {
+                accepted += 1;
+                expect_operations(
+                    &op.run,
+                    [OutcomeException::unsettled(
+                        "reserve",
+                        OperationKind::Model,
+                        OperationState::Intent,
+                    )],
+                );
+            }
             Err(Error::ReservationDenied) => {}
             other => panic!("unexpected reservation outcome: {other:?}"),
         }
@@ -1175,6 +1257,7 @@ async fn many_runs_reserve_shared_ancestors_without_double_spend_or_deadlock() {
 
 #[tokio::test]
 async fn concurrent_queue_workers_take_each_entry_once_and_skip_locked_entry() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s) = parallel_store().await;
     for i in 0..64 {
         s.enqueue(QueueEntry {
@@ -1231,6 +1314,7 @@ async fn concurrent_queue_workers_take_each_entry_once_and_skip_locked_entry() {
 
 #[tokio::test]
 async fn parallel_run_update_throughput_measurement() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, s) = parallel_store().await;
     let mut claims = Vec::new();
     for i in 0..24 {
@@ -1287,6 +1371,7 @@ async fn parallel_run_update_throughput_measurement() {
 
 #[tokio::test]
 async fn unrelated_budget_and_capacity_progress_while_other_rows_are_locked() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s) = parallel_store().await;
     let mut pairs = Vec::new();
     for tenant in ["isolated-a", "isolated-b"] {
@@ -1348,10 +1433,27 @@ async fn unrelated_budget_and_capacity_progress_while_other_rows_are_locked() {
         Amount::new(10, 10)
     );
     held.rollback().await.unwrap();
+    expect_operations(
+        &pairs[0].1.run,
+        [OutcomeException::unsettled(
+            "first",
+            OperationKind::Model,
+            OperationState::Intent,
+        )],
+    );
+    expect_operations(
+        &pairs[1].1.run,
+        [OutcomeException::unsettled(
+            "second",
+            OperationKind::Model,
+            OperationState::Intent,
+        )],
+    );
 }
 
 #[tokio::test]
 async fn queue_cursor_preserves_original_rotation_and_burst_after_restart() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s) = parallel_store().await;
     for (key, tenant, fast) in [
         ("b1", "b", true),
@@ -1405,6 +1507,7 @@ async fn queue_cursor_preserves_original_rotation_and_burst_after_restart() {
 
 #[test]
 fn repair_checkpoint_reopens_with_independent_pool_and_runtime() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::assembly::ValidationChain;
     use runtrell_testkit::{BusinessTool, DecisionFinalizer, FakeModel, FakePolicy, TestClock};
     use serde_json::json;
@@ -1523,6 +1626,7 @@ fn repair_checkpoint_reopens_with_independent_pool_and_runtime() {
 
 #[test]
 fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::assembly::ValidationChain;
     use runtrell_testkit::{BusinessTool, DecisionFinalizer, FakeModel, FakePolicy, TestClock};
     use serde_json::json;
@@ -1660,6 +1764,7 @@ fn json_syntax_repair_reopens_with_independent_pool_and_runtime() {
 
 #[tokio::test]
 async fn correctable_input_authorization() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;
     runtrell_testkit::tool_failure_contracts::correctable_input_authorization(std::sync::Arc::new(
         store,

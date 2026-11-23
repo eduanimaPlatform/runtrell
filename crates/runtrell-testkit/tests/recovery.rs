@@ -1,3 +1,4 @@
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect, expect_operations};
 use runtrell::{memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::json;
@@ -11,6 +12,7 @@ use std::{
 };
 #[test]
 fn saved_observations_recover_once_without_provider_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     runtrell_testkit::block_on(async {
         let store = Arc::new(MemoryStore::default());
         recovery_contracts::saved_observations(store.clone(), store).await;
@@ -18,6 +20,7 @@ fn saved_observations_recover_once_without_provider_lookup() {
 }
 #[test]
 fn provider_diagnostic_survives_memory_reopen() {
+    let _outcomes = runtrell::test_outcomes::guard();
     runtrell_testkit::block_on(async {
         let store = Arc::new(MemoryStore::default());
         recovery_contracts::provider_diagnostic_survives_reopen(store.clone(), store).await;
@@ -25,6 +28,7 @@ fn provider_diagnostic_survives_memory_reopen() {
 }
 #[test]
 fn failed_unknown_retry_and_owner_recovery_memory() {
+    let _outcomes = runtrell::test_outcomes::guard();
     runtrell_testkit::block_on(async {
         let store = Arc::new(MemoryStore::default());
         recovery_contracts::failed_unknown_retry_and_owner_recovery(store.clone(), store).await;
@@ -32,6 +36,7 @@ fn failed_unknown_retry_and_owner_recovery_memory() {
 }
 #[test]
 fn abort_never_sent_retry_memory() {
+    let _outcomes = runtrell::test_outcomes::guard();
     runtrell_testkit::block_on(async {
         let store = Arc::new(MemoryStore::default());
         recovery_contracts::abort_never_sent_retry(store.clone(), store).await;
@@ -236,11 +241,35 @@ async fn restart_case(case: &'static str) {
         assert_eq!(store.account(&account).await.unwrap(), balance);
         assert_eq!(rt.model.sends.load(Ordering::SeqCst), 1);
     }
+    if case == "in_progress" {
+        expect_operations(
+            &h,
+            [OutcomeException::unsettled(
+                "model:1",
+                OperationKind::Model,
+                OperationState::Sent,
+            )],
+        );
+    } else if !resumes {
+        expect(
+            &h,
+            ExpectedOutcome {
+                exceptions: vec![OutcomeException::unresolved(
+                    "model:1",
+                    OperationKind::Model,
+                    AmbiguityReason::RecoveryUnconfirmed,
+                )],
+                terminal_unknown: true,
+                ..Default::default()
+            },
+        );
+    }
 }
 macro_rules! recovery {
     ($name:ident,$case:literal) => {
         #[test]
         fn $name() {
+            let _outcomes = runtrell::test_outcomes::guard();
             block_on(restart_case($case));
         }
     };
@@ -258,6 +287,7 @@ recovery!(restart_lookup_then_old_generation_cannot_resend, "handoff");
 
 #[test]
 fn cancelled_unsent_compaction_releases_reservations() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         recovery_contracts::cancel_unsent_compaction(store.clone(), store).await;

@@ -4,6 +4,7 @@ mod host;
 
 #[test]
 fn chat_host_contract_across_processes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     if let Ok(schema) = std::env::var("RUNTRELL_CHAT_SCHEMA") {
         let phase = std::env::var("RUNTRELL_CHAT_PHASE").unwrap();
         host::block_on(host::phase(&schema, &phase));

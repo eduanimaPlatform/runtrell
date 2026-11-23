@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::*;
 use runtrell_postgres::PgStore;
 use sqlx::postgres::PgPoolOptions;
@@ -21,6 +22,7 @@ async fn open() -> (sqlx::PgPool, String, PgStore) {
 
 #[tokio::test]
 async fn host_transaction_commit_rollback_and_failure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = open().await;
     for mode in ["commit", "rollback", "sql_failure", "store_failure"] {
         let mut tx = pool.begin().await.unwrap();
@@ -89,6 +91,7 @@ async fn host_transaction_commit_rollback_and_failure() {
 
 #[tokio::test]
 async fn shared_account_child_and_terminal_boundary() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = open().await;
     let mut tx = pool.begin().await.unwrap();
     let account = store
@@ -173,6 +176,7 @@ async fn shared_account_child_and_terminal_boundary() {
 
 #[tokio::test]
 async fn reopen_in_another_process() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let Ok(schema) = std::env::var("RUNTRELL_REOPEN_SCHEMA") else {
         return;
     };
@@ -201,6 +205,7 @@ async fn reopen_in_another_process() {
 
 #[tokio::test]
 async fn successful_finalization_is_staged_fenced_and_validated() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = open().await;
     let account = store
         .create_account("t", Amount::new(100, 100), None)
@@ -278,6 +283,7 @@ async fn successful_finalization_is_staged_fenced_and_validated() {
 
 #[tokio::test]
 async fn failed_call_releases_partial_permits_and_preserves_host_transaction() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = open().await;
     let mut tx = pool.begin().await.unwrap();
     let account = store
@@ -317,6 +323,7 @@ async fn failed_call_releases_partial_permits_and_preserves_host_transaction() {
 
 #[tokio::test]
 async fn typed_account_lock_reads_uncommitted_policy_and_rolls_back() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, store) = open().await;
     let mut tx = pool.begin().await.unwrap();
     let policy = AccountPolicy {
@@ -357,6 +364,7 @@ async fn typed_account_lock_reads_uncommitted_policy_and_rolls_back() {
 
 #[tokio::test]
 async fn typed_account_lock_waits_for_outer_transaction_and_keeps_ancestor_order() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, store) = open().await;
     let parent = store
         .create_account("*", Amount::new(1000, 1000), None)
@@ -420,6 +428,7 @@ async fn typed_account_lock_waits_for_outer_transaction_and_keeps_ancestor_order
 
 #[tokio::test]
 async fn atomic_child_admission_participates_in_host_transaction() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, _, store) = open().await;
     let account = store
         .create_account("t", Amount::new(100, 100), None)
@@ -474,11 +483,23 @@ async fn atomic_child_admission_participates_in_host_transaction() {
             .unwrap(),
         child
     );
-    assert_eq!(store.get(&child).await.unwrap().spec.parent, Some(parent));
+    assert_eq!(
+        store.get(&child).await.unwrap().spec.parent,
+        Some(parent.clone())
+    );
+    expect_operations(
+        &parent,
+        [OutcomeException::unsettled(
+            "child-op",
+            OperationKind::ChildRun,
+            OperationState::Accepted,
+        )],
+    );
 }
 
 #[tokio::test]
 async fn transcript_purge_commits_with_completion_after_the_reservation_settles() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use serde_json::{Value, json};
     let (pool, schema, store) = open().await;
     let account = store

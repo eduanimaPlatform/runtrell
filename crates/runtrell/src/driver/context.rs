@@ -289,6 +289,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn long_run_archives_only_new_positions_and_bounds_saved_bytes() {
+        let _outcomes = crate::test_outcomes::guard();
         let store = memory::MemoryStore::default();
         let account = store
             .create_account("t", Amount::new(1000, 1000), None)
@@ -393,10 +394,12 @@ mod tests {
     }
     #[tokio::test]
     async fn repeated_compaction_preserves_reference_text_without_reactivating_inputs() {
+        let _outcomes = crate::test_outcomes::guard();
         compaction_attachment_window(false).await;
     }
     #[tokio::test]
     async fn repeated_compaction_keeps_continuation_attachments_active() {
+        let _outcomes = crate::test_outcomes::guard();
         compaction_attachment_window(true).await;
     }
     async fn compaction_attachment_window(continuation: bool) {
@@ -522,6 +525,7 @@ mod tests {
     }
     #[tokio::test]
     async fn summary_rejects_changed_history_context_and_partial_output() {
+        let _outcomes = crate::test_outcomes::guard();
         let store = memory::MemoryStore::default();
         let account = store
             .create_account("t", Amount::new(1000, 1000), None)

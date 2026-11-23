@@ -39,6 +39,7 @@ async fn send_image<M: ModelPort>(
 }
 #[tokio::test]
 async fn jpeg_webp_document_views_reach_each_image_adapter_and_invalid_bytes_are_rejected() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let kinds = [
         #[cfg(feature = "openai")]
         "openai",

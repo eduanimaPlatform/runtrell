@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Owner commands must be fenced and have durable, immutable causal receipts.
 use crate::*;
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect, expect_operator_wait};
 
 fn bx<'a, T, F: std::future::Future<Output = T> + Send + 'a>(
     make: impl FnOnce() -> F,
@@ -77,6 +78,9 @@ pub async fn resume_preconditions<S: ControlStore>(store: Arc<S>) {
         );
         assert_eq!(bx(|| store.get(&run)).await.unwrap(), before);
         assert_eq!(bx(|| store.owner_receipt(key)).await.unwrap(), None);
+        if !queued && !terminal {
+            expect_operator_wait(&run);
+        }
     }
 }
 
@@ -234,6 +238,29 @@ pub async fn resume_budget<S: ControlStore>(store: Arc<S>) {
         assert_eq!(bx(|| store.get(&run)).await.unwrap(), before);
         assert_eq!(bx(|| store.account(&parent)).await.unwrap(), balance);
         assert_eq!(bx(|| store.owner_receipt(key)).await.unwrap(), None);
+        let exceptions = if used {
+            vec![]
+        } else if unknown {
+            vec![OutcomeException::unresolved(
+                key,
+                OperationKind::Tool,
+                AmbiguityReason::InvocationInterrupted,
+            )]
+        } else {
+            vec![OutcomeException::unsettled(
+                key,
+                OperationKind::Tool,
+                OperationState::Intent,
+            )]
+        };
+        expect(
+            &run,
+            ExpectedOutcome {
+                exceptions,
+                operator_wait: true,
+                ..Default::default()
+            },
+        );
     }
 }
 

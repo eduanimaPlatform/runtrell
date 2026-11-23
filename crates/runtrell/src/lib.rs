@@ -42,3 +42,7 @@ pub mod document_view;
 pub mod images;
 pub mod standard_tools;
 pub use images::PreparedModelRequest;
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_outcomes;

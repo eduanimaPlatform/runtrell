@@ -14,6 +14,7 @@ fn small_stack<F: Future<Output = ()>>(
         .name("pg-driver-small-stack".into())
         .stack_size(1024 * 1024)
         .spawn(|| {
+            let _outcomes = runtrell::test_outcomes::guard();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

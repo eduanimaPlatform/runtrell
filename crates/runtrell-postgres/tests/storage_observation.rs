@@ -52,6 +52,7 @@ async fn pool() -> PgPool {
 
 #[tokio::test(flavor = "current_thread")]
 async fn storage_canary_constraint_failure_logs_safe_fields() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let pool = pool().await;
     let schema = format!("storage_obs_{}", uuid::Uuid::new_v4().simple());
     let store = PgStore::initialize(pool.clone(), &schema, Capacity::default())
@@ -181,6 +182,7 @@ async fn storage_canary_constraint_failure_logs_safe_fields() {
 
 #[test]
 fn storage_canary_non_database_error_logs_class_without_payload() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let canary = "secret-canary-config-41a70b";
     let log = Log::default();
     let subscriber = tracing_subscriber::fmt()
@@ -221,6 +223,7 @@ fn storage_canary_non_database_error_logs_class_without_payload() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn storage_canary_host_filter_suppresses_sqlx_query_and_notice() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let canary = "secret-canary-sqlx-notice-81e3a9";
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated database required");
     // Deliberately retain sqlx's default statement logging to exercise the

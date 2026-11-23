@@ -1,6 +1,11 @@
-use runtrell::{memory::MemoryStore, *};
+use runtrell::{
+    memory::MemoryStore,
+    test_outcomes::{OutcomeException, expect_operations},
+    *,
+};
 #[test]
 fn reservation_is_idempotent_and_unknown_is_not_zero() {
+    let _outcomes = runtrell::test_outcomes::guard();
     runtrell_test_run(async {
         let s = MemoryStore::default();
         let account = s
@@ -35,6 +40,14 @@ fn reservation_is_idempotent_and_unknown_is_not_zero() {
         assert_eq!(balance.reserved, Amount::new(60, 20));
         assert_eq!(balance.used, Amount::default());
         assert_eq!(balance.unknown, 1);
+        expect_operations(
+            &h,
+            [OutcomeException::unresolved(
+                "op",
+                OperationKind::Model,
+                AmbiguityReason::RecoveryUnconfirmed,
+            )],
+        );
         assert!(
             s.begin(
                 &claim,

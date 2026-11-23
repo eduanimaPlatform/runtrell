@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 #[test]
 fn child_restart_across_processes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let phase = std::env::var("RUNTRELL_CHILD_PHASE").ok();
     let schema = std::env::var("RUNTRELL_CHILD_SCHEMA")
         .unwrap_or_else(|_| format!("child_{}", uuid::Uuid::new_v4().simple()));

@@ -37,6 +37,7 @@ async fn two_stores() -> (Arc<PgStore>, Arc<PgStore>) {
 
 #[test]
 fn image_usage_operator_recovery() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (store, restarted) = two_stores().await;
         settlement_contracts::image_usage_operator_recovery(store, restarted).await;
@@ -44,6 +45,7 @@ fn image_usage_operator_recovery() {
 }
 #[test]
 fn partial_price_evidence_recovery() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (store, restarted) = two_stores().await;
         settlement_contracts::partial_price_evidence_recovery(store, restarted).await;
@@ -51,6 +53,7 @@ fn partial_price_evidence_recovery() {
 }
 #[test]
 fn wait_follows_the_lookup_window() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (store, _) = two_stores().await;
         settlement_contracts::wait_follows_the_lookup_window(store).await;
@@ -59,6 +62,7 @@ fn wait_follows_the_lookup_window() {
 
 #[test]
 fn initialize_adds_the_audit_column_to_an_existing_runtime_and_connect_requires_it() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("test DB required");
         let (store, _) = two_stores().await;
@@ -100,6 +104,7 @@ fn initialize_adds_the_audit_column_to_an_existing_runtime_and_connect_requires_
 
 #[test]
 fn lost_reply_keeps_lookup_recovery() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (store, restarted) = two_stores().await;
         settlement_contracts::lost_reply_keeps_lookup_recovery(store, restarted).await;
@@ -108,6 +113,7 @@ fn lost_reply_keeps_lookup_recovery() {
 
 #[test]
 fn settle_never_resumes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (store, restarted) = two_stores().await;
         settlement_contracts::settle_never_resumes(store, restarted).await;
@@ -116,6 +122,7 @@ fn settle_never_resumes() {
 
 #[test]
 fn shared_allowance_consumption_is_durable_and_atomic() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (first, second) = two_stores().await;
         settlement_contracts::shared_allowance(first.as_ref(), second.as_ref()).await;
@@ -143,6 +150,7 @@ fn shared_allowance_consumption_is_durable_and_atomic() {
 
 #[test]
 fn managed_allowance_settles_atomically_across_pools() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (first, second) = two_stores().await;
         settlement_contracts::managed_allowance_settlement(first.as_ref(), second.as_ref(), || {
@@ -154,6 +162,7 @@ fn managed_allowance_settles_atomically_across_pools() {
 
 #[test]
 fn dependent_resource_extension_across_pools() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(async {
         let (first, second) = two_stores().await;
         settlement_contracts::dependent_resource_extension(first, second).await;

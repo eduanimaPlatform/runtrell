@@ -530,6 +530,7 @@ async fn contract<S: ControlStore>(store: Arc<S>, wire: Wire, kind: OperationKin
             .map(|reason| OutcomeException {
                 key: "effect".into(),
                 kind,
+                attempt: 1,
                 state: if reason == UsageIssue::OutcomeUnresolved {
                     OperationState::Unknown
                 } else if matches!(case, OutcomeCase::InvalidSuccessUsage) {
@@ -560,6 +561,15 @@ async fn contract<S: ControlStore>(store: Arc<S>, wire: Wire, kind: OperationKin
             let saved = store.operation(&run, "effect").await.unwrap().unwrap();
             assert_eq!(saved.result, Some(receipt));
             assert_eq!(saved.lookup_failure, Some(LookupFailure::Rejected(401)));
+        }
+        if !expected.is_empty() {
+            runtrell::test_outcomes::expect(
+                &run,
+                runtrell::test_outcomes::ExpectedOutcome {
+                    exceptions: expected,
+                    ..Default::default()
+                },
+            );
         }
         if let Some(spy) = spy {
             assert!(
@@ -622,6 +632,7 @@ fn matrix_capacity() -> Capacity {
 
 #[tokio::test]
 async fn outcome_matrix_memory() {
+    let _outcomes = runtrell::test_outcomes::guard();
     all_wires(Arc::new(runtrell::memory::MemoryStore::new(
         matrix_capacity(),
     )))
@@ -630,6 +641,7 @@ async fn outcome_matrix_memory() {
 
 #[tokio::test]
 async fn outcome_matrix_postgres() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("disposable test database");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let store = runtrell_postgres::PgStore::initialize(pool, "outcome_contract", matrix_capacity())

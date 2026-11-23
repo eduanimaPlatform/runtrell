@@ -84,10 +84,38 @@ impl Default for MemoryStore {
 }
 impl MemoryStore {
     pub fn new(capacity: Capacity) -> Self {
-        Self {
+        let store = Self {
             inner: Arc::new(Mutex::new(Ledger::default())),
             capacity,
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let observer = store.clone();
+            crate::test_outcomes::track_store(None, || async move {
+                observer
+                    .read(|ledger| {
+                        Ok(ledger
+                            .runs
+                            .values()
+                            .map(|run| {
+                                let operations = ledger
+                                    .operations
+                                    .values()
+                                    .filter(|op| op.run == run.handle)
+                                    .cloned();
+                                crate::test_outcomes::observe(
+                                    run.handle.clone(),
+                                    run.spec.request_key.clone(),
+                                    &run.state,
+                                    operations,
+                                )
+                            })
+                            .collect())
+                    })
+                    .expect("read test outcome ledger")
+            });
         }
+        store
     }
     /// Fail the next mutation before its commit. Reads do not consume the fault.
     pub fn fail_next_write(&self) {

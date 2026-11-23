@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::*;
 use runtrell_postgres::PgStore;
 use runtrell_testkit::{
@@ -80,6 +81,7 @@ async fn assert_balance(s: &PgStore, ids: &[String], reserved: Amount, used: Amo
 
 #[tokio::test]
 async fn attempt_identity_retry_fencing_and_constraints() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s) = open().await;
     let a = s
         .create_account("t", Amount::new(100, 100), None)
@@ -187,10 +189,19 @@ async fn attempt_identity_retry_fencing_and_constraints() {
             Some(code)
         );
     }
+    expect_operations(
+        &other.run,
+        [OutcomeException::unsettled(
+            "effect",
+            OperationKind::Sandbox,
+            OperationState::Intent,
+        )],
+    );
 }
 
 #[tokio::test]
 async fn ancestor_attribution_rollback_unknown_reopen_and_delete_restriction() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, s) = open().await;
     let root = s
         .create_account("*", Amount::new(100, 100), None)
@@ -318,6 +329,7 @@ async fn ancestor_attribution_rollback_unknown_reopen_and_delete_restriction() {
 
 #[tokio::test]
 async fn saved_paid_result_recovers_without_lookup_or_resend() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, s) = open().await;
     let a = s
         .create_account("t", Amount::new(100, 100), None)
@@ -416,11 +428,13 @@ async fn saved_paid_result_recovers_without_lookup_or_resend() {
 
 #[tokio::test]
 async fn saved_observations_recover_once_without_provider_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, s) = open().await;
     runtrell_testkit::recovery_contracts::saved_observations(s, reopen(&schema).await).await;
 }
 #[tokio::test]
 async fn provider_diagnostic_survives_postgres_reopen() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, store) = open().await;
     runtrell_testkit::recovery_contracts::provider_diagnostic_survives_reopen(
         store,
@@ -430,6 +444,7 @@ async fn provider_diagnostic_survives_postgres_reopen() {
 }
 #[tokio::test]
 async fn failed_unknown_retry_and_owner_recovery_postgres_reopen() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, store) = open().await;
     runtrell_testkit::recovery_contracts::failed_unknown_retry_and_owner_recovery(
         store,
@@ -440,6 +455,7 @@ async fn failed_unknown_retry_and_owner_recovery_postgres_reopen() {
 
 #[tokio::test]
 async fn abort_never_sent_retry_postgres_reopen() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, store) = open().await;
     runtrell_testkit::recovery_contracts::abort_never_sent_retry(store, reopen(&schema).await)
         .await;
@@ -447,6 +463,7 @@ async fn abort_never_sent_retry_postgres_reopen() {
 
 #[tokio::test]
 async fn final_catalog() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, _) = open().await;
     let objects: Vec<(String,String)> = sqlx::query_as("SELECT c.relname,c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname IN ('operations','budget_entries') ORDER BY c.relname")
         .bind(&schema).fetch_all(&pool).await.unwrap();
@@ -500,6 +517,7 @@ async fn final_catalog() {
 
 #[tokio::test]
 async fn cancelled_unsent_compaction_releases_reservations_after_reopen() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, store) = open().await;
     runtrell_testkit::recovery_contracts::cancel_unsent_compaction(store, reopen(&schema).await)
         .await;

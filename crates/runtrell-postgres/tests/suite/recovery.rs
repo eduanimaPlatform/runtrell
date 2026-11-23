@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared contract fixture from runtrell-2a testkit (2d31acf).
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect, expect_operations};
 use super::{MemoryStore, block_on};
 use runtrell::*;
 use runtrell_testkit::*;
@@ -218,11 +219,21 @@ async fn restart_case(case: &'static str) {
         assert_eq!(store.account(&account).await.unwrap(), balance);
         assert_eq!(rt.model.sends.load(Ordering::SeqCst), 1);
     }
+    if case == "in_progress" {
+        expect_operations(&h, [OutcomeException::unsettled("model:1", OperationKind::Model, OperationState::Sent)]);
+    } else if !resumes {
+        expect(&h, ExpectedOutcome {
+            exceptions: vec![OutcomeException::unresolved("model:1", OperationKind::Model, AmbiguityReason::RecoveryUnconfirmed)],
+            terminal_unknown: true,
+            ..Default::default()
+        });
+    }
 }
 macro_rules! recovery {
     ($name:ident,$case:literal) => {
         #[test]
         fn $name() {
+            let _outcomes = runtrell::test_outcomes::guard();
             block_on(restart_case($case));
         }
     };

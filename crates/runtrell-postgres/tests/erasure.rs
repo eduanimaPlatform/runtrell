@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::{
     data::*,
     execution::{ExecutionRecord, ExecutionRequest},
@@ -84,6 +85,7 @@ async fn scan(e: &Env) -> Vec<Value> {
 
 #[tokio::test]
 async fn erases_all_database_bodies_and_payloads_preserving_accounting_and_refusing_replay() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     let (spec, h, c) = run(&e, "complete").await;
     let cp = Checkpoint {
@@ -291,6 +293,7 @@ async fn erases_all_database_bodies_and_payloads_preserving_accounting_and_refus
 
 #[tokio::test]
 async fn active_reserved_unknown_and_live_owner_runs_are_unchanged_on_refusal() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for mode in ["running", "reserved", "unknown", "live-owner", "execution"] {
         let e = env().await;
         let (spec, h, c) = run(&e, mode).await;
@@ -360,6 +363,25 @@ async fn active_reserved_unknown_and_live_owner_runs_are_unchanged_on_refusal() 
         );
         assert_eq!(scan(&e).await, before, "{mode}");
         assert_eq!(e.store.get(&h).await.unwrap().spec, spec);
+        match mode {
+            "reserved" => expect_operations(
+                &h,
+                [OutcomeException::unsettled(
+                    "pending",
+                    OperationKind::Tool,
+                    OperationState::Intent,
+                )],
+            ),
+            "unknown" => expect_operations(
+                &h,
+                [OutcomeException::unresolved(
+                    "pending",
+                    OperationKind::Tool,
+                    AmbiguityReason::InvocationInterrupted,
+                )],
+            ),
+            _ => {}
+        }
     }
 }
 
@@ -379,6 +401,7 @@ impl RunPayloadStore for FailPayload {
 }
 #[tokio::test]
 async fn sql_rollback_and_external_failure_retry_preserve_durable_erasure_fence() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     let (_, h, c) = run(&e, "retry").await;
     finish(&e, &c).await;
@@ -431,6 +454,7 @@ impl RunPayloadStore for CrashPayload {
 #[tokio::test]
 #[ignore = "test-only OS child, invoked and killed by crash_parent"]
 async fn crash_child() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").unwrap();
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let schema = std::env::var("RT_ERASE_SCHEMA").unwrap();
@@ -450,6 +474,7 @@ async fn crash_child() {
 }
 #[tokio::test]
 async fn crash_parent() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use std::{
         io::{BufRead, BufReader},
         process::{Command, Stdio},
@@ -510,6 +535,7 @@ async fn crash_parent() {
 
 #[tokio::test]
 async fn tree_erasure_waits_for_children_then_erases_every_owned_run() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     let (_, root, parent) = run(&e, "tree").await;
     let account = e.store.get(&root).await.unwrap().spec.account;
@@ -571,6 +597,7 @@ async fn tree_erasure_waits_for_children_then_erases_every_owned_run() {
 
 #[tokio::test]
 async fn independent_scheduler_reservation_blocks_erasure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     let (_, h, c) = run(&e, "slot").await;
     finish(&e, &c).await;
@@ -617,6 +644,7 @@ impl RunPayloadStore for PausePayload {
 }
 #[tokio::test]
 async fn pending_deletion_fences_late_writers_before_external_erasure_completes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     let (_, h, c) = run(&e, "pending-fence").await;
     let op = e
@@ -689,6 +717,7 @@ async fn pending_deletion_fences_late_writers_before_external_erasure_completes(
 
 #[tokio::test]
 async fn opaque_tenant_identity_can_be_erased_even_without_data_namespaces() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     let tenant = "organization:大学/部門";
     let account = e
@@ -731,6 +760,7 @@ fn svg_usage() -> Box<SvgUsage> {
 
 #[tokio::test]
 async fn erases_raw_svg_usage_from_recovered_attempts_and_owner_receipts_only() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_testkit::settlement_contracts::{rates, refined, stored_usage};
     let e = env().await;
     let account = e

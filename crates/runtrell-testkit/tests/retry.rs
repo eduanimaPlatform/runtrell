@@ -1,3 +1,4 @@
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::{memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::json;
@@ -105,6 +106,7 @@ impl ModelPort for PreparationDeadlineModel {
 
 #[test]
 fn retry_expiring_during_recovery_preparation_never_reserves() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let account = store
@@ -171,6 +173,7 @@ fn retry_expiring_during_recovery_preparation_never_reserves() {
 }
 #[test]
 fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let a = s
@@ -228,6 +231,7 @@ fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
 }
 #[test]
 fn retry_bound_and_authorization_are_rechecked_after_restart() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for revoke in [false, true] {
             let s = Arc::new(MemoryStore::default());
@@ -279,6 +283,7 @@ fn retry_bound_and_authorization_are_rechecked_after_restart() {
 
 #[test]
 fn retryable_failed_unknown_usage_keeps_reservation_then_recovers_original_attempt() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for (index, mode) in [FailureUsage::Partial, FailureUsage::Absent]
             .into_iter()
@@ -386,6 +391,7 @@ fn retryable_failed_unknown_usage_keeps_reservation_then_recovers_original_attem
 
 #[test]
 fn retry_after_beyond_total_elapsed_never_sends_again() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let account = store
@@ -427,6 +433,7 @@ fn retry_after_beyond_total_elapsed_never_sends_again() {
 
 #[test]
 fn late_retry_is_bounded_by_original_total_elapsed_deadline() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let account = store
@@ -474,6 +481,7 @@ fn late_retry_is_bounded_by_original_total_elapsed_deadline() {
 
 #[test]
 fn unknown_reservation_counts_against_retry_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let parent = store
@@ -543,5 +551,14 @@ fn unknown_reservation_counts_against_retry_budget() {
         ));
         assert_eq!(rt.model.calls.load(Ordering::SeqCst), 1);
         assert!(store.operations(&run).await.unwrap()[0].unknown_usage);
+        expect_operations(
+            &run,
+            [OutcomeException::unresolved_usage(
+                "model:1",
+                OperationKind::Model,
+                OperationState::Failed,
+                UsageIssue::Missing,
+            )],
+        );
     });
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Durable preparation and adapter-reported physical-send evidence contracts.
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect, expect_operations};
 use runtrell::*;
 use serde_json::{Value, json};
 use std::sync::{
@@ -150,6 +151,13 @@ pub async fn abort_never_sent_retry<S: ControlStore>(first: Arc<S>, reopened: Ar
         reopened.account(&account).await.unwrap().reserved,
         Amount::new(5, 5)
     );
+    expect_operations(
+        &sent_run,
+        [
+            OutcomeException::unsettled("model", OperationKind::Model, OperationState::Sent)
+                .at_attempt(2),
+        ],
+    );
 }
 
 /// A received transient failure can be retried under a new reservation even when
@@ -279,6 +287,17 @@ pub async fn failed_unknown_retry_and_owner_recovery<S: ControlStore>(
         .unwrap();
     assert!(matches!(saved.result, Some(ExternalResult::Failed { .. })));
     assert_eq!(saved.provider_diagnostic(), Some(&diagnostic));
+    expect(
+        &run,
+        ExpectedOutcome {
+            exceptions: vec![
+                OutcomeException::unsettled("model", OperationKind::Model, OperationState::Intent)
+                    .at_attempt(2),
+            ],
+            operator_wait: true,
+            ..Default::default()
+        },
+    );
 }
 
 /// The same contract runs against memory and a reopened PostgreSQL client.
@@ -413,6 +432,23 @@ pub async fn provider_diagnostic_survives_reopen<S: ControlStore>(first: Arc<S>,
     assert_eq!(saved.unsettled_result, Some(failed));
     assert_eq!(saved.provider_diagnostic(), Some(&http_diagnostic));
     assert_eq!(saved.send_count, 1);
+    expect_operations(
+        &run,
+        [OutcomeException::unresolved(
+            "diagnostic",
+            OperationKind::Model,
+            AmbiguityReason::InvocationInterrupted,
+        )],
+    );
+    expect_operations(
+        &paid_run,
+        [OutcomeException::unresolved_usage(
+            "http-failed",
+            OperationKind::Model,
+            OperationState::Failed,
+            UsageIssue::Missing,
+        )],
+    );
 }
 
 /// Complete fenced observations recover without lookup; incomplete and stale
@@ -616,6 +652,29 @@ pub async fn saved_observations<S: ControlStore>(first: Arc<S>, resumed: Arc<S>)
                         (balance.used, balance.reserved, balance.unknown),
                         (Amount::new(5, 7), Amount::default(), 0)
                     );
+                }
+                let held = |kind, issue| OutcomeException {
+                    operator_action: true,
+                    ..OutcomeException::unresolved_usage(
+                        "saved",
+                        kind,
+                        OperationState::Applied,
+                        issue,
+                    )
+                };
+                let exception = match case {
+                    "incomplete" => Some(held(OperationKind::Sandbox, UsageIssue::Missing)),
+                    "late" => Some(OutcomeException::unresolved(
+                        "saved",
+                        OperationKind::Sandbox,
+                        AmbiguityReason::RecoveryUnconfirmed,
+                    )),
+                    "price" => Some(held(OperationKind::Model, UsageIssue::PricingUnavailable)),
+                    "quantity" => Some(held(OperationKind::Tool, UsageIssue::SettlementUnverified)),
+                    _ => None,
+                };
+                if let Some(exception) = exception {
+                    expect_operations(&run, [exception]);
                 }
                 continue;
             }
@@ -999,6 +1058,14 @@ pub async fn preparation_and_evidence<S: ControlStore>(s: Arc<S>) {
         provider_diagnostic: None,
     };
     assert!(s.observe_result(&c, &second.id, invalid, 0).await.is_err());
+    expect_operations(
+        &h,
+        [OutcomeException::unsettled(
+            "expired-before-send",
+            OperationKind::Tool,
+            OperationState::Intent,
+        )],
+    );
 }
 
 struct PreparedJob(Arc<PreparedModel>);

@@ -141,6 +141,7 @@ pub(super) async fn invoke_outcome_case<S: ControlStore>(
 
 #[tokio::test]
 async fn model_size_capability_rejects_before_send_and_guides_repair() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, task) = server(200, "", image_response()).await;
     let mut c = image_config(url);
     c.capabilities.images.generation_size = Some(ImageSizePolicy::Dimensions {
@@ -199,6 +200,7 @@ async fn model_size_capability_rejects_before_send_and_guides_repair() {
 
 #[tokio::test]
 async fn edit_size_capability_rejects_before_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, task) = server(200, "", image_response()).await;
     let mut c = image_config(url);
     c.capabilities.images.reference_edit_size = Some(ImageSizePolicy::Values {
@@ -232,6 +234,7 @@ async fn edit_size_capability_rejects_before_send() {
 }
 #[tokio::test]
 async fn generation_reference_edit_wire_usage_and_saved_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for action in [ImageAction::Generate, ImageAction::Edit] {
         let (url, task) = server(200, "", image_response()).await;
         let (tool, ctx) = fixture(image_config(url), action).await;
@@ -319,6 +322,7 @@ async fn generation_reference_edit_wire_usage_and_saved_lookup() {
 }
 #[tokio::test]
 async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for (status, body, expected) in [
         (
             401,
@@ -396,6 +400,7 @@ async fn image_errors_paid_invalid_unknown_and_no_redirect_or_retry() {
 }
 #[tokio::test]
 async fn unsupported_capabilities_limits_and_authorization_send_nothing() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, task) = server(200, "", image_response()).await;
     let mut c = image_config(url.clone());
     c.capabilities.images.generation = false;
@@ -434,6 +439,7 @@ async fn unsupported_capabilities_limits_and_authorization_send_nothing() {
 
 #[tokio::test]
 async fn transport_configuration_and_gemini_output_options_are_preflight_errors() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, task) = server(200, "", image_response()).await;
     let mut cfg = image_config(url.clone());
     cfg.max_request_bytes = 1;
@@ -465,6 +471,7 @@ async fn transport_configuration_and_gemini_output_options_are_preflight_errors(
 
 #[tokio::test]
 async fn unsupported_image_input_and_reference_edit_and_revoked_send_are_preflight_errors() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, task) = server(200, "", image_response()).await;
     let mut cfg = image_config(url);
     cfg.capabilities.images.reference_edit = false;
@@ -545,6 +552,7 @@ async fn unsupported_image_input_and_reference_edit_and_revoked_send_are_preflig
 
 #[tokio::test]
 async fn image_count_byte_and_transport_limits_preserve_paid_usage_or_prevent_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut excessive = image_response();
     if OPENAI {
         excessive["data"] = json!(vec![excessive["data"][0].clone(); 5]);
@@ -743,6 +751,7 @@ async fn model_image_wire<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &st
 }
 #[tokio::test]
 async fn normal_driver_delivers_authorized_images_to_provider_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     model_image_wire(InputModel::new, MODEL_KIND).await;
     #[cfg(feature = "openrouter")]
     model_image_wire(OpenRouter::new, "openrouter").await;
@@ -750,6 +759,7 @@ async fn normal_driver_delivers_authorized_images_to_provider_wire() {
 
 #[tokio::test]
 async fn pg_runtime_http_generation_reinput_edit_and_saved_reply_loss() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::standard_tools::{StandardTool, ToolSet};
     use runtrell_postgres::PgStore;
     use runtrell_testkit::image_contracts::{ImageLoop, LoseImageReply};

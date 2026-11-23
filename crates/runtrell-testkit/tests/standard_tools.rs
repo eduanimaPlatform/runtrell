@@ -12,6 +12,7 @@ fn access(owner: RunHandle) -> Access {
 }
 #[test]
 fn selection_disable_overrides_and_missing_resources() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let empty = ToolSet::<DataStore>::default().build().unwrap();
     assert!(empty.is_empty());
     let errors = ToolSet::<DataStore>::default()
@@ -60,6 +61,7 @@ impl Policy for ReadOnly {
 }
 #[test]
 fn selected_catalog_is_filtered_by_run_policy() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = MemoryStore::default();
         let account = s
@@ -134,6 +136,7 @@ fn input() -> serde_json::Value {
 }
 #[test]
 fn execution_model_call_copies_only_selected_inputs_saves_and_reclaims() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, w, a) = setup().await;
         w.write(&a, "input", None, b"source").await.unwrap();
@@ -230,6 +233,7 @@ fn runtime_with(
 }
 #[test]
 fn execution_budget_deadline_and_cancel_prevent_acquisition() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for mode in 0..3 {
             let (s, c, w, a) = setup_deadline(if mode == 1 { Some(1) } else { None }).await;
@@ -271,6 +275,7 @@ fn execution_budget_deadline_and_cancel_prevent_acquisition() {
 }
 #[test]
 fn execution_unknown_cost_retains_reservation_and_cancel_reclaims() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         use std::sync::atomic::Ordering;
         let (s, c, w, a) = setup().await;
@@ -299,6 +304,7 @@ fn execution_unknown_cost_retains_reservation_and_cancel_reclaims() {
 }
 #[test]
 fn execution_rejects_undeclared_outputs_without_overwriting_workspace() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, w, a) = setup().await;
         w.write(&a, "input", None, b"source").await.unwrap();
@@ -342,6 +348,7 @@ fn execution_rejects_undeclared_outputs_without_overwriting_workspace() {
 
 #[test]
 fn cancellation_during_acquisition_never_starts_payload() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use std::sync::atomic::Ordering;
     block_on(async {
         for deadline in [false, true] {
@@ -417,6 +424,7 @@ fn cancellation_during_acquisition_never_starts_payload() {
 
 #[test]
 fn save_conflict_preserves_newer_workspace_and_artifact() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         use std::sync::atomic::Ordering;
         let (s, c, w, a) = setup().await;
@@ -466,6 +474,7 @@ fn save_conflict_preserves_newer_workspace_and_artifact() {
 
 #[test]
 fn missing_input_settles_zero_without_creating_execution_intent() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, w, a) = setup().await;
         let l = MemoryExecutionLedger::default();
@@ -491,6 +500,7 @@ fn missing_input_settles_zero_without_creating_execution_intent() {
 
 #[test]
 fn program_definition_declares_only_configured_capabilities() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, w, a) = setup().await;
         let t = tool(
@@ -514,6 +524,7 @@ fn program_definition_declares_only_configured_capabilities() {
 #[cfg(feature = "python")]
 #[test]
 fn python_tool_uses_selected_script_and_pinned_runtime_only_when_configured() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, w, a) = setup().await;
         w.write(&a, "job.py", None, b"print(42)").await.unwrap();
@@ -575,6 +586,7 @@ fn python_tool_uses_selected_script_and_pinned_runtime_only_when_configured() {
 
 #[test]
 fn selected_execution_reports_capability_diagnostics_but_disabled_does_not() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for selected in [true, false] {
             let (s, _c, w, a) = setup().await;
@@ -611,6 +623,7 @@ fn selected_execution_reports_capability_diagnostics_but_disabled_does_not() {
 
 #[test]
 fn argument_policy_is_pinned_in_definition_and_enforced_per_call() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, w, a) = setup().await;
         w.write(&a, "input", None, b"source").await.unwrap();

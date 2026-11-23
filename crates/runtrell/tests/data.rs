@@ -27,6 +27,7 @@ fn drive(f: impl std::future::Future<Output = ()>) {
 }
 #[test]
 fn atomic_exact_replace_and_stale_copy() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -92,6 +93,7 @@ fn atomic_exact_replace_and_stale_copy() {
 }
 #[test]
 fn isolation_paths_ranges_and_staging() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -122,6 +124,7 @@ fn isolation_paths_ranges_and_staging() {
 }
 #[test]
 fn validation_rejects_old_evidence_and_forged_receipt() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -176,6 +179,7 @@ impl TargetValidator for Rules {
 }
 #[test]
 fn compaction_cas_keeps_new_history_and_provenance() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -220,6 +224,7 @@ fn compaction_cas_keeps_new_history_and_provenance() {
 }
 #[test]
 fn exact_replace_all_refusals_and_atomic_batch() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -284,6 +289,7 @@ fn exact_replace_all_refusals_and_atomic_batch() {
 }
 #[test]
 fn local_reopen_preserves_unpublished_staging() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let temp = tempfile::tempdir().unwrap();
         let a = Access::owner(ns("r"));
@@ -311,6 +317,7 @@ fn local_reopen_preserves_unpublished_staging() {
 #[cfg(unix)]
 #[test]
 fn local_rejects_symlink_hardlink_fifo_and_root_alias() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
@@ -356,6 +363,7 @@ fn local_rejects_symlink_hardlink_fifo_and_root_alias() {
 }
 #[test]
 fn local_two_instances_cas_and_namespace_concurrency() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let temp = tempfile::tempdir().unwrap();
     let s = DataStore::local(
         &temp.path().canonicalize().unwrap(),
@@ -392,6 +400,7 @@ fn local_two_instances_cas_and_namespace_concurrency() {
 }
 #[test]
 fn pagination_search_limits_and_retention() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -419,6 +428,7 @@ fn pagination_search_limits_and_retention() {
 }
 #[test]
 fn explicit_child_sharing_is_versioned_and_revocable() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let control = memory::MemoryStore::default();
         let account = control
@@ -456,6 +466,7 @@ fn explicit_child_sharing_is_versioned_and_revocable() {
 }
 #[test]
 fn artifact_basis_config_version_and_validator_are_bound() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -516,6 +527,7 @@ fn artifact_basis_config_version_and_validator_are_bound() {
 }
 #[test]
 fn local_storage_failure_does_not_commit_manifest_and_capacity_is_bounded() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let temp = tempfile::tempdir().unwrap();
         let s = DataStore::local(
@@ -563,6 +575,7 @@ fn local_storage_failure_does_not_commit_manifest_and_capacity_is_bounded() {
 }
 #[test]
 fn independent_namespaces_do_not_hold_a_global_data_lock() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let s = DataStore::memory(StoragePolicy::default());
     let mut handles = vec![];
     for i in 0..8 {
@@ -584,6 +597,7 @@ fn independent_namespaces_do_not_hold_a_global_data_lock() {
 }
 #[test]
 fn external_output_is_bounded_stable_and_artifact_is_immutable() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -617,6 +631,7 @@ fn external_output_is_bounded_stable_and_artifact_is_immutable() {
 }
 #[test]
 fn editing_and_read_limits_reject_without_mutation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let policy = StoragePolicy {
             max_edits: 1,
@@ -646,6 +661,7 @@ fn editing_and_read_limits_reject_without_mutation() {
 }
 #[test]
 fn retention_cleanup_is_explicit_versioned_and_cannot_erase_new_copy() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -697,6 +713,7 @@ impl TargetValidator for RejectRules {
 }
 #[test]
 fn host_diagnostic_classification_controls_receipt() {
+    let _outcomes = runtrell::test_outcomes::guard();
     struct Rules(Vec<Diagnostic>);
     impl TargetValidator for Rules {
         fn key(&self) -> ValidatorKey {
@@ -751,6 +768,7 @@ fn host_diagnostic_classification_controls_receipt() {
 }
 #[test]
 fn diagnostic_locations_and_workspace_validator_cannot_self_certify() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -778,6 +796,7 @@ fn diagnostic_locations_and_workspace_validator_cannot_self_certify() {
 }
 #[test]
 fn same_run_child_agent_and_tenant_boundaries() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -809,6 +828,7 @@ fn same_run_child_agent_and_tenant_boundaries() {
 }
 #[test]
 fn class_cleanup_reports_pending_while_retained_blobs_remain() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -836,6 +856,7 @@ fn class_cleanup_reports_pending_while_retained_blobs_remain() {
 }
 #[test]
 fn mixed_case_portable_files_work_but_case_aliases_are_rejected() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -850,6 +871,7 @@ fn mixed_case_portable_files_work_but_case_aliases_are_rejected() {
 }
 #[test]
 fn multiple_edits_in_one_file_share_initial_digest_and_commit_once() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -883,12 +905,14 @@ fn policy_with_retention(retention: u64) -> StoragePolicy {
 }
 #[test]
 fn default_retention_is_one_day_in_milliseconds() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let policy = StoragePolicy::default();
     assert!(policy.classes.values().all(|c| c.retention == DAY_MS));
     assert_eq!(DAY_MS, 24 * 60 * 60 * 1000);
 }
 #[test]
 fn artifact_deletion_boundary_is_exact_in_milliseconds() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -923,6 +947,7 @@ fn artifact_deletion_boundary_is_exact_in_milliseconds() {
 }
 #[test]
 fn sub_second_retention_is_not_rounded_to_seconds() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(policy_with_retention(500));
         let a = Access::owner(ns("r"));
@@ -942,6 +967,7 @@ fn sub_second_retention_is_not_rounded_to_seconds() {
 }
 #[test]
 fn finalized_artifact_needs_class_retention_plus_final_retention() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -983,6 +1009,7 @@ fn finalized_artifact_needs_class_retention_plus_final_retention() {
 }
 #[test]
 fn retention_arithmetic_saturates_instead_of_wrapping() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));
@@ -1013,6 +1040,7 @@ fn retention_arithmetic_saturates_instead_of_wrapping() {
 }
 #[test]
 fn class_cleanup_boundary_uses_the_retain_time_in_milliseconds() {
+    let _outcomes = runtrell::test_outcomes::guard();
     drive(async {
         let s = DataStore::memory(StoragePolicy::default());
         let a = Access::owner(ns("r"));

@@ -576,6 +576,7 @@ mod execution_tool;
 #[tokio::test]
 #[ignore = "requires delegated cgroup v2 and host mount privileges"]
 async fn linux_execution_tool_saves_and_reclaims() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let root = root();
     let backend = backend(root.path());
     execution_tool::exercise(backend, request("").limits).await;

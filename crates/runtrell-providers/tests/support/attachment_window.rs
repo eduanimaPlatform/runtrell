@@ -102,6 +102,7 @@ impl Tool for OpenViews {
 
 #[tokio::test]
 async fn tool_count_and_byte_overflow_are_repairable_before_inference_and_preserve_receipts() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for by_bytes in [false, true] {
         let store = Arc::new(memory::MemoryStore::default());
         let account = store
@@ -246,6 +247,7 @@ fn model_config(endpoint: String, handle: RunHandle) -> Config {
 
 #[tokio::test]
 async fn image_replay_survives_two_continuations_and_a_later_tool_call() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = Arc::new(memory::MemoryStore::default());
     let account = store
         .create_account("tenant", Amount::new(100000, 100000), None)
@@ -429,6 +431,7 @@ impl<M: ModelPort> ModelPort for StopAfterWrites<M> {
 
 #[tokio::test]
 async fn process_worker() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let Ok(schema) = std::env::var("RT_WINDOW_SCHEMA") else {
         return;
     };
@@ -520,11 +523,13 @@ async fn process_worker() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pg_ten_pages_in_pairs_process_exit_and_reopen_fixed_page() {
+    let _outcomes = runtrell::test_outcomes::guard();
     pg_page_window(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pg_page_window_two_continuations_process_exit_and_resume() {
+    let _outcomes = runtrell::test_outcomes::guard();
     pg_page_window(true).await;
 }
 
@@ -759,6 +764,7 @@ async fn pg_page_window(continuation: bool) {
 
 #[tokio::test]
 async fn repeated_document_ranges_without_writes_stop() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = Arc::new(memory::MemoryStore::default());
     let account = store
         .create_account("tenant", Amount::new(100000, 100000), None)

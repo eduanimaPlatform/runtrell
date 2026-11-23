@@ -200,6 +200,7 @@ impl Finalizer for SlowFinalizer {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn heterogeneous_runs_yield_during_async_storage_and_sync_evidence_io() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = Arc::new(MemoryStore::default());
     let gate = Arc::new(tokio::sync::Barrier::new(6));
     let entered = Arc::new(AtomicUsize::new(0));

@@ -16,6 +16,7 @@ const SVG_SOURCE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns
 
 #[tokio::test]
 async fn img26_svg_wire_prices_image_and_author_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut body = image_response();
     body["data"][0]["b64_json"] = json!(STANDARD.encode(SVG_SOURCE));
     body["usage"] = json!({"total_tokens":935,"input_tokens":111,"output_tokens":824,
@@ -72,6 +73,7 @@ async fn img26_svg_wire_prices_image_and_author_usage() {
 
 #[tokio::test]
 async fn img26_svg_wire_exact_bytes_digest_and_receipt_replay() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for options in [
         json!({}),
         json!({"model":"verified-author"}),
@@ -151,6 +153,7 @@ async fn img26_svg_wire_exact_bytes_digest_and_receipt_replay() {
 
 #[tokio::test]
 async fn img26_rejections_send_no_http() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, http) = server(200, "", image_response()).await;
     let cfg = img26_config(url);
     let limits = cfg.image_limits.clone();
@@ -233,6 +236,7 @@ async fn img26_rejections_send_no_http() {
 
 #[tokio::test]
 async fn img26_svg_capability_and_author_selection_are_checked_before_http() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for (generation, selection, input) in [
         (false, false, json!({"prompt":"draw"})),
         (
@@ -271,6 +275,7 @@ async fn img26_svg_capability_and_author_selection_are_checked_before_http() {
 
 #[tokio::test]
 async fn img26_raster_edit_options_and_omission_snapshot() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for options in [
         json!({}),
         json!({"quality":"high","complexity":"low","background":"opaque"}),
@@ -317,6 +322,7 @@ async fn img26_raster_edit_options_and_omission_snapshot() {
 
 #[tokio::test]
 async fn pg_img26_author_cost_settles_once_and_unknown_author_recovers_without_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_postgres::PgStore;
     use runtrell_testkit::FakeModel;
     let database =
@@ -473,6 +479,7 @@ async fn pg_img26_author_cost_settles_once_and_unknown_author_recovers_without_s
             let balance = runs.account(&account).await.unwrap();
             assert_eq!(balance.reserved, Amount::default());
             assert_eq!(balance.used, Amount::new(30, 114)); // first model 4 + both components.
+            runtrell::test_outcomes::expect_operator_wait(&handle);
         } else {
             assert!(op.settled);
             let usage = match op.result.as_ref().unwrap() {
@@ -506,6 +513,8 @@ async fn pg_img26_author_cost_settles_once_and_unknown_author_recovers_without_s
 
 #[tokio::test]
 async fn managed_img26_estimates_and_settles_bounded_raster_requests() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect};
     use runtrell_testkit::FakeModel;
     for (id, action, cache, expected) in [
         ("openai/gpt-image-2.6-flare", ImageAction::Generate, Some(0), Some(155)),
@@ -584,5 +593,23 @@ async fn managed_img26_estimates_and_settles_bounded_raster_requests() {
         assert_eq!(op.settled, expected.is_some());
         let totals = runs.account(&account).await.unwrap();
         assert_eq!(totals.reserved, if expected.is_some() { Amount::default() } else { expected_quote });
+        if expected.is_none() {
+            expect(
+                &run,
+                ExpectedOutcome {
+                    exceptions: vec![OutcomeException {
+                        operator_action: true,
+                        ..OutcomeException::unresolved_usage(
+                            "tool:1:raster",
+                            OperationKind::Tool,
+                            OperationState::Applied,
+                            UsageIssue::PricingUnavailable,
+                        )
+                    }],
+                    operator_wait: true,
+                    ..Default::default()
+                },
+            );
+        }
     }
 }

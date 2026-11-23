@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn images_reopen_artifacts_with_one_settlement_per_billed_attempt() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("image Pg tests never skip");
     let pool = PgPoolOptions::new()
         .max_connections(4)

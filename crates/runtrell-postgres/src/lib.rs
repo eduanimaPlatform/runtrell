@@ -184,6 +184,8 @@ impl PgStore {
         tx.commit()
             .await
             .map_err(|e| storage("PgStore::initialize", e))?;
+        #[cfg(feature = "test-support")]
+        store.track_test_outcomes();
         Ok(store)
     }
 
@@ -265,6 +267,8 @@ impl PgStore {
         tx.rollback()
             .await
             .map_err(|e| storage("PgStore::connect", e))?;
+        #[cfg(feature = "test-support")]
+        store.track_test_outcomes();
         Ok(store)
     }
 

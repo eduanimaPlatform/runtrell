@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+
+- Check durable run outcomes at test exit for both Memory and PostgreSQL.
+  Tests that leave unresolved operations or operator work declare the exact
+  expected state for each affected run.
+
 ## 0.11.0
 
 - Construct ambiguous outcomes with explicit evidence and a closed reason.

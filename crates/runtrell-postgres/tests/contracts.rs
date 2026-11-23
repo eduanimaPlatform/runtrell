@@ -2,6 +2,7 @@
 mod support;
 #[test]
 fn images_normal_loop_and_saved_result_recovery() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::image_contracts::workflow(
         std::sync::Arc::new(support::TestPg::default()),
         runtrell::data::DataStore::memory(runtrell::data::StoragePolicy::default()),
@@ -9,6 +10,7 @@ fn images_normal_loop_and_saved_result_recovery() {
 }
 #[test]
 fn images_paid_validation_failure_and_unknown_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::image_contracts::billed_failures(
         std::sync::Arc::new(support::TestPg::default()),
     ));
@@ -68,48 +70,56 @@ mod postgres {
 
 #[test]
 fn selectable_account_policies() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::budget_contracts::policies(
         &support::TestPg::default(),
     ));
 }
 #[test]
 fn budget_settlement_finalization_and_billed_attempts() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::budget_contracts::settlement_and_finalization(&support::TestPg::default()),
     );
 }
 #[test]
 fn run_reservation_policies() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::budget_contracts::driver_policies(
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
 #[test]
 fn host_priority_preserves_tenant_rotation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::budget_contracts::scheduling(
         &support::TestPg::default(),
     ));
 }
 #[test]
 fn selectable_axes_and_ancestor_quantity_guarantees() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::budget_contracts::axes(
         &support::TestPg::default(),
     ));
 }
 #[test]
 fn tokenless_paid_tool_reserves_host_quantity() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::budget_contracts::quantity_tool(
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
 #[test]
 fn model_quote_race() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::budget_contracts::model_quote_race(
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
 #[test]
 fn preparation_and_physical_evidence() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::recovery_contracts::preparation_and_evidence(std::sync::Arc::new(
             support::TestPg::default(),
@@ -118,6 +128,7 @@ fn preparation_and_physical_evidence() {
 }
 #[test]
 fn external_job_preparation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::recovery_contracts::job_preparation(
         std::sync::Arc::new(support::TestPg::default()),
     ));
@@ -125,6 +136,7 @@ fn external_job_preparation() {
 
 #[test]
 fn json_artifact_syntax_repairs_with_new_runtime() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::repair_contracts::json_artifact_repair_contract(std::sync::Arc::new(
             support::TestPg::default(),
@@ -134,12 +146,14 @@ fn json_artifact_syntax_repairs_with_new_runtime() {
 
 #[test]
 fn validation_no_progress_survives_resume() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::repair_contracts::no_progress_contract(
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
 #[test]
 fn disabled_no_progress_survives_resume() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::repair_contracts::no_progress_disabled_contract(std::sync::Arc::new(
             support::TestPg::default(),
@@ -148,6 +162,7 @@ fn disabled_no_progress_survives_resume() {
 }
 #[test]
 fn artifact_content_defines_progress() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::repair_contracts::artifact_progress_contract(std::sync::Arc::new(
             support::TestPg::default(),
@@ -156,6 +171,7 @@ fn artifact_content_defines_progress() {
 }
 #[test]
 fn time_lease_and_deadline_boundaries() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::time_contracts::lease_and_deadline_boundaries(std::sync::Arc::new(
             support::TestPg::default(),
@@ -164,12 +180,14 @@ fn time_lease_and_deadline_boundaries() {
 }
 #[test]
 fn time_lease_overflow_is_refused() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(runtrell_testkit::time_contracts::lease_overflow_is_refused(
         std::sync::Arc::new(support::TestPg::default()),
     ));
 }
 #[test]
 fn time_operation_deadline_is_now_plus_timeout_ms() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::time_contracts::operation_deadline_is_now_plus_timeout_ms(
             std::sync::Arc::new(support::TestPg::default()),
@@ -178,6 +196,7 @@ fn time_operation_deadline_is_now_plus_timeout_ms() {
 }
 #[test]
 fn time_capacity_wait_default_is_sixty_seconds_in_ms() {
+    let _outcomes = runtrell::test_outcomes::guard();
     support::block_on(
         runtrell_testkit::time_contracts::capacity_wait_default_is_sixty_seconds_in_ms(
             std::sync::Arc::new(support::TestPg::new(

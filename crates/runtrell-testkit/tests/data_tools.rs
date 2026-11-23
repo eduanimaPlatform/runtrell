@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use runtrell::attachments::{Attachment, ExternalAttachment};
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::{data::*, file_tools::*, memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::{Value, json};
@@ -12,12 +13,14 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 #[test]
 fn file_execution_failures_are_model_repairable() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(tool_failure_contracts::file_repairs(Arc::new(
         MemoryStore::default(),
     )));
 }
 #[test]
 fn saved_file_failure_recovers_without_reexecution() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = Arc::new(MemoryStore::default());
     block_on(tool_failure_contracts::saved_failure_recovery(
         store.clone(),
@@ -26,12 +29,14 @@ fn saved_file_failure_recovers_without_reexecution() {
 }
 #[test]
 fn file_repair_preserves_limits_and_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(tool_failure_contracts::repair_stops(Arc::new(
         MemoryStore::default(),
     )));
 }
 #[test]
 fn tool_failures_preserve_stop_and_reconciliation_boundaries() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(tool_failure_contracts::failure_boundaries(Arc::new(
         MemoryStore::default(),
     )));
@@ -50,6 +55,7 @@ async fn start(s: &MemoryStore) -> (RunHandle, Claim) {
 }
 #[test]
 fn standard_file_tools_use_dispatch_no_vm_and_current_policy() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c) = start(&s).await;
@@ -96,6 +102,7 @@ fn standard_file_tools_use_dispatch_no_vm_and_current_policy() {
 }
 #[test]
 fn compaction_is_charged_and_preserves_contract() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c) = start(&s).await;
@@ -241,6 +248,7 @@ async fn validation_fixture(
 }
 #[test]
 fn slow_validation_over_thirty_seconds_applies_with_host_timeout() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, _, _, tool) =
             validation_fixture(Duration::from_millis(30_100), 35_000).await;
@@ -291,6 +299,7 @@ fn slow_validation_over_thirty_seconds_applies_with_host_timeout() {
 }
 #[test]
 fn timed_out_validation_remains_unknown_even_after_evidence_arrives() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, data, access, tool) =
             validation_fixture(Duration::from_millis(150), 30).await;
@@ -396,10 +405,19 @@ fn timed_out_validation_remains_unknown_even_after_evidence_arrives() {
             )
             .await;
         assert!(matches!(recovered, Err(Error::UsageUnknown)));
+        expect_operations(
+            &claim.run,
+            [OutcomeException::unresolved(
+                "late-validation",
+                OperationKind::Tool,
+                AmbiguityReason::InvocationInterrupted,
+            )],
+        );
     });
 }
 #[test]
 fn same_validator_finalizer_contract_for_artifact_and_structured_judgment() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for workspace in [false, true] {
             let s = Arc::new(MemoryStore::default());
@@ -461,6 +479,7 @@ impl Policy for DenyWrites {
 }
 #[test]
 fn catalog_filters_authority_and_rejects_changed_descriptor() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c) = start(&s).await;
@@ -551,6 +570,7 @@ impl ModelPort for ChangesCatalog {
 }
 #[test]
 fn exact_replace_schema_describes_and_validates_each_edit() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = DataStore::memory(StoragePolicy::default());
     let tool = FileTool {
         store,
@@ -575,6 +595,7 @@ fn exact_replace_schema_describes_and_validates_each_edit() {
 }
 #[test]
 fn validator_tool_and_output_wrapper_use_common_dispatch() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c) = start(&s).await;
@@ -653,6 +674,7 @@ fn validator_tool_and_output_wrapper_use_common_dispatch() {
 }
 #[test]
 fn lost_file_response_keeps_saved_content_and_does_not_replay() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c) = start(&s).await;
@@ -708,6 +730,14 @@ fn lost_file_response_keeps_saved_content_and_does_not_replay() {
             s.list_operations(&c.run).await.unwrap()[0].state,
             OperationState::Unknown
         );
+        expect_operations(
+            &c.run,
+            [OutcomeException::unresolved(
+                "write",
+                OperationKind::Tool,
+                AmbiguityReason::InvocationInterrupted,
+            )],
+        );
     });
 }
 
@@ -737,6 +767,7 @@ impl Tool for EscapingOutputTool {
 
 #[test]
 fn runtime_rejects_json_expansion_before_model_history() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let output = json!({"text":"\n".repeat(20)});
         assert!(output["text"].as_str().unwrap().len() + 11 < 40);
@@ -801,6 +832,7 @@ impl Tool for TinyInputTool {
 
 #[test]
 fn runtime_rejects_oversized_schema_feedback_before_model_history() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let (_, claim) = start(&store).await;
@@ -917,6 +949,7 @@ impl Tool for NearLimitAttachmentTool {
 
 #[test]
 fn attachment_limit_feedback_respects_serialized_output_cap() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = Arc::new(MemoryStore::default());
         let (_, claim) = start(&store).await;
@@ -1002,11 +1035,13 @@ impl Tool for PausedRepairFailure {
 
 #[test]
 fn revoked_input_blocks_replay_of_settled_repair_failure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     assert_revocation_blocks_replay(false);
 }
 
 #[test]
 fn typed_rejection_blocks_replay_of_settled_repair_failure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     assert_revocation_blocks_replay(true);
 }
 
@@ -1072,6 +1107,7 @@ fn assert_revocation_blocks_replay(correctable: bool) {
 
 #[test]
 fn correctable_input_authorization() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(tool_failure_contracts::correctable_input_authorization(
         Arc::new(MemoryStore::default()),
     ));

@@ -16,6 +16,7 @@ pub(super) fn reply(parts: Value) -> Value {
 
 #[tokio::test]
 async fn final_submission_repairs_format_and_purges_the_confirmed_transcript() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (endpoint, wire) = super::document_contracts::sequence_server(vec![
         reply(json!([{"text":"{\"private_draft\":true}"}])),
         reply(json!([{"text":"{\"decision\":\"answered\"}"}])),
@@ -191,6 +192,7 @@ impl Tool for ValidateTool {
 
 #[tokio::test]
 async fn validated_ack_keeps_the_candidate_and_uses_a_tool_free_wire_request() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let candidate = json!({"decision":"fixture result"});
     let (endpoint, wire) = super::document_contracts::sequence_server(vec![
         call("check", "validate", candidate.clone()),
@@ -243,6 +245,7 @@ async fn validated_ack_keeps_the_candidate_and_uses_a_tool_free_wire_request() {
 
 #[tokio::test]
 async fn tool_and_final_validation_share_observed_repair_progress() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (endpoint, wire) = super::document_contracts::sequence_server(vec![
         reply(json!([{"text":"{\"decision\":\"draft\"}"}])),
         call(
@@ -318,6 +321,7 @@ async fn tool_and_final_validation_share_observed_repair_progress() {
 
 #[tokio::test]
 async fn compaction_preserves_new_read_ranges_and_stops_before_another_stalled_summary() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::{
         data::{Access, DataStore, StoragePolicy},
         file_tools::{FileAction, FileTool},

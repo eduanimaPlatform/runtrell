@@ -1,3 +1,4 @@
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::{memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::{Value, json};
@@ -40,6 +41,7 @@ fn applied() -> ExternalResult {
 }
 #[test]
 fn lookup_then_cancellation_prevents_resend_and_retains_reservation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let op = s.begin(&c, request(), 0).await.unwrap();
@@ -66,10 +68,19 @@ fn lookup_then_cancellation_prevents_resend_and_retains_reservation() {
         assert_eq!(result, Err(Error::Closed));
         assert_eq!(sends.load(Ordering::SeqCst), 0);
         assert_eq!(s.account(&a).await.unwrap().reserved, Amount::new(10, 10));
+        expect_operations(
+            &c.run,
+            [OutcomeException::unsettled(
+                "effect",
+                OperationKind::Tool,
+                OperationState::Sent,
+            )],
+        );
     });
 }
 #[test]
 fn lookup_then_revocation_prevents_resend_and_cached_results_require_policy() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let op = s.begin(&c, request(), 0).await.unwrap();
@@ -111,6 +122,7 @@ fn lookup_then_revocation_prevents_resend_and_cached_results_require_policy() {
 }
 #[test]
 fn intent_save_failure_is_before_any_external_io() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -135,6 +147,7 @@ fn intent_save_failure_is_before_any_external_io() {
 }
 #[test]
 fn stale_result_and_checkpoint_are_fenced_after_lease_renew_and_handoff() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let op = s.begin(&c, request(), 0).await.unwrap();
@@ -171,6 +184,7 @@ fn stale_result_and_checkpoint_are_fenced_after_lease_renew_and_handoff() {
 }
 #[test]
 fn result_save_failure_after_external_effect_recovers_by_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         struct ToolWithFault {
             business: BusinessTool,
@@ -227,6 +241,7 @@ fn result_save_failure_after_external_effect_recovers_by_lookup() {
 }
 #[test]
 fn catalog_change_cannot_route_saved_call_to_different_account() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let tool = BusinessTool::new("reply");
@@ -246,10 +261,19 @@ fn catalog_change_cannot_route_saved_call_to_different_account() {
         assert!(
             matches!(restarted.drive(&next).await.unwrap().state,RunState::Terminal(Terminal::Failed(ref reason)) if reason.contains("configuration"))
         );
+        expect_operations(
+            &c.run,
+            [OutcomeException::unresolved(
+                "tool:1:x",
+                OperationKind::Tool,
+                AmbiguityReason::InvocationInterrupted,
+            )],
+        );
     });
 }
 #[test]
 fn cancellation_between_validation_and_finalize_wins() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         struct CancelValidator(Arc<MemoryStore>);
         impl Validator for CancelValidator {
@@ -278,6 +302,7 @@ fn cancellation_between_validation_and_finalize_wins() {
 }
 #[test]
 fn price_not_configured_never_calls_model() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         struct Unpriced;
         impl ModelPort for Unpriced {
@@ -320,6 +345,7 @@ fn price_not_configured_never_calls_model() {
 }
 #[test]
 fn session_order_waits_before_any_business_io() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let mut first = RunSpec::new("t", "session1", a.clone(), "first");
@@ -341,6 +367,7 @@ fn session_order_waits_before_any_business_io() {
 }
 #[test]
 fn replay_proof_cannot_survive_worker_handoff_without_new_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let op = s.begin(&c, request(), 0).await.unwrap();
@@ -356,10 +383,19 @@ fn replay_proof_cannot_survive_worker_handoff_without_new_lookup() {
             Err(Error::UsageUnknown)
         );
         assert_eq!(s.account(&a).await.unwrap().reserved, Amount::new(10, 10));
+        expect_operations(
+            &c.run,
+            [OutcomeException::unsettled(
+                "effect",
+                OperationKind::Tool,
+                OperationState::Intent,
+            )],
+        );
     });
 }
 #[test]
 fn tenant_round_robin_visits_third_tenant_under_refill() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = MemoryStore::default();
         for (key, tenant) in [
@@ -390,6 +426,7 @@ fn tenant_round_robin_visits_third_tenant_under_refill() {
 }
 #[test]
 fn partial_usage_keeps_result_evidence_and_resolves_only_by_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -437,6 +474,7 @@ fn partial_usage_keeps_result_evidence_and_resolves_only_by_lookup() {
 }
 #[test]
 fn default_policy_unsafe_next_model_reservation_exhausts_shared_request_account() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let a = s

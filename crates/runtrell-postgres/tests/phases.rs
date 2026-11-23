@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::*;
 use runtrell_postgres::PgStore;
 use runtrell_testkit::{DecisionValidator, phase_contracts};
@@ -20,6 +21,7 @@ async fn store() -> (PgPool, String, PgStore) {
 
 #[tokio::test]
 async fn intermediate_completion_reopens_only_after_purge() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = store().await;
     let reopened = PgStore::connect(pool, &schema, Capacity::default())
         .await
@@ -33,6 +35,7 @@ async fn intermediate_completion_reopens_only_after_purge() {
 
 #[tokio::test]
 async fn seal_is_atomic_and_disallows_late_payloads_and_retired_replay() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = store().await;
     let account = store
         .create_account("t", Amount::new(100, 100), None)
@@ -163,10 +166,19 @@ async fn seal_is_atomic_and_disallows_late_payloads_and_retired_replay() {
         Err(Error::OwnershipLost)
     );
     assert!(store.late_results(&next, 6).await.unwrap().is_empty());
+    expect_operations(
+        &run,
+        [OutcomeException::unsettled(
+            "next-read",
+            OperationKind::Tool,
+            OperationState::Intent,
+        )],
+    );
 }
 
 #[tokio::test]
 async fn children_are_bound_to_the_open_phase() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (pool, schema, store) = store().await;
     let reopened = PgStore::connect(pool, &schema, Capacity::default())
         .await

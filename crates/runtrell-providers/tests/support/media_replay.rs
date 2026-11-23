@@ -306,6 +306,7 @@ fn model_input_reservation(op: &Operation) -> u64 {
 
 #[tokio::test]
 async fn tool_media_replay_preserves_responses_prefix_order_and_sizes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let result = run(
         Scenario::Replay,
         vec![
@@ -366,6 +367,7 @@ async fn tool_media_replay_preserves_responses_prefix_order_and_sizes() {
 
 #[tokio::test]
 async fn tool_media_replay_revocation_settles_without_another_provider_request() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let result = run(
         Scenario::Revoked,
         vec![vec![call("first", "pdf", 1)], vec![call("save", "text", 0)]],
@@ -389,6 +391,7 @@ async fn tool_media_replay_revocation_settles_without_another_provider_request()
 
 #[tokio::test]
 async fn compaction_replaces_old_media_with_reference_text_and_keeps_pending_media() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let summary = "Page one was opened. Continue with page two.";
     let result = run(
         Scenario::Compact,
@@ -427,6 +430,7 @@ async fn compaction_replaces_old_media_with_reference_text_and_keeps_pending_med
 
 #[tokio::test]
 async fn measured_media_input_above_the_reservation_never_sends_inference() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let result = run(
         Scenario::EstimateExceeded,
         vec![vec![call("first", "pdf", 1)]],
@@ -447,6 +451,7 @@ async fn measured_media_input_above_the_reservation_never_sends_inference() {
 
 #[tokio::test]
 async fn retained_media_overflow_demotes_oldest_without_compaction_and_reopens_in_place() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for scenario in [Scenario::CountLimit, Scenario::ByteLimit] {
         let outputs = (1..=5)
             .map(|page| vec![call(&format!("open-{page}"), "pdf", page)])

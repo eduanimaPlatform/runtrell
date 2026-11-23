@@ -43,6 +43,7 @@ runtrell_testkit::execution_ledger_contract_tests!(PgHarness);
 
 #[test]
 fn execution_sql_failure_rolls_back_and_two_clients_cas_once() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let h = PgHarness::open().await;
         let c = ToolContext {

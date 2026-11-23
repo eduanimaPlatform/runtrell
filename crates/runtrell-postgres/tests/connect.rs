@@ -111,8 +111,8 @@ fn capacity(queue: usize) -> Capacity {
 /// Runs `body`, always removes the schema and roles, then re-raises a failure.
 fn run<F, Fut>(body: F)
 where
-    F: FnOnce(Env) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Env> + Send + 'static,
+    F: FnOnce(Env) -> Fut,
+    Fut: std::future::Future<Output = Env> + 'static,
 {
     support::block_on(async move {
         let env = Env::new().await;
@@ -122,7 +122,8 @@ where
             env.schema.clone(),
             env.role_prefix.clone(),
         );
-        let outcome = tokio::spawn(body(env)).await;
+        let local = tokio::task::LocalSet::new();
+        let outcome = local.run_until(local.spawn_local(body(env))).await;
         let cleaner = Env {
             admin,
             options,
@@ -137,6 +138,7 @@ where
 #[test]
 fn least_privilege_role_connects_without_changing_the_runtime() {
     run(|mut env| async move {
+        let _outcomes = runtrell::test_outcomes::guard();
         // Owner role initializes: creates the schema, runs DDL, seeds config and permits.
         let owner = PgStore::initialize(env.admin.clone(), &env.schema, capacity(7))
             .await

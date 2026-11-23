@@ -302,6 +302,7 @@ async fn contract(open: impl Fn() -> DataStore) {
 }
 #[tokio::test]
 async fn memory_local_external_share_contract_and_restart_boundaries() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let memory = DataStore::memory(StoragePolicy::default());
     contract(|| memory.clone()).await;
     let root = tempfile::tempdir().unwrap();
@@ -318,6 +319,7 @@ async fn memory_local_external_share_contract_and_restart_boundaries() {
 }
 #[tokio::test]
 async fn external_partial_upload_and_response_loss_at_each_publication_boundary() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for failure in [1, 2, 3] {
         for boundary in 0..4 {
             let backend = Arc::new(FakeExternal::default());
@@ -382,6 +384,7 @@ async fn external_partial_upload_and_response_loss_at_each_publication_boundary(
 }
 #[tokio::test]
 async fn local_collects_only_orphan_transaction_uploads_under_namespace_lock() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().canonicalize().unwrap();
     let s = DataStore::local(&path, StoragePolicy::default()).unwrap();
@@ -522,6 +525,7 @@ async fn stable_raw_contract<S: ArtifactStore>(open: impl Fn() -> S) {
 }
 #[tokio::test]
 async fn stable_raw_bytes_memory_local_external_contract() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let memory = DataStore::memory(StoragePolicy::default());
     stable_raw_contract(|| memory.clone()).await;
     let root = tempfile::tempdir().unwrap();
@@ -539,6 +543,7 @@ async fn stable_raw_bytes_memory_local_external_contract() {
 
 #[tokio::test]
 async fn stable_raw_bytes_recovers_lost_stage_and_save_responses_without_republication() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for failure in [1, 2, 3] {
         for boundary in 0..2 {
             let backend = Arc::new(FakeExternal::default());
@@ -586,6 +591,7 @@ async fn stable_raw_bytes_recovers_lost_stage_and_save_responses_without_republi
 
 #[tokio::test]
 async fn stable_raw_bytes_checks_tokens_and_metadata_before_publication() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut policy = StoragePolicy::default();
     policy
         .classes
@@ -640,6 +646,7 @@ async fn stable_raw_bytes_checks_tokens_and_metadata_before_publication() {
 
 #[tokio::test]
 async fn local_stable_raw_bytes_survive_process_exit_at_stage_and_save() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let spec = ArtifactSpec {
         id: "external-job-result".into(),
         media_type: "application/custom".into(),
@@ -704,6 +711,7 @@ async fn local_stable_raw_bytes_survive_process_exit_at_stage_and_save() {
 
 #[tokio::test]
 async fn random_artifact_stage_preserves_explicit_write_sharing_contract() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let s = DataStore::memory(StoragePolicy::default());
     let a = access();
     let shared = s.share_agent(&a, "child", true, 0).await.unwrap();

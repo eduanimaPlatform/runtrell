@@ -268,6 +268,7 @@ fn text(request: ModelRequest) -> PreparedModelRequest {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn provider_http_error_exposes_safe_typed_diagnostic() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let secret = "sk-SYNTHETIC-NEVER-EXPOSE";
     let (url, server) = server(
         400,
@@ -299,6 +300,7 @@ async fn provider_http_error_exposes_safe_typed_diagnostic() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn provider_diagnostic_distinguishes_transport_and_effective_status() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, server) = server(
         400,
         "Retry-After: 7\r\n",
@@ -333,6 +335,7 @@ async fn provider_diagnostic_distinguishes_transport_and_effective_status() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn only_documented_openai_overload_and_slow_down_enable_runtime_retry() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for (status, error_type, error_code, header, expected_delay) in [
         (
             503,
@@ -441,6 +444,7 @@ async fn only_documented_openai_overload_and_slow_down_enable_runtime_retry() {
 #[cfg(feature = "openai")]
 #[test]
 fn model_retry_policy_is_host_selected_and_rejects_zero_bounds() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let endpoint = "http://127.0.0.1:1/test".to_owned();
     let default = OpenAi::new(config(endpoint.clone())).unwrap();
     assert_eq!(default.retry_policy(), RetryPolicy::default());
@@ -474,7 +478,9 @@ fn model_retry_policy_is_host_selected_and_rejects_zero_bounds() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
+    use runtrell::test_outcomes::{OutcomeException, expect_operations};
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
     };
@@ -571,12 +577,23 @@ async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge()
     assert_eq!(attempts[1].request.attempt, 2);
     assert_eq!(store.account(&account).await.unwrap().unknown, 1);
     assert_eq!(server.await.unwrap().len(), 2);
+    expect_operations(
+        &run,
+        [OutcomeException::unresolved_usage(
+            "model:1",
+            OperationKind::Model,
+            OperationState::Failed,
+            UsageIssue::Missing,
+        )],
+    );
 }
 
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn repeated_overload_http_stops_after_three_attempts_with_all_unknowns_held() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
+    use runtrell::test_outcomes::{OutcomeException, expect_operations};
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
     };
@@ -662,10 +679,23 @@ async fn repeated_overload_http_stops_after_three_attempts_with_all_unknowns_hel
     );
     assert_eq!(store.account(&account).await.unwrap().unknown, 3);
     assert_eq!(server.await.unwrap().len(), 3);
+    expect_operations(
+        &run,
+        [1, 2, 3].map(|attempt| {
+            OutcomeException::unresolved_usage(
+                "model:1",
+                OperationKind::Model,
+                OperationState::Failed,
+                UsageIssue::Missing,
+            )
+            .at_attempt(attempt)
+        }),
+    );
 }
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn provider_diagnostic_rejects_hostile_fields_and_non_json_body() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let secret = "sk-SYNTHETIC-NEVER-EXPOSE";
     let (url, server) = server(
         401,
@@ -717,6 +747,7 @@ async fn provider_diagnostic_rejects_hostile_fields_and_non_json_body() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn rejected_request_settles_without_reported_counters() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, server) = server(
         403,
         "",
@@ -738,6 +769,7 @@ async fn rejected_request_settles_without_reported_counters() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn provider_success_status_with_invalid_schema_preserves_definite_failure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, server) = server(200, "", json!({})).await;
     let result = OpenAi::new(config(url))
         .unwrap()
@@ -756,6 +788,7 @@ async fn provider_success_status_with_invalid_schema_preserves_definite_failure(
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_structured_error_allowlist() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, server) = server(429, "", json!({"error": {
         "code": 429, "status": "RESOURCE_EXHAUSTED", "message": "sk-SYNTHETIC-NEVER-EXPOSE",
         "details": [{"@type":"type.googleapis.com/google.rpc.BadRequest",
@@ -786,6 +819,7 @@ async fn gemini_structured_error_allowlist() {
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn openrouter_structured_error_allowlist() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, server) = server(
         429,
         "",
@@ -868,16 +902,19 @@ async fn wire_contract<T: ModelPort + std::fmt::Debug>(
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn openai_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     wire_contract(OpenAi::new,"openai",json!({"id":"resp-1","status":"completed","model":"actual-model","output":[{"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hello back"}]}],"usage":{"input_tokens":12,"output_tokens":8,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}})).await;
 }
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     wire_contract(Gemini::new,"gemini",json!({"responseId":"resp-1","modelVersion":"actual-model","candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"hello back"}]}}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"thoughtsTokenCount":2,"cachedContentTokenCount":3}})).await;
 }
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn openrouter_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     wire_contract(OpenRouter::new,"openrouter",json!({"id":"resp-1","model":"actual-model","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hello back"}}],"usage":{"prompt_tokens":12,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":2}}})).await;
 }
 
@@ -1436,22 +1473,27 @@ macro_rules! suites {
             use super::*;
             #[tokio::test]
             async fn stop_and_partial_calls() {
+                let _outcomes = runtrell::test_outcomes::guard();
                 stops($adapter::new, $kind).await;
             }
             #[tokio::test]
             async fn error_retry_redirect_disconnect() {
+                let _outcomes = runtrell::test_outcomes::guard();
                 errors($adapter::new, $kind).await;
             }
             #[tokio::test]
             async fn run_session_continuation() {
+                let _outcomes = runtrell::test_outcomes::guard();
                 continuation($adapter::new, $kind).await;
             }
             #[tokio::test]
             async fn options_and_limits() {
+                let _outcomes = runtrell::test_outcomes::guard();
                 options_and_bounds($adapter::new, $kind).await;
             }
             #[tokio::test]
             async fn missing_partial_image_usage() {
+                let _outcomes = runtrell::test_outcomes::guard();
                 usage_cases($adapter::new, $kind).await;
             }
         }
@@ -1519,16 +1561,19 @@ async fn host_price<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &str) {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn openai_host_price_settlement() {
+    let _outcomes = runtrell::test_outcomes::guard();
     host_price(OpenAi::new, "openai").await;
 }
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_host_price_settlement() {
+    let _outcomes = runtrell::test_outcomes::guard();
     host_price(Gemini::new, "gemini").await;
 }
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn openrouter_host_price_settlement() {
+    let _outcomes = runtrell::test_outcomes::guard();
     host_price(OpenRouter::new, "openrouter").await;
 }
 
@@ -1552,16 +1597,19 @@ async fn failure_usage<T: ModelPort>(make: fn(Config) -> Result<T>) {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn openai_failure_preserves_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
     failure_usage(OpenAi::new).await;
 }
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_failure_preserves_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
     failure_usage(Gemini::new).await;
 }
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn openrouter_failure_preserves_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
     failure_usage(OpenRouter::new).await;
 }
 
@@ -1738,22 +1786,26 @@ async fn tool_name_contract<T: ModelPort>(make: fn(Config) -> Result<T>, kind: &
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn openai_tool_names() {
+    let _outcomes = runtrell::test_outcomes::guard();
     tool_name_contract(OpenAi::new, "openai").await;
 }
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn chat_tool_names() {
+    let _outcomes = runtrell::test_outcomes::guard();
     tool_name_contract(OpenRouter::new, "openrouter").await;
 }
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_tool_names() {
+    let _outcomes = runtrell::test_outcomes::guard();
     tool_name_contract(Gemini::new, "gemini").await;
 }
 
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn bundled_model_requires_reservation_and_settles_once() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
@@ -1903,6 +1955,7 @@ async fn bundled_model_requires_reservation_and_settles_once() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn managed_context_cap_counts_final_input_and_blocks_long_context() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
@@ -2006,7 +2059,9 @@ async fn managed_context_cap_counts_final_input_and_blocks_long_context() {
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn managed_openrouter_requires_the_bound_payer_and_checks_the_charge() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
+    use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect};
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
     };
@@ -2171,6 +2226,31 @@ async fn managed_openrouter_requires_the_bound_payer_and_checks_the_charge() {
                 account.used,
                 expected.map_or(Amount::default(), |cost| Amount::new(1100, cost))
             );
+            if expected.is_none() {
+                let issue = if (payer == OpenRouterPayer::Credits && is_byok)
+                    || (payer == OpenRouterPayer::Byok && upstream.is_none())
+                {
+                    UsageIssue::ModelBindingMismatch
+                } else {
+                    UsageIssue::PricingUnavailable
+                };
+                expect(
+                    &run,
+                    ExpectedOutcome {
+                        exceptions: vec![OutcomeException {
+                            operator_action: true,
+                            ..OutcomeException::unresolved_usage(
+                                "model:1",
+                                OperationKind::Model,
+                                OperationState::Applied,
+                                issue,
+                            )
+                        }],
+                        operator_wait: true,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
 }
@@ -2178,6 +2258,7 @@ async fn managed_openrouter_requires_the_bound_payer_and_checks_the_charge() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn managed_background_reserves_before_submit_and_settles_only_once() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = Arc::new(runtrell::memory::MemoryStore::default());
     managed_background_contract(store.clone(), std::future::ready(store)).await;
 }
@@ -2185,6 +2266,7 @@ async fn managed_background_reserves_before_submit_and_settles_only_once() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn managed_background_resumes_on_an_independent_postgres_pool() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell_postgres::PgStore;
     use sqlx::postgres::PgPoolOptions;
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated test DB");
@@ -2355,6 +2437,7 @@ async fn managed_background_contract<S: ControlStore>(
 #[cfg(feature = "openai")]
 #[test]
 fn managed_responses_verifies_model_cache_ttl_and_price() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let context = context();
     for (name, cost_30m, cost_12h) in [
         ("gpt-6.2-sol", 667, 692),
@@ -2418,6 +2501,7 @@ fn managed_responses_verifies_model_cache_ttl_and_price() {
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn managed_gemini_wire_binds_the_thinking_budget_and_verifies_the_sku() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
@@ -2513,6 +2597,7 @@ async fn managed_gemini_wire_binds_the_thinking_budget_and_verifies_the_sku() {
 #[cfg(feature = "openai")]
 #[test]
 fn responses_bound_tracks_prepared_history_and_stops_at_the_input_cap() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut request = request();
     request.model = "gpt-6.2-sol".into();
     request.max_output = 64;
@@ -2549,6 +2634,7 @@ fn responses_bound_tracks_prepared_history_and_stops_at_the_input_cap() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn responses_compacts_grown_file_history_then_writes_the_deliverable() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::{
         data::{Access, DataStore, Namespace, StoragePolicy, WorkspaceStore},
         file_tools::{FileAction, FileTool},

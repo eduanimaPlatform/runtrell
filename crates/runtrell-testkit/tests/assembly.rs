@@ -5,6 +5,7 @@ use serde_json::json;
 use std::{collections::BTreeSet, sync::Arc};
 #[test]
 fn heterogeneous_tools_and_all_configuration_failures() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = DataStore::memory(StoragePolicy::default());
     let access = Access::owner(Namespace {
         owner: RunHandle {
@@ -71,6 +72,7 @@ fn heterogeneous_tools_and_all_configuration_failures() {
 }
 #[test]
 fn chain_verifies_each_receipt_before_using_diagnostics() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let store = MemoryStore::default();
         let account = store

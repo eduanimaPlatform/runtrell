@@ -103,6 +103,7 @@ fn declared() -> ModelRequest {
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn document_errors_debug_trace_and_provider_echoes_are_redacted() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use std::{io::Write, sync::Mutex};
     #[derive(Clone)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -261,12 +262,14 @@ async fn image_document_wire<T: ModelPort>(make: fn(Config) -> Result<T>, kind: 
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_sensitive_image_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     image_document_wire(Gemini::new, "gemini").await;
 }
 
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn document_http_error_preserves_usage_without_echoing_locator() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (endpoint, http) = server(429,"",json!({"modelVersion":SECRET_URL,"error":{"message":SECRET_URL},"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"thoughtsTokenCount":0}})).await;
     let mut c = config(endpoint);
     c.capabilities.documents.pdf.url = true;
@@ -291,6 +294,7 @@ async fn document_http_error_preserves_usage_without_echoing_locator() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn openai_sensitive_image_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     image_document_wire(OpenAi::new, "openai").await;
 }
 async fn document_wire<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Result<T>, kind: &str) {
@@ -403,17 +407,20 @@ async fn document_wire<T: ModelPort + std::fmt::Debug>(make: fn(Config) -> Resul
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn gemini_document_wire_redaction_reconstruction_and_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     document_wire(Gemini::new, "gemini").await;
 }
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn openai_document_wire_redaction_reconstruction_and_lookup() {
+    let _outcomes = runtrell::test_outcomes::guard();
     document_wire(OpenAi::new, "openai").await;
 }
 
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn document_mismatch_capabilities_and_bounds_never_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (endpoint, task) = server(200, "", json!({})).await;
     for url in [false, true] {
         let resolver = Arc::new(Resolver {
@@ -503,6 +510,7 @@ async fn document_mismatch_capabilities_and_bounds_never_send() {
 #[cfg(feature = "openrouter")]
 #[tokio::test]
 async fn chat_documents_unsupported_even_with_host_flags() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (endpoint, task) = server(200, "", json!({})).await;
     let resolver = Arc::new(Resolver {
         calls: AtomicUsize::new(0),
@@ -531,7 +539,9 @@ async fn chat_documents_unsupported_even_with_host_flags() {
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use base64::Engine;
+    use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect};
     use runtrell_postgres::PgStore;
     use runtrell_testkit::{
         BusinessTool, DecisionFinalizer, DecisionValidator, FakePolicy, TestClock,
@@ -663,6 +673,18 @@ async fn pg_documents_checkpoint_history_and_response_loss_recovery() {
                 let op = &reopened.list_operations(&handle).await.unwrap()[0];
                 assert_eq!(op.send_count, 1);
                 assert!(!op.settled);
+                expect(
+                    &handle,
+                    ExpectedOutcome {
+                        exceptions: vec![OutcomeException::unresolved(
+                            "model:1",
+                            OperationKind::Model,
+                            AmbiguityReason::TransportAfterPossibleWrite,
+                        )],
+                        terminal_unknown: true,
+                        ..Default::default()
+                    },
+                );
             } else if unsent {
                 assert!(matches!(run.state, RunState::Terminal(Terminal::Failed(_))));
                 assert!(ops[0].settled);
@@ -800,6 +822,7 @@ pub(super) async fn sequence_server(
 #[cfg(feature = "gemini")]
 #[tokio::test]
 async fn pg_document_view_selects_pages_and_attaches_fixed_workspace_and_artifact_versions() {
+    let _outcomes = runtrell::test_outcomes::guard();
     use base64::Engine;
     use runtrell::{data::*, document_view::*, images::*, standard_tools::*};
     use runtrell_postgres::PgStore;

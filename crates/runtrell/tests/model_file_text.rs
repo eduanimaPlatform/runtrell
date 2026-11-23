@@ -77,6 +77,7 @@ fn applied_text(result: ExternalResult) -> Value {
 
 #[tokio::test]
 async fn binary_artifacts_return_typed_failure_without_bytes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for (mime, bytes) in [
         ("application/pdf", b"%PDF-1.7".as_slice()),
         ("image/png", b"\x89PNG\r\n\x1a\n".as_slice()),
@@ -106,6 +107,7 @@ async fn binary_artifacts_return_typed_failure_without_bytes() {
 
 #[tokio::test]
 async fn text_artifacts_return_utf8_string_and_reject_invalid_ranges() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for mime in [
         "text/plain",
         "text/markdown",
@@ -136,6 +138,7 @@ async fn text_artifacts_return_utf8_string_and_reject_invalid_ranges() {
 
 #[tokio::test]
 async fn large_text_and_workspace_read_stay_text_only_and_json_bounded() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let policy = StoragePolicy::default();
     let length = policy.max_read.min(200_000);
     let (artifact_tool, context) = setup(FileAction::ArtifactRead, policy.clone()).await;
@@ -194,6 +197,7 @@ async fn large_text_and_workspace_read_stay_text_only_and_json_bounded() {
 
 #[tokio::test]
 async fn forged_binary_reference_is_rejected_before_media_classification() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (tool, context) = setup(FileAction::ArtifactRead, StoragePolicy::default()).await;
     let artifact = save(&tool, "application/pdf", b"%PDF").await;
     let mut forged = artifact.clone();

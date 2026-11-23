@@ -18,6 +18,7 @@ fn small_stack(run: impl FnOnce() + Send + 'static) {
 #[test]
 fn model_tool_compaction_and_recovery_on_small_stack() {
     small_stack(|| {
+        let _outcomes = runtrell::test_outcomes::guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -33,6 +34,7 @@ fn model_tool_compaction_and_recovery_on_small_stack() {
 #[test]
 fn image_attachments_and_saved_result_recovery_on_small_stack() {
     small_stack(|| {
+        let _outcomes = runtrell::test_outcomes::guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

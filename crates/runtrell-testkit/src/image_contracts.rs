@@ -2,6 +2,7 @@
 //! Shared Memory/Pg contracts for image tools and the ordinary durable driver.
 use crate::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect};
 use runtrell::{data::*, images::*, standard_tools::*};
 
 pub fn png() -> Vec<u8> {
@@ -809,6 +810,22 @@ pub async fn billed_failures<S: ControlStore + 'static>(store: Arc<S>) {
             assert!(matches!(result.state, RunState::Waiting(_)));
             assert!(!op.settled);
             assert_eq!(store.account(&account).await.unwrap().unknown, 1);
+            expect(
+                &handle,
+                ExpectedOutcome {
+                    exceptions: vec![OutcomeException {
+                        operator_action: true,
+                        ..OutcomeException::unresolved_usage(
+                            "tool:1:gen",
+                            OperationKind::Tool,
+                            OperationState::Applied,
+                            UsageIssue::Missing,
+                        )
+                    }],
+                    operator_wait: true,
+                    ..Default::default()
+                },
+            );
         }
     }
 }

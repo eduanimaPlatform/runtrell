@@ -52,6 +52,7 @@ impl ModelPort for RetryModel {
 }
 #[test]
 fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let a = s
@@ -106,6 +107,7 @@ fn charged_retry_is_settled_before_next_attempt_and_uses_shared_budget() {
 }
 #[test]
 fn retry_bound_and_authorization_are_rechecked_after_restart() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for revoke in [false, true] {
             let s = Arc::new(MemoryStore::default());

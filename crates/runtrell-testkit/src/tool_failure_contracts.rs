@@ -130,28 +130,25 @@ pub async fn failure_boundaries<S: ControlStore>(store: Arc<S>) {
             }
         }
         let expected = if mode == "unknown" {
-            let op = store
-                .list_operations(&run)
-                .await
-                .unwrap()
-                .into_iter()
-                .find(|op| op.request.kind == OperationKind::Tool)
-                .unwrap();
-            vec![outcome_contracts::OutcomeException {
-                key: op.request.key,
-                kind: OperationKind::Tool,
-                state: OperationState::Unknown,
-                ambiguity: Some(AmbiguityReason::InvocationInterrupted),
-                usage_issue: Some(UsageIssue::OutcomeUnresolved),
-                unknown_usage: true,
-                unsettled: true,
-                operator_action: false,
-            }]
+            vec![outcome_contracts::OutcomeException::unresolved(
+                "tool:1:failure",
+                OperationKind::Tool,
+                AmbiguityReason::InvocationInterrupted,
+            )]
         } else {
             vec![]
         };
         outcome_contracts::assert_no_unexpected_ambiguity(store.as_ref(), &run, &expected, false)
             .await;
+        if !expected.is_empty() {
+            runtrell::test_outcomes::expect(
+                &run,
+                runtrell::test_outcomes::ExpectedOutcome {
+                    exceptions: expected,
+                    ..Default::default()
+                },
+            );
+        }
     }
 }
 

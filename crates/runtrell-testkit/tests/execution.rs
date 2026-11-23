@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::test_outcomes::{OutcomeException, expect_operations};
 use runtrell::{execution::*, memory::MemoryStore, *};
 use runtrell_testkit::*;
 use serde_json::json;
@@ -21,6 +22,7 @@ fn request() -> ExecutionRequest {
 }
 #[test]
 fn a04_never_weakens_required_isolation_or_hard_memory() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let backend = FakeExecutionBackend::default();
     let mut r = request();
     assert!(backend.supports(&r).is_ok());
@@ -32,6 +34,7 @@ fn a04_never_weakens_required_isolation_or_hard_memory() {
 }
 #[test]
 fn u08_reserve_only_on_code_demand_and_keep_unknown_cost() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -63,6 +66,7 @@ fn u08_reserve_only_on_code_demand_and_keep_unknown_cost() {
 }
 #[test]
 fn a08_cancel_during_acquisition_and_late_environment_is_never_started() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -91,6 +95,7 @@ fn a08_cancel_during_acquisition_and_late_environment_is_never_started() {
 }
 #[test]
 fn a14_cleanup_worker_restart_and_duplicate_reconciliation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -121,6 +126,7 @@ fn a14_cleanup_worker_restart_and_duplicate_reconciliation() {
 }
 #[test]
 fn lost_acquisition_response_is_found_and_cancelled_without_second_execution() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -150,6 +156,7 @@ fn lost_acquisition_response_is_found_and_cancelled_without_second_execution() {
 }
 #[test]
 fn a22_stale_workspace_copy_and_other_run_are_rejected() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         use runtrell::data::*;
         let (s, c, _) = setup().await;
@@ -208,6 +215,7 @@ fn a22_stale_workspace_copy_and_other_run_are_rejected() {
 }
 #[test]
 fn a28_setup_requires_same_limits_and_refuses_tty_and_credentials() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let b = FakeExecutionBackend::default();
     let mut r = request();
     r.setup = true;
@@ -224,6 +232,7 @@ fn a28_setup_requires_same_limits_and_refuses_tty_and_credentials() {
 
 #[test]
 fn lost_acquisition_response_resumes_original_environment() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -247,6 +256,7 @@ fn lost_acquisition_response_resumes_original_environment() {
 }
 #[test]
 fn a18_cancel_is_observed_while_execution_is_running() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (_, c, _) = setup().await;
         let ctx = ToolContext {
@@ -284,6 +294,7 @@ fn a18_cancel_is_observed_while_execution_is_running() {
 
 #[test]
 fn acquisition_timeout_preserves_reservation_and_late_environment() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -321,6 +332,7 @@ fn acquisition_timeout_preserves_reservation_and_late_environment() {
 
 #[test]
 fn a18_reclaimed_resources_and_unknown_cost_have_distinct_run_states() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, a) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -336,10 +348,19 @@ fn a18_reclaimed_resources_and_unknown_cost_have_distinct_run_states() {
         assert_eq!(run.cleanup, Progress::Confirmed);
         assert_ne!(run.settlement, Progress::Confirmed);
         assert_eq!(s.account(&a).await.unwrap().reserved.micro_usd, 100);
+        expect_operations(
+            &c.run,
+            [OutcomeException::unsettled(
+                "code",
+                OperationKind::Sandbox,
+                OperationState::Accepted,
+            )],
+        );
     })
 }
 #[test]
 fn a08_environment_created_after_cancellation_is_discovered_and_destroyed() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (s, c, _) = setup().await;
         let rt = runtime(s.clone(), FakeModel::default(), vec![]);
@@ -375,6 +396,7 @@ fn a08_environment_created_after_cancellation_is_discovered_and_destroyed() {
 
 #[test]
 fn workspace_copy_is_fixed_and_collected_files_merge_with_same_base() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         use runtrell::data::*;
         let (_, c, _) = setup().await;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared contract fixture from runtrell-2a testkit (2d31acf).
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect, expect_operations};
 use super::{MemoryStore, block_on, runtime};
 use runtrell::*;
 use runtrell_testkit::*;
@@ -36,6 +37,7 @@ fn applied(tokens: u64, cost: u64) -> ExternalResult {
 }
 #[test]
 fn u01_structured_judgment_no_workspace_or_runner_and_insufficient_is_non_success() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for decision in ["no_action", "keep_separate", "insufficient"] {
             let s = Arc::new(MemoryStore::default());
@@ -59,6 +61,7 @@ fn u01_structured_judgment_no_workspace_or_runner_and_insufficient_is_non_succes
 }
 #[test]
 fn u02_search_business_query_then_validated_answer() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, c, _) = started(&s, "support", 1000).await;
@@ -89,6 +92,7 @@ fn u02_search_business_query_then_validated_answer() {
 }
 #[test]
 fn u03_lost_tool_reply_recovers_original_operation_without_resend() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c, a) = started(&s, "effect", 1000).await;
@@ -121,6 +125,7 @@ fn u03_lost_tool_reply_recovers_original_operation_without_resend() {
 }
 #[test]
 fn u03_accepted_is_not_applied() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, c, _) = started(&s, "accepted", 1000).await;
@@ -139,10 +144,12 @@ fn u03_accepted_is_not_applied() {
         assert!(matches!(r.state, RunState::Waiting(_)));
         assert!(matches!(r.delivery, Delivery::Accepted(_)));
         assert_eq!(rt.model.requests.lock().unwrap().len(), 1);
+        expect_operations(&c.run, [OutcomeException::unsettled("tool:1:x", OperationKind::Tool, OperationState::Accepted)]);
     });
 }
 #[test]
 fn u04_duplicate_start_and_cross_run_effect_key_converge() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let tool = BusinessTool::new("reply");
@@ -176,6 +183,7 @@ fn u04_duplicate_start_and_cross_run_effect_key_converge() {
 }
 #[test]
 fn u05_context_budget_permission_and_tenant_are_separate() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c, a) = started(&s, "a", 1000).await;
@@ -206,6 +214,7 @@ fn u05_context_budget_permission_and_tenant_are_separate() {
 }
 #[test]
 fn u06_stale_evidence_and_modified_output_refuse_finalize() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = MemoryStore::default();
         let (h, c, _) = started(&s, "stale", 1000).await;
@@ -225,6 +234,7 @@ fn u06_stale_evidence_and_modified_output_refuse_finalize() {
 }
 #[test]
 fn u07_triggers_new_runs_input_order_and_session_cas() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let a = s
@@ -273,6 +283,7 @@ fn u07_triggers_new_runs_input_order_and_session_cas() {
 }
 #[test]
 fn u09_parallel_ancestor_reservations_do_not_double_allocate() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let s = Arc::new(MemoryStore::default());
     let (a, c1, c2) = block_on(async {
         let root = s
@@ -297,6 +308,8 @@ fn u09_parallel_ancestor_reservations_do_not_double_allocate() {
             s.claim(&h2, "b", 0, 100).await.unwrap(),
         )
     });
+    let first = c1.run.clone();
+    let second = c2.run.clone();
     let s1 = s.clone();
     let s2 = s.clone();
     let x = std::thread::spawn(move || block_on(s1.begin(&c1, req("a", 70, 70), 0)));
@@ -307,9 +320,23 @@ fn u09_parallel_ancestor_reservations_do_not_double_allocate() {
         block_on(s.account(&a)).unwrap().reserved,
         Amount::new(70, 70)
     );
+    let (winner, key) = if results[0].is_ok() {
+        (&first, "a")
+    } else {
+        (&second, "b")
+    };
+    expect_operations(
+        winner,
+        [OutcomeException::unsettled(
+            key,
+            OperationKind::Tool,
+            OperationState::Intent,
+        )],
+    );
 }
 #[test]
 fn default_policy_warning_thresholds_and_duplicate_receipts() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = MemoryStore::default();
         let (_, c, a) = started(&s, "budget", 100).await;
@@ -353,6 +380,7 @@ fn default_policy_warning_thresholds_and_duplicate_receipts() {
 }
 #[test]
 fn invalid_partial_usage_and_unknown_hold_reservation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = MemoryStore::default();
         let (_, c, a) = started(&s, "unknown", 100).await;
@@ -395,6 +423,7 @@ fn invalid_partial_usage_and_unknown_hold_reservation() {
 }
 #[test]
 fn price_cap_integer_rounding_subsets_and_no_fixed_output() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let limits = ModelLimits {
         model: "m".into(),
         context: 100,
@@ -439,6 +468,7 @@ fn price_cap_integer_rounding_subsets_and_no_fixed_output() {
 }
 #[test]
 fn cancellation_does_not_start_business_but_reconciliation_settlement_cleanup_continue() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c, a) = started(&s, "cancel", 1000).await;
@@ -469,6 +499,7 @@ fn cancellation_does_not_start_business_but_reconciliation_settlement_cleanup_co
 }
 #[test]
 fn deadline_retry_worker_move_does_not_reset_original_contract() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let a = s
@@ -501,6 +532,7 @@ fn deadline_retry_worker_move_does_not_reset_original_contract() {
 }
 #[test]
 fn storage_barriers_prevent_io_and_preserve_atomic_result_and_checkpoint() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, c, a) = started(&s, "storage", 100).await;
@@ -531,10 +563,12 @@ fn storage_barriers_prevent_io_and_preserve_atomic_result_and_checkpoint() {
             Err(Error::Conflict)
         );
         assert_eq!(s.get(&c.run).await.unwrap().checkpoint, Some(cp));
+        expect_operations(&c.run, [OutcomeException::unsettled("x", OperationKind::Tool, OperationState::Intent)]);
     });
 }
 #[test]
 fn queue_backpressure_timeout_round_robin_and_priority_are_bounded() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let cap = Capacity {
             queue: 5,
@@ -596,6 +630,7 @@ fn queue_backpressure_timeout_round_robin_and_priority_are_bounded() {
 }
 #[test]
 fn shared_slots_enforce_kind_tenant_and_run_independently() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let mut cap = Capacity::default();
         cap.global.insert(OperationKind::Tool, 2);
@@ -632,6 +667,7 @@ fn shared_slots_enforce_kind_tenant_and_run_independently() {
 }
 #[test]
 fn all_paid_paths_use_dispatch_and_cannot_reset_parent_budget_or_deadline() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (h, c, a) = started(&s, "paths", 100).await;
@@ -680,10 +716,12 @@ fn all_paid_paths_use_dispatch_and_cannot_reset_parent_budget_or_deadline() {
             s.get(&ch).await.unwrap().state,
             RunState::Terminal(Terminal::Cancelled(_))
         ));
+        expect_operations(&h, [OutcomeException::unsettled("child", OperationKind::ChildRun, OperationState::Accepted)]);
     });
 }
 #[test]
 fn duplicate_conflicting_request_and_operation_payload_are_rejected() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = MemoryStore::default();
         let (h, c, _) = started(&s, "conflict", 100).await;
@@ -694,10 +732,12 @@ fn duplicate_conflicting_request_and_operation_payload_are_rejected() {
         let mut altered = op.request;
         altered.input = json!({"different":1});
         assert_eq!(s.begin(&c, altered, 0).await, Err(Error::Conflict));
+        expect_operations(&h, [OutcomeException::unsettled("a", OperationKind::Tool, OperationState::Intent)]);
     });
 }
 #[test]
 fn default_policy_either_axis_exact_limit_refuses_finalization() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for amount in [
             Amount::new(100, 25),
@@ -726,6 +766,7 @@ fn default_policy_either_axis_exact_limit_refuses_finalization() {
 }
 #[test]
 fn warning_survives_run_switch_and_is_in_next_model_request() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, c, a) = started(&s, "first", 100).await;
@@ -756,6 +797,7 @@ fn warning_survives_run_switch_and_is_in_next_model_request() {
 }
 #[test]
 fn stream_partial_never_executes_tools_or_finalizes() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, c, _) = started(&s, "partial", 1000).await;
@@ -779,6 +821,7 @@ fn stream_partial_never_executes_tools_or_finalizes() {
 }
 #[test]
 fn durable_result_before_failed_checkpoint_recovers_without_resampling() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         struct FailValidator(Arc<MemoryStore>);
         impl Validator for FailValidator {
@@ -813,6 +856,7 @@ fn durable_result_before_failed_checkpoint_recovers_without_resampling() {
 }
 #[test]
 fn no_removed_turn_or_tool_count_limits_are_reintroduced() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, c, _) = started(&s, "long", 1_000_000).await;
@@ -852,6 +896,7 @@ fn no_removed_turn_or_tool_count_limits_are_reintroduced() {
 }
 #[test]
 fn child_runs_keep_capacity_and_inherit_budget_deadline_cancel() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let mut capacity = Capacity::default();
         capacity.global.insert(OperationKind::ChildRun, 1);
@@ -908,6 +953,7 @@ fn child_runs_keep_capacity_and_inherit_budget_deadline_cancel() {
 }
 #[test]
 fn bounded_tool_timeout_keeps_unknown_cost_and_records_separate_stop() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         struct Hang(TestClock);
         impl Tool for Hang {
@@ -951,11 +997,17 @@ fn bounded_tool_timeout_keeps_unknown_cost_and_records_separate_stop() {
             rt.drive(&c).await.unwrap().state,
             RunState::Terminal(Terminal::OutcomeUnknown(_))
         ));
+        expect(&c.run, ExpectedOutcome {
+            exceptions: vec![OutcomeException::unresolved("tool:1:x", OperationKind::Tool, AmbiguityReason::InvocationInterrupted)],
+            terminal_unknown: true,
+            ..Default::default()
+        });
     });
 }
 
 #[test]
 fn child_admission_is_atomic_and_fenced() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (parent, claim, account) = started(&s, "atomic-child", 1000).await;
@@ -1048,6 +1100,7 @@ fn child_admission_is_atomic_and_fenced() {
 
 #[test]
 fn child_admission_rejects_closed_expired_and_unauthorized_parents() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for reason in ["cancel", "terminal", "deadline", "lease", "tenant"] {
             let s = Arc::new(MemoryStore::default());
@@ -1091,6 +1144,7 @@ fn child_admission_rejects_closed_expired_and_unauthorized_parents() {
 
 #[test]
 fn child_admission_rolls_back_and_scopes_identity_to_parent_and_operation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (parent, claim, account) = started(&s, "parent-a", 1000).await;
@@ -1124,11 +1178,14 @@ fn child_admission_rolls_back_and_scopes_identity_to_parent_and_operation() {
         assert_ne!(first, other_child);
         assert_eq!(s.queue_len().await, 3);
         assert_eq!(s.slot_count(OperationKind::ChildRun).await, 3);
+        expect_operations(&parent, ["child-op", "other-op"].map(|key| OutcomeException::unsettled(key, OperationKind::ChildRun, OperationState::Accepted)));
+        expect_operations(&other_parent, [OutcomeException::unsettled("child-op", OperationKind::ChildRun, OperationState::Accepted)]);
     });
 }
 
 #[test]
 fn spawn_child_refences_after_policy_and_requires_current_authorization() {
+    let _outcomes = runtrell::test_outcomes::guard();
     struct Handoff {
         store: Arc<MemoryStore>,
         clock: TestClock,
@@ -1175,6 +1232,7 @@ fn spawn_child_refences_after_policy_and_requires_current_authorization() {
 
 #[test]
 fn child_join_yields_single_run_permit_and_resumes_parent_with_shared_paid_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     struct PaidChildTool(Arc<std::sync::atomic::AtomicU64>);
     impl Tool for PaidChildTool {
         fn descriptor(&self) -> ToolDescriptor {
@@ -1278,6 +1336,7 @@ fn child_join_yields_single_run_permit_and_resumes_parent_with_shared_paid_budge
 
 #[test]
 fn child_sessions_are_independent_and_ancestor_session_cycles_are_rejected() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let account = s
@@ -1341,6 +1400,7 @@ fn child_sessions_are_independent_and_ancestor_session_cycles_are_rejected() {
 
 #[test]
 fn child_existing_results_remain_accessible_after_cancel_or_deadline() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for cancelled in [false, true] {
             let s = Arc::new(MemoryStore::default());
@@ -1395,6 +1455,7 @@ fn child_existing_results_remain_accessible_after_cancel_or_deadline() {
 
 #[test]
 fn child_cancel_keeps_unknown_paid_work_and_lifetime_slot_until_recovered() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, claim, account) = started(&s, "cancel-paid-child", 1000).await;
@@ -1454,6 +1515,7 @@ fn child_cancel_keeps_unknown_paid_work_and_lifetime_slot_until_recovered() {
 
 #[test]
 fn child_join_preserves_failed_outcome_instead_of_promoting_admission_to_success() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (_, claim, account) = started(&s, "failed-child", 1000).await;
@@ -1488,6 +1550,7 @@ fn child_join_preserves_failed_outcome_instead_of_promoting_admission_to_success
 
 #[test]
 fn child_admission_cannot_use_external_intent_dispatch_or_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let s = Arc::new(MemoryStore::default());
         let (parent, claim, account) = started(&s, "child-no-external-path", 1000).await;
@@ -1529,5 +1592,6 @@ fn child_admission_cannot_use_external_intent_dispatch_or_send() {
                 .send_count,
             0
         );
+        expect_operations(&parent, [OutcomeException::unsettled("child-op", OperationKind::ChildRun, OperationState::Accepted)]);
     });
 }

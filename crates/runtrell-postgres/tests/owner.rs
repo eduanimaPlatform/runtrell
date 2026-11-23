@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use runtrell::test_outcomes::expect_operator_wait;
 use runtrell::*;
 use runtrell_postgres::PgStore;
 use runtrell_testkit::{owner_contracts as contracts, settlement_contracts};
@@ -46,29 +47,35 @@ async fn env() -> Env {
 }
 #[tokio::test]
 async fn cancelled_resume_is_refused() {
+    let _outcomes = runtrell::test_outcomes::guard();
     contracts::cancelled_resume_is_refused(env().await.store).await;
 }
 #[tokio::test]
 async fn resume_preconditions() {
+    let _outcomes = runtrell::test_outcomes::guard();
     contracts::resume_preconditions(env().await.store).await;
 }
 #[tokio::test]
 async fn resume_budget() {
+    let _outcomes = runtrell::test_outcomes::guard();
     contracts::resume_budget(env().await.store).await;
 }
 #[tokio::test]
 async fn resume_receipts() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     contracts::resume_receipts(e.store, e.reopened).await;
 }
 #[tokio::test]
 async fn settlement_receipts() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     contracts::settlement_receipts(e.store, e.reopened).await;
 }
 
 #[tokio::test]
 async fn cancel_committed_during_run_lock_wait_refuses_resume() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for terminal in [false, true] {
         let e = env().await;
         let run = contracts::held(&*e.store, "lock-race", None).await;
@@ -132,6 +139,7 @@ async fn cancel_committed_during_run_lock_wait_refuses_resume() {
         assert_eq!(after.revision, before.revision + 1);
         if !terminal {
             assert_eq!(after.state, RunState::Waiting(OPERATOR_ACTION_WAIT.into()));
+            expect_operator_wait(&run);
         }
         assert_eq!(e.store.owner_receipt("race").await.unwrap(), None);
     }
@@ -139,6 +147,7 @@ async fn cancel_committed_during_run_lock_wait_refuses_resume() {
 
 #[tokio::test]
 async fn host_transaction_and_faults_keep_receipt_and_effect_atomic() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     sqlx::query(&format!(
         "CREATE TABLE {}.host_audit (key text PRIMARY KEY)",
@@ -339,10 +348,13 @@ async fn host_transaction_and_faults_keep_receipt_and_effect_atomic() {
         e.reopened.owner_receipt("atomic-settle").await.unwrap(),
         Some(receipt)
     );
+    expect_operator_wait(&failed_run);
+    expect_operator_wait(&run);
 }
 
 #[tokio::test]
 async fn additive_migration_and_sql_immutability() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let e = env().await;
     sqlx::query(&format!("DROP TABLE {}.owner_receipts", e.schema))
         .execute(&e.pool)

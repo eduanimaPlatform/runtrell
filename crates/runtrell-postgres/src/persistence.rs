@@ -1020,6 +1020,50 @@ impl PgStore {
         .map_err(|e| storage("PgStore::queue_len", e))?;
         usize::try_from(n).map_err(|e| storage("PgStore::queue_len", e))
     }
+    #[cfg(feature = "test-support")]
+    pub(crate) fn track_test_outcomes(&self) {
+        let options = self.pool.connect_options();
+        let schema = self.schema.clone();
+        let identity = format!(
+            "{:?}",
+            (
+                options.get_host(),
+                options.get_port(),
+                options.get_database(),
+                &schema
+            )
+        );
+        runtrell::test_outcomes::track_store(Some(identity), move || async move {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.as_ref().clone())
+                .await
+                .expect("open test outcome reader");
+            // Read the retained ledger in one snapshot. The regular RunStore
+            // API rejects reads after an erasure fence, including settled rows.
+            let sql = format!(
+                "SELECT r.handle, r.request_key, r.state,
+                    ARRAY(SELECT to_jsonb(a) FROM {schema}.attempts a
+                          WHERE a.tenant=r.tenant AND a.run_id=r.id ORDER BY a.id)
+                 FROM {schema}.runs r ORDER BY r.tenant, r.id"
+            );
+            use sqlx::types::Json;
+            type OutcomeRow = (Json<RunHandle>, String, Json<RunState>, Vec<Value>);
+            let rows = sqlx::query_as::<_, OutcomeRow>(&sql)
+                .fetch_all(&pool)
+                .await
+                .expect("read test outcome ledger");
+            rows.into_iter()
+                .map(|(Json(handle), request, Json(state), attempts)| {
+                    let operations = attempts
+                        .into_iter()
+                        .map(|row| decode::<Operation>(row).expect("decode test operation"));
+                    runtrell::test_outcomes::observe(handle, request, &state, operations)
+                })
+                .collect()
+        });
+    }
+
     pub async fn recovery_candidates(&self) -> Result<Vec<RunHandle>> {
         let values:Vec<Value>=sqlx::query_scalar(&format!("SELECT handle FROM {}.runs r WHERE NOT (state ? 'Terminal') OR stop IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR cleanup IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR settlement IN ('\"Pending\"'::jsonb,'\"Unknown\"'::jsonb) OR EXISTS(SELECT 1 FROM {}.slots s WHERE s.tenant=r.tenant AND s.run=r.id) ORDER BY tenant,id",self.schema,self.schema)).fetch_all(&self.pool).await.map_err(|e| storage("PgStore::recovery_candidates", e))?;
         values.into_iter().map(decode).collect()

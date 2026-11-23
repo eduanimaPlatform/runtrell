@@ -29,6 +29,7 @@ async fn drive(store: Arc<PgStore>, claim: &Claim, answer: i32, now: u64) -> Run
 
 #[tokio::test]
 async fn context_prefix_survives_process_restart() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated database required");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let schema = format!("context_{}", uuid::Uuid::new_v4().simple());
@@ -99,6 +100,7 @@ async fn context_prefix_survives_process_restart() {
 
 #[tokio::test]
 async fn no_progress_survives_process_restart_and_compaction() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("dedicated database required");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     let schema = format!("repair_{}", uuid::Uuid::new_v4().simple());
@@ -154,6 +156,7 @@ async fn no_progress_survives_process_restart_and_compaction() {
 
 #[tokio::test]
 async fn resume_context_in_child_process() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let Ok(schema) = std::env::var("RUNTRELL_CONTEXT_SCHEMA") else {
         return;
     };

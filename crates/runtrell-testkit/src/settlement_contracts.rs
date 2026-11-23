@@ -4,6 +4,7 @@
 //! the original operation once, idempotently and without a provider send.
 use crate::image_contracts::{FakeImages, resolver};
 use crate::*;
+use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect, expect_operations};
 use runtrell::{data::*, images::*};
 
 // Construct store futures in a separate frame, as the driver's bx helper does.
@@ -202,6 +203,14 @@ pub async fn partial_price_evidence_recovery<S: ControlStore + 'static>(
     assert_eq!(account.unknown, 0);
     assert_eq!(account.reserved, Amount::default());
     assert_eq!(f.provider.sends.load(Ordering::SeqCst), 1);
+    // Accounting has finished; owner resume is a separate command.
+    expect(
+        &f.handle,
+        ExpectedOutcome {
+            operator_wait: true,
+            ..Default::default()
+        },
+    );
 }
 
 type Rt<S> = Runtime<
@@ -636,6 +645,14 @@ pub async fn wait_follows_the_lookup_window<S: ControlStore + 'static>(store: Ar
     assert_eq!(record.amount, Amount::new(4, 4));
     let account = store.account(&account).await.unwrap();
     assert_eq!((account.unknown, account.used), (0, Amount::new(4, 4)));
+    // Accounting has finished; owner resume is a separate command.
+    expect(
+        &run,
+        ExpectedOutcome {
+            operator_wait: true,
+            ..Default::default()
+        },
+    );
 }
 
 /// A reply lost in transit: saved as an incomplete Applied reply with no usage at all.
@@ -779,6 +796,15 @@ pub async fn lost_reply_keeps_lookup_recovery<S: ControlStore + 'static>(
             assert_eq!(held.used, Amount::default());
             let op = restarted.list_operations(&run).await.unwrap().remove(0);
             assert!(!op.settled && op.unknown_usage && !op.awaits_operator());
+            expect_operations(
+                &run,
+                [OutcomeException::unresolved_usage(
+                    "model:1",
+                    OperationKind::Model,
+                    OperationState::Applied,
+                    UsageIssue::Missing,
+                )],
+            );
         }
     }
 }

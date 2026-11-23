@@ -24,6 +24,7 @@ fn accepts(tool: &FileTool, value: &Value) -> bool {
 
 #[tokio::test]
 async fn policy_boundaries_match_schema_and_store() {
+    let _outcomes = runtrell::test_outcomes::guard();
     // Deliberately nondefault: hard-coded schema limits must fail this test.
     for (max_entries, max_read, max_edits) in [(2, 256, 2), (3, 512, 3)] {
         let policy = StoragePolicy {
@@ -111,6 +112,7 @@ async fn policy_boundaries_match_schema_and_store() {
 
 #[test]
 fn all_path_schemas_match_canonical_path_checks() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let store = DataStore::memory(StoragePolicy::default());
     let full = format!("{}/a", vec!["a".repeat(127); 8].join("/"));
     let paths = [
@@ -155,6 +157,7 @@ fn all_path_schemas_match_canonical_path_checks() {
 
 #[test]
 fn text_bounds_come_from_policy_without_changing_byte_semantics() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut policy = StoragePolicy {
         max_edit_bytes: 200,
         ..Default::default()
@@ -179,6 +182,7 @@ fn text_bounds_come_from_policy_without_changing_byte_semantics() {
 
 #[tokio::test]
 async fn text_capacity_and_aggregate_edit_bytes_are_not_character_counts() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut policy = StoragePolicy {
         max_edit_bytes: 5,
         ..Default::default()
@@ -274,6 +278,7 @@ async fn invoke(tool: &FileTool, mut input: Value) -> ExternalResult {
 
 #[tokio::test]
 async fn runtime_argument_bounds_have_safe_policy_hints() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let policy = StoragePolicy {
         max_entries: 7,
         max_read: 512,
@@ -337,6 +342,7 @@ async fn runtime_argument_bounds_have_safe_policy_hints() {
 
 #[tokio::test]
 async fn storage_capacity_and_output_limits_remain_fatal() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let mut policy = StoragePolicy::default();
     policy
         .classes

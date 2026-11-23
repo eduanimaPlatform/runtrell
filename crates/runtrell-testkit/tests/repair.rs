@@ -12,6 +12,7 @@ fn chain() -> ValidationChain {
 }
 #[test]
 fn no_progress_policy_requires_an_explicit_choice() {
+    let _outcomes = runtrell::test_outcomes::guard();
     assert_eq!(
         serde_json::to_value(RepairPolicy::default()).unwrap()["max_no_progress"],
         3
@@ -79,6 +80,7 @@ fn runtime_with(
 }
 #[test]
 fn changed_repair_policy_is_rejected_before_resume_dispatch() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, _) = setup(1000, None).await;
         let model = FakeModel::scripted(vec![
@@ -106,6 +108,7 @@ fn changed_repair_policy_is_rejected_before_resume_dispatch() {
 }
 #[test]
 fn tool_failure_cannot_replace_policy_pin_mid_drive() {
+    let _outcomes = runtrell::test_outcomes::guard();
     struct MutableValidator {
         chain: ValidationChain,
         policy: Arc<Mutex<RepairPolicy>>,
@@ -174,6 +177,7 @@ fn tool_failure_cannot_replace_policy_pin_mid_drive() {
 }
 #[test]
 fn candidate_and_diagnostics_survive_worker_loss_and_revalidation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, account) = setup(1000, None).await;
         let model = FakeModel::scripted(vec![
@@ -221,6 +225,7 @@ fn candidate_and_diagnostics_survive_worker_loss_and_revalidation() {
 }
 #[test]
 fn json_syntax_candidate_survives_worker_loss_and_revalidation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, account) = setup(1000, None).await;
         let model = FakeModel::scripted(vec![
@@ -287,6 +292,7 @@ fn json_syntax_candidate_survives_worker_loss_and_revalidation() {
 }
 #[test]
 fn host_limits_budget_and_deadline_stop_without_extra_calls() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for mode in ["count", "time", "budget", "deadline", "elapsed-after-wait"] {
             let (store, claim, _) = setup(
@@ -356,6 +362,7 @@ fn host_limits_budget_and_deadline_stop_without_extra_calls() {
 }
 #[test]
 fn json_syntax_host_limits_stop_without_extra_calls() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for mode in ["count", "time", "budget", "deadline", "elapsed-after-wait"] {
             let (store, claim, _) = setup(
@@ -430,6 +437,7 @@ impl Validator for BrokenValidator {
 }
 #[test]
 fn infrastructure_and_authority_errors_never_become_repair_feedback() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for error in [Error::Storage, Error::PermissionDenied, Error::Conflict] {
             let (store, claim, _) = setup(1000, None).await;
@@ -468,6 +476,7 @@ fn infrastructure_and_authority_errors_never_become_repair_feedback() {
 }
 #[test]
 fn repair_can_use_tools_without_reusing_previous_operation_keys() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, _) = setup(1000, None).await;
         let calls = |effect: &str| {
@@ -508,6 +517,7 @@ fn repair_can_use_tools_without_reusing_previous_operation_keys() {
 }
 #[test]
 fn invalid_tool_input_returns_schema_pointers_without_invocation() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, _) = setup(1000, None).await;
         let model = FakeModel::scripted(vec![
@@ -565,6 +575,7 @@ impl Tool for StrictTool {
 
 #[test]
 fn json_artifact_syntax_repairs_with_new_runtime() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(repair_contracts::json_artifact_repair_contract(Arc::new(
         MemoryStore::default(),
     )));
@@ -572,6 +583,7 @@ fn json_artifact_syntax_repairs_with_new_runtime() {
 
 #[test]
 fn repeated_json_syntax_failure_stops_at_host_repair_count() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         let (store, claim, account) = setup(1000, None).await;
         let bad = ModelReply {
@@ -607,18 +619,21 @@ fn repeated_json_syntax_failure_stops_at_host_repair_count() {
 
 #[test]
 fn validation_no_progress_survives_resume() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(repair_contracts::no_progress_contract(Arc::new(
         MemoryStore::default(),
     )));
 }
 #[test]
 fn disabled_no_progress_survives_resume() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(repair_contracts::no_progress_disabled_contract(Arc::new(
         MemoryStore::default(),
     )));
 }
 #[test]
 fn disabled_no_progress_keeps_budget_deadline_and_cancel_gates() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(async {
         for mode in ["budget", "deadline", "cancel"] {
             let (store, claim, account) = setup(1000, (mode == "deadline").then_some(10)).await;
@@ -667,6 +682,7 @@ fn disabled_no_progress_keeps_budget_deadline_and_cancel_gates() {
 }
 #[test]
 fn artifact_content_defines_progress() {
+    let _outcomes = runtrell::test_outcomes::guard();
     block_on(repair_contracts::artifact_progress_contract(Arc::new(
         MemoryStore::default(),
     )));
@@ -674,6 +690,7 @@ fn artifact_content_defines_progress() {
 
 #[test]
 fn receipt_flag_cannot_promote_host_or_unknown_diagnostics() {
+    let _outcomes = runtrell::test_outcomes::guard();
     struct Classified(DiagnosticRepair);
     impl Validator for Classified {
         fn validate(&self, run: &RunRecord, candidate: &Value) -> Result<ValidationReceipt> {

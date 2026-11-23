@@ -4,6 +4,7 @@ use super::still_images::encoded_output;
 
 #[tokio::test]
 async fn img26_optional_raster_fields_reach_the_wire() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, http) = server(200, "", image_response()).await;
     let mut cfg = image_config(url);
     cfg.capabilities.limits.model = "gpt-image-2.6-sunburst".into();
@@ -19,6 +20,7 @@ async fn img26_optional_raster_fields_reach_the_wire() {
 
 #[tokio::test]
 async fn openai_generated_artifact_is_reinput_to_the_model_http_adapter() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (endpoint, generation) = server(200, "", image_response()).await;
     let (tool, ctx) = fixture(image_config(endpoint), ImageAction::Generate).await;
     let ExternalResult::Applied { output, .. } =
@@ -63,6 +65,7 @@ async fn openai_generated_artifact_is_reinput_to_the_model_http_adapter() {
 
 #[tokio::test]
 async fn openai_size_output_formats_are_saved_and_the_wire_has_only_inherited_fields() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for format in ["png", "jpeg", "webp"] {
         let mut body = image_response();
         let encoded = encoded_output(format);
@@ -105,6 +108,7 @@ async fn openai_size_output_formats_are_saved_and_the_wire_has_only_inherited_fi
 
 #[tokio::test]
 async fn openai_absent_partial_and_text_usage_stay_reported_or_unreported() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for reported in [
         Value::Null,
         json!({"input_tokens":3}),
@@ -144,6 +148,7 @@ async fn openai_absent_partial_and_text_usage_stay_reported_or_unreported() {
 
 #[tokio::test]
 async fn openai_malformed_single_result_and_http_spending_errors_keep_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for data in [
         Value::Null,
         json!([]),
@@ -196,11 +201,13 @@ async fn openai_malformed_single_result_and_http_spending_errors_keep_usage() {
 
 #[tokio::test]
 async fn managed_openai_image_rejection_releases_reservation_and_returns_feedback() {
+    let _outcomes = runtrell::test_outcomes::guard();
     managed_image_feedback(false).await;
 }
 
 #[tokio::test]
 async fn managed_image_pre_send_failure_returns_retryable_feedback() {
+    let _outcomes = runtrell::test_outcomes::guard();
     managed_image_feedback(true).await;
 }
 
@@ -334,6 +341,7 @@ async fn managed_image_feedback(pre_send: bool) {
 
 #[tokio::test]
 async fn openai_failed_image_responses_preserve_transport_evidence() {
+    let _outcomes = runtrell::test_outcomes::guard();
     for (raw, phase, status, request_id) in [
         ("", ProviderFailurePhase::Send, None, Value::Null),
         (
@@ -368,6 +376,7 @@ async fn openai_failed_image_responses_preserve_transport_evidence() {
 
 #[tokio::test]
 async fn openai_image_size_error_code_can_guide_repair_without_param() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, http) = server(
         400,
         "",
@@ -386,6 +395,7 @@ async fn openai_image_size_error_code_can_guide_repair_without_param() {
 
 #[tokio::test]
 async fn openai_image_timeout_after_request_body_remains_unknown() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/test", listener.local_addr().unwrap());
     let http = tokio::spawn(async move {
@@ -415,6 +425,7 @@ async fn openai_image_timeout_after_request_body_remains_unknown() {
 
 #[tokio::test]
 async fn openai_image_diagnostics_omit_echoed_credentials_and_unsafe_ids() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, http) = server(
         422,
         "x-request-id: TEST-KEY-DO-NOT-PRINT\r\n",
@@ -448,6 +459,7 @@ async fn openai_image_diagnostics_omit_echoed_credentials_and_unsafe_ids() {
 
 #[tokio::test]
 async fn openai_unreachable_image_endpoint_is_a_known_no_send_failure() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/test", listener.local_addr().unwrap());
     drop(listener);
@@ -472,6 +484,7 @@ async fn openai_unreachable_image_endpoint_is_a_known_no_send_failure() {
 
 #[tokio::test]
 async fn openai_mask_foreign_hash_and_output_options_are_rejected_before_send() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let (url, task) = server(200, "", image_response()).await;
     let (mut tool, mut ctx) = fixture(image_config(url), ImageAction::Edit).await;
     let staged = ArtifactStore::stage_named(
@@ -536,6 +549,8 @@ async fn openai_mask_foreign_hash_and_output_options_are_rejected_before_send() 
 
 #[tokio::test]
 async fn pg_openai_image_failures_settle_or_hold_with_provider_evidence() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    use runtrell::test_outcomes::{ExpectedOutcome, OutcomeException, expect};
     use runtrell_postgres::PgStore;
     use runtrell_testkit::FakeModel;
     let database =
@@ -710,6 +725,31 @@ async fn pg_openai_image_failures_settle_or_hold_with_provider_evidence() {
                 persisted.provider_diagnostic(),
                 tool_op.provider_diagnostic()
             );
+            let expected = if case == "disconnect" {
+                ExpectedOutcome {
+                    exceptions: vec![OutcomeException::unresolved(
+                        "tool:1:gen", OperationKind::Tool, AmbiguityReason::ResponseLost,
+                    )],
+                    terminal_unknown: true,
+                    ..Default::default()
+                }
+            } else {
+                let (state, issue) = match case {
+                    "absent" => (OperationState::Applied, UsageIssue::Missing),
+                    "partial" => (OperationState::Applied, UsageIssue::Incomplete),
+                    "server_error" => (OperationState::Failed, UsageIssue::Missing),
+                    _ => unreachable!("unexpected unresolved fixture"),
+                };
+                ExpectedOutcome {
+                    exceptions: vec![OutcomeException {
+                        operator_action: true,
+                        ..OutcomeException::unresolved_usage("tool:1:gen", OperationKind::Tool, state, issue)
+                    }],
+                    operator_wait: true,
+                    ..Default::default()
+                }
+            };
+            expect(&handle, expected);
         } else {
             assert!(matches!(run.state, RunState::Terminal(Terminal::Failed(_))));
             assert!(tool_op.settled);

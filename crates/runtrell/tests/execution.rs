@@ -396,6 +396,7 @@ mod execution_tool;
 #[ignore = "requires macOS Seatbelt outside a nested sandbox"]
 #[cfg(target_os = "macos")]
 async fn macos_execution_tool_saves_and_reclaims() {
+    let _outcomes = runtrell::test_outcomes::guard();
     let root = private_root();
     let backend = ProcessBackend::new(
         root.path().canonicalize().unwrap(),

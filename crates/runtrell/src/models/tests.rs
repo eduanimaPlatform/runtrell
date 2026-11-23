@@ -208,6 +208,7 @@ fn verified_token_snapshot_keeps_exact_ttl_and_price_revision() {
 
 #[tokio::test]
 async fn missing_usage_holds_reservation_and_owner_reuses_the_pinned_snapshot() {
+    let _outcomes = crate::test_outcomes::guard();
     use crate::{
         BudgetAuthority, DispatchRequest, ExternalResult, OperationStore, OwnerCommand, RunSpec,
         RunStore, SettlementRecovery, memory::MemoryStore,
@@ -289,6 +290,13 @@ async fn missing_usage_holds_reservation_and_owner_reuses_the_pinned_snapshot() 
     assert_eq!(settled.reserved, Amount::default());
     assert_eq!(settled.used, Amount::new(150, 742));
     assert_eq!(settled.unknown, 0);
+    crate::test_outcomes::expect(
+        &run,
+        crate::test_outcomes::ExpectedOutcome {
+            operator_wait: true,
+            ..Default::default()
+        },
+    );
 }
 
 #[test]

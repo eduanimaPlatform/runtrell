@@ -241,6 +241,7 @@ macro_rules! execution_ledger_contract_tests {
         }
         #[test]
         fn execution_dispatch_restart() {
+            let _outcomes = $crate::outcome_contracts::guard();
             block_on($crate::execution_contracts::dispatch_restart::<$h>());
         }
     };
