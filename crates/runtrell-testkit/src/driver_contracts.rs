@@ -384,7 +384,7 @@ impl Tool for TypedTool {
     }
 }
 pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
-    for limited in [false, true] {
+    for capped in [false, true] {
         let account = store
             .create_account("t", Amount::new(1000, 1000), None)
             .await
@@ -392,14 +392,14 @@ pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
         let run = store
             .start(RunSpec::new(
                 "t",
-                &format!("tool-repair-{limited}"),
+                &format!("tool-repair-{capped}"),
                 account,
                 "use typed tool",
             ))
             .await
             .unwrap();
         let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
-        let mut replies: Vec<_> = (0..5)
+        let mut replies: Vec<_> = (0..if capped { 9 } else { 5 })
             .map(|attempt| {
                 FakeModel::calls(vec![ToolCall {
                     id: format!("bad-{attempt}"),
@@ -425,7 +425,7 @@ pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
             validators: vec![],
             schema: json!({}),
             repair: RepairPolicy {
-                max_repairs: limited.then_some(0),
+                max_repairs: Some(0),
                 max_elapsed: None,
                 ..RepairPolicy::default()
             },
@@ -440,12 +440,12 @@ pub async fn tool_repairs<S: ControlStore>(store: Arc<S>) {
             finalizer: Arc::new(DecisionFinalizer),
         };
         let result = rt.drive(&claim).await.unwrap();
-        if limited {
+        if capped {
             assert!(
-                matches!(result.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_REPAIR_LIMIT"))
+                matches!(result.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("TOOL_INPUT_CORRECTION_LIMIT"))
             );
             assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
-            assert_eq!(model.requests.lock().unwrap().len(), 1);
+            assert_eq!(model.requests.lock().unwrap().len(), 9);
         } else {
             assert_eq!(result.state, RunState::Terminal(Terminal::Succeeded));
             assert_eq!(tool.calls.load(Ordering::SeqCst), 1);

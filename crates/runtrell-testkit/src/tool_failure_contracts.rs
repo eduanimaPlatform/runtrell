@@ -414,11 +414,148 @@ pub async fn file_repairs<S: ControlStore>(store: Arc<S>) {
     }
 }
 
+/// Four distinct rejected edits, interleaved with reads, can recover under a
+/// validation policy that permits only three repairs.
+pub async fn exact_replace_recovery_trace<S: ControlStore>(store: Arc<S>) {
+    let account = store
+        .create_account("t", Amount::new(1000, 1000), None)
+        .await
+        .unwrap();
+    let run = store
+        .start(RunSpec::new("t", "edit-trace", account, "revise a section"))
+        .await
+        .unwrap();
+    let claim = store.claim(&run, "worker", 0, 100).await.unwrap();
+    let data = DataStore::memory(StoragePolicy::default());
+    let access = Access::owner(Namespace {
+        owner: run.clone(),
+        agent: "main".into(),
+    });
+    let file = data
+        .write(&access, "a.md", None, b"one two one")
+        .await
+        .unwrap();
+    data.write(&access, "b.md", None, b"unrelated")
+        .await
+        .unwrap();
+    let call = |id: &str, name: &str, arguments| {
+        FakeModel::calls(vec![ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }])
+    };
+    let edit = |id, revision, digest: &str, old: &str| {
+        call(
+            id,
+            "files.exact_replace",
+            json!({
+                "expected_revision": revision,
+                "edits":[{"path":"a.md","expected_digest":digest,"old_text":old,"new_text":"three"}]
+            }),
+        )
+    };
+    let model = FakeModel::scripted(vec![
+        edit("ambiguous", 2, &file.hash, "one"),
+        edit("absent", 2, &file.hash, "missing"),
+        call(
+            "read",
+            "files.read",
+            json!({"path":"a.md","revision":1,"offset":0,"length":32}),
+        ),
+        edit("stale-digest", 2, "stale", "one two"),
+        call("list", "files.list", json!({"limit":10})),
+        // A listed file revision is not the current workspace revision.
+        edit("stale-revision", 1, &file.hash, "one two"),
+        edit("fixed", 2, &file.hash, "one two"),
+        FakeModel::decision(json!({"decision":"keep"})),
+    ]);
+    let rt = Runtime {
+        store: store.clone(),
+        model: model.clone(),
+        tools: [FileAction::ExactReplace, FileAction::Read, FileAction::List]
+            .into_iter()
+            .map(|action| FileTool {
+                store: data.clone(),
+                access: access.clone(),
+                action,
+            })
+            .collect(),
+        policy: FakePolicy::default(),
+        clock: TestClock::default(),
+        validator: Arc::new(runtrell::assembly::ValidationChain {
+            validators: vec![],
+            schema: json!({}),
+            repair: RepairPolicy {
+                max_repairs: Some(3),
+                ..RepairPolicy::default()
+            },
+        }),
+        finalizer: Arc::new(DecisionFinalizer),
+    };
+    let done = rt.drive(&claim).await.unwrap();
+    assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded));
+    let cp = done.checkpoint.as_ref().unwrap();
+    assert_eq!(cp.payload["tool_repair"]["count"], 4);
+    assert!(cp.payload["repair"].is_null());
+    assert_eq!(
+        data.read(&access, "a.md", 3, 0, 32).await.unwrap().bytes,
+        b"three one"
+    );
+    {
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 8);
+        for (turn, id, code) in [
+            (1, "ambiguous", "MULTIPLE_MATCHES"),
+            (2, "absent", "NO_MATCH"),
+            (4, "stale-digest", "CONFLICT"),
+            (6, "stale-revision", "CONFLICT"),
+        ] {
+            let feedback = &requests[turn]
+                .messages
+                .iter()
+                .find(|message| message.call_id.as_deref() == Some(id) && message.role == "tool")
+                .unwrap()
+                .data;
+            assert_eq!(feedback["code"], code);
+            let hint = feedback["hint"].as_str().unwrap();
+            assert!(
+                !hint.contains("missing") && !hint.contains("one two") && !hint.contains("b.md")
+            );
+            match code {
+                "MULTIPLE_MATCHES" => {
+                    assert!(hint.contains("2 matches") && hint.contains("surrounding context"))
+                }
+                "NO_MATCH" => assert!(hint.contains("files.read") && hint.contains("whitespace")),
+                "CONFLICT" => {
+                    assert!(hint.contains("expected_revision=2"), "{hint}");
+                    assert!(
+                        hint.contains(&format!("expected_digest={}", file.hash)),
+                        "{hint}"
+                    );
+                    assert!(hint.contains("file revision 1"), "{hint}");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    let operations = store.list_operations(&run).await.unwrap();
+    let failures: Vec<_> = operations
+        .iter()
+        .filter(|op| op.state == OperationState::Failed)
+        .collect();
+    assert_eq!(failures.len(), 4);
+    assert!(
+        failures
+            .iter()
+            .all(|op| op.send_count == 1 && op.model_repair_acknowledged(&done))
+    );
+}
+
 pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
     for mode in [
-        "count",
-        "elapsed",
-        "mixed",
+        "validation_limits_are_independent",
+        "correction_limit",
         "budget",
         "budget_disabled",
         "input_limit",
@@ -469,7 +606,7 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             .unwrap();
         let bad = json!({"expected_revision":1,"edits":[{"path":"a","expected_digest":file.hash,"old_text":"alpha","new_text":"gamma"}]});
         let first = match mode {
-            "mixed" | "no_progress_schema" | "no_progress_disabled_schema" => {
+            "no_progress_schema" | "no_progress_disabled_schema" => {
                 json!({"expected_revision":"bad","edits":[]})
             }
             "no_progress_disabled_nonobject" => Value::Null,
@@ -513,16 +650,27 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 .collect();
             replies.push(FakeModel::decision(json!({"decision":"keep"})));
         }
+        if mode == "correction_limit" {
+            replies = (0..9)
+                .map(|n| {
+                    let mut invalid = repeated.clone();
+                    invalid["edits"][0]["new_text"] = json!(format!("replacement {n}"));
+                    call(&format!("bad-{n}"), invalid)
+                })
+                .collect();
+        }
         let model = FakeModel::scripted(replies);
         let validator = runtrell::assembly::ValidationChain {
             validators: vec![],
             schema: json!({}),
             repair: RepairPolicy {
-                max_repairs: matches!(mode, "count" | "mixed").then_some(1),
-                max_elapsed: (mode == "elapsed").then_some(0),
+                max_repairs: (mode == "validation_limits_are_independent").then_some(0),
+                max_elapsed: (mode == "validation_limits_are_independent").then_some(0),
                 max_no_progress: if mode.starts_with("no_progress_disabled")
-                    || mode == "budget_disabled"
-                {
+                    || matches!(
+                        mode,
+                        "budget_disabled" | "validation_limits_are_independent"
+                    ) {
                     None
                 } else {
                     RepairPolicy::default().max_no_progress
@@ -546,7 +694,8 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
         match mode {
             "no_progress_disabled"
             | "no_progress_disabled_schema"
-            | "no_progress_disabled_nonobject" => {
+            | "no_progress_disabled_nonobject"
+            | "validation_limits_are_independent" => {
                 assert_eq!(done.state, RunState::Terminal(Terminal::Succeeded))
             }
             "no_progress" | "no_progress_schema" | "no_progress_cycle" => assert!(matches!(
@@ -560,9 +709,13 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
             "input_limit" => assert!(
                 matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("INPUT_LIMIT"))
             ),
-            _ => assert!(
-                matches!(done.state, RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_REPAIR_LIMIT"))
+            "correction_limit" => assert_eq!(
+                done.state,
+                RunState::Terminal(Terminal::Failed(
+                    "invalid input: TOOL_INPUT_CORRECTION_LIMIT".into()
+                ))
             ),
+            _ => unreachable!(),
         }
         assert_eq!(
             model.requests.lock().unwrap().len(),
@@ -572,8 +725,10 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 5
             } else if mode.starts_with("no_progress") {
                 3
-            } else if matches!(mode, "count" | "mixed") {
-                2
+            } else if mode == "correction_limit" {
+                9
+            } else if mode == "validation_limits_are_independent" {
+                4
             } else {
                 1
             }
@@ -591,7 +746,11 @@ pub async fn repair_stops<S: ControlStore>(store: Arc<S>) {
                 4
             } else if mode.starts_with("no_progress") {
                 2
-            } else if matches!(mode, "count" | "mixed" | "budget" | "budget_disabled") {
+            } else if mode == "correction_limit" {
+                8
+            } else if mode == "validation_limits_are_independent" {
+                3
+            } else if matches!(mode, "budget" | "budget_disabled") {
                 1
             } else {
                 0

@@ -38,7 +38,7 @@ fn host_receipt_classifies_repairs_and_keeps_infrastructure_errors_separate() {
     )));
 }
 #[test]
-fn tool_schema_diagnostics_obey_explicit_repair_limit() {
+fn tool_schema_diagnostics_obey_tool_input_correction_limit() {
     let _outcomes = runtrell::test_outcomes::guard();
     block_on(driver_contracts::tool_repairs(Arc::new(
         MemoryStore::default(),

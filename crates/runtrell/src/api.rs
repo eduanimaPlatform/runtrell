@@ -1874,8 +1874,9 @@ pub trait Tool: Send + Sync {
 /// Host supplies limits and business-specific diagnostic classification.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepairPolicy {
+    /// Maximum repairs of rejected final submissions and completion-tool validation.
     pub max_repairs: Option<u64>,
-    /// Maximum repair time in milliseconds from the first repair.
+    /// Maximum validation repair time in milliseconds from the first validation repair.
     pub max_elapsed: Option<u64>,
     /// Stop on this many occurrences of the same observed failure, including cycles.
     /// `None` disables this stop; budget, deadline and cancellation remain active.

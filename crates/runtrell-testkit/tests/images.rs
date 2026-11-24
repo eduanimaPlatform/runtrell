@@ -23,7 +23,7 @@ fn image_size_repair_returns_to_agent_without_a_bad_send() {
     block_on(image_contracts::size_repair_returns_to_agent());
 }
 #[test]
-fn image_size_repair_stops_at_repair_limit() {
+fn image_size_repair_stops_at_tool_input_correction_limit() {
     let _outcomes = runtrell::test_outcomes::guard();
     block_on(image_contracts::size_repair_respects_limit());
 }

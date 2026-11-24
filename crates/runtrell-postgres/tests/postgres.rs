@@ -10,6 +10,15 @@ async fn file_execution_failures_are_model_repairable() {
     runtrell_testkit::tool_failure_contracts::file_repairs(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
+async fn exact_replace_recovery_trace() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::tool_failure_contracts::exact_replace_recovery_trace(std::sync::Arc::new(
+        store,
+    ))
+    .await;
+}
+#[tokio::test]
 async fn file_repair_preserves_limits_and_budget() {
     let _outcomes = runtrell::test_outcomes::guard();
     let (_, _, store, _, _) = setup().await;

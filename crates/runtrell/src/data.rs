@@ -805,9 +805,12 @@ impl DataStore {
                 return Err(invalid("EDIT_LIMIT"));
             }
             this.tx(a, true, |s| {
+                if s.revision != expected {
+                    return Err(Error::Conflict);
+                }
                 let mut total = 0usize;
                 let mut changes: BTreeMap<String, (u64, Vec<u8>)> = BTreeMap::new();
-                for e in edits {
+                for (edit_index, e) in edits.into_iter().enumerate() {
                     logical_path(&e.path)?;
                     total = total
                         .checked_add(e.old_text.len())
@@ -841,11 +844,12 @@ impl DataStore {
                         .filter(|(i, _)| text[*i..].starts_with(&e.old_text))
                         .count();
                     if count != 1 {
-                        return Err(invalid(if count == 0 {
+                        let code = if count == 0 {
                             "NO_MATCH"
                         } else {
                             "MULTIPLE_MATCHES"
-                        }));
+                        };
+                        return Err(Error::Invalid(format!("{code}:{edit_index}:{count}")));
                     }
                     let bytes = text.replacen(&e.old_text, &e.new_text, 1).into_bytes();
                     changes.insert(e.path, (file.version.revision, bytes));

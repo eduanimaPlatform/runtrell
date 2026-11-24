@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.3
+
+- Return a bounded number of correctable tool failures to the model independently
+  of the host's validation-repair count and time limits.
+- Report exact-replacement match counts and current CAS metadata in safe
+  tool feedback. Distinguish workspace revisions from file revisions.
+
 ## 0.11.2
 
 - Preserve reservations for Responses model errors reported as HTTP 429 or as

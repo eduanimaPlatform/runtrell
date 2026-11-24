@@ -38,7 +38,7 @@ Policyは毎回現在の認可を検査する。SecretProviderは限定context�
 | `Claim.lease_until` | 絶対 | 上記の保存値 |
 | `ModelLimits.timeout` / `ToolDescriptor.timeout` / `DispatchRequest.timeout` | 期間 | operation期限 = `min(Run期限, now + timeout)`をToolContext.deadlineへ渡す（saturating） |
 | `RetryPolicy.backoff` / `max_elapsed`、`ExternalResult::Failed.retry_after` | 期間 | 次attemptは`finished_at + max(retry_after, backoff)`以降。初回からの経過が`max_elapsed`以上なら打切り |
-| `RepairPolicy.max_elapsed` | 期間 | 初回repairからの経過 |
+| `RepairPolicy.max_elapsed` | 期間 | 初回の検証修復からの経過 |
 | `DispatchRequest.recovery_until`、`RecoveryProof.expires_at` | 絶対 | 復旧照会の期限。`ModelPort::recovery()`の2つ目は期間で、`now + retention`（checked）をpinする |
 | `Operation.created_at` / `finished_at` | 絶対 | 記録時刻 |
 | `QueueEntry.deadline` | 絶対 | `now >= deadline`で`QueueTimeout`。deadlineの無いRunは`now + CAPACITY_WAIT_MS`（60_000）で待つ |
@@ -106,7 +106,7 @@ JSON値の`digest`はobjectのキーを再帰的に整列して計算し、Postg
 
 最終出力の修正可否は、hostのValidationReceipt.repairableと全blocking診断の明示分類を両方満たす場合にだけ許可する。Diagnostic.repairはDiagnosticRepair::{Agent,Host,Operator,Unknown}の単一判定であり、修復担当を表す。agent_can_write()とrepairable()はAgentの場合だけtrueとなる。hostがagentCanWrite等へ投影するときもこのメソッドを使い、code・パスや別の既定値から再判定しない。DataStoreのTargetValidatorは業務codeにも同じ分類を宣言できる。ValidationChain.repairable_codesは削除し、schema合格後の子validatorのreceiptと診断を保守的に統合する。driverの直接Validator経路でもHost/Operator/Unknownをreceipt flagだけで昇格させない。info/warning以外の未知severityは修復不能とする。candidateのJSON_SYNTAX／schema診断はAgentと明示する。json_artifact_diagnosticsはbytes/hashを照合して観測を設定するが、保存先の書込み権限は判断せずUnknownを返す。hostが実際の権限・修復方法を確認して分類する。host retry／operator actionの実行はhostの責務であり、RuntrellはAgentへ誤配送しない。
 
-修正回数・時間はRepairPolicyの任意上限を使い、これらには既定上限を持たない。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: Option<NonZeroU64>の既定Some(3)で、同じ失敗fingerprintが3回出現すると `Terminal::Stalled(ProgressStop::Validation { .. })` で終了する。A→B→A→B→AでもAの3回目で停止する。用途ごとにNoneを指定すると回数判定を無効化でき、Some(N)で別上限を設定できる。Noneでも通常の口座予約・精算、Run期限、取消、認可、所有権の検査は常時適用される。無制限呼出しを許可する設定ではない。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）、明示分類されたtool実行失敗、最終出力の修正に同じ任意上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
+最終出力と完了ツールの検証修復は、RepairPolicyの任意の回数・時間上限を共有する。無進展は独立した停止条件とし、RepairPolicy.max_no_progress: Option<NonZeroU64>の既定Some(3)で、同じ失敗fingerprintが3回出現すると `Terminal::Stalled(ProgressStop::Validation { .. })` で終了する。A→B→A→B→AでもAの3回目で停止する。用途ごとにNoneを指定すると回数判定を無効化でき、Some(N)で別上限を設定できる。Noneでも通常の口座予約・精算、Run期限、取消、認可、所有権の検査は常時適用される。無制限呼出しを許可する設定ではない。修正済みの異なる候補・成果物は別fingerprintとなるが、過去の失敗へ戻ると保存済みの出現数を引き継ぐ。tool入力（非objectを含む）と明示分類されたtool実行失敗には、検証修復と独立した訂正上限を適用する。追加モデル呼出しは別operationとして通常の予約・精算を行い、元操作の結果・精算は再利用する。修正不能/上限到達ではlast_validation（toolはlast_tool_validation）へ候補と診断を保持して理由付き終了、待機中の期限/予算到達でもrepair checkpointを保持する。ストレージ障害・認可拒否・検証証跡不一致のErrorは修正診断へ変換しない。tool実行失敗のallowlist・OutcomeUnknown・照合／冪等性契約は維持する。
 
 進展の観測はDiagnostic.observation: Option<ArtifactObservation>でhostが渡す。artifactは安定した対象識別子、versionはArtifactVersion::ContentDigest（検査したbytesのdigest）またはRevision（内容を表すhost管理の版）とする。内容が同じ書込みでも増える保存世代・Runのcheckpoint revisionを内容版として使わず、その場合はcontent digestを使う。Runtrellはパスを推測せず、ファイルを独自に読み直さず、品質改善を推定しない。観測がある診断は対象・内容・規則・担当の変化を進展として扱い、completion envelopeや文面だけの変化は進展としない。観測のない診断はcandidateを含めて照合するため、混合receiptのcandidate側の修正も検出できる。対象の内容が変われば最終envelopeが同じでも別fingerprintとなる。hostは診断と同じ検査時点の正しい観測を渡し、stale digest等はConflictとして扱う。
 
@@ -144,9 +144,15 @@ Adapters must not classify storage, authorization, uncertain side effects, or
 Run/resource stop conditions as correctable. `retry_after` is for automatic
 retry of the same operation and takes precedence over model repair.
 
-The driver returns classified failures as failed tool messages, shares the
-existing `tool_repair` count/start time and validator repair policy, and saves
-the protocol answer, messages and counter in one checkpoint. The failed
+The driver returns classified failures as failed tool messages. Schema and
+preflight errors, explicitly correctable execution failures and retryable
+pre-send failures delivered to the model share a budget of eight responses per
+phase (per Run without phases). The ninth rejection ends the phase's Run with
+`TOOL_INPUT_CORRECTION_LIMIT`. Successful intervening calls do not reset the
+counter. `RepairPolicy.max_repairs` and `max_elapsed` govern validation of final
+submissions and completion-tool results. The repeated-failure guard still
+applies to both loops. The driver saves the protocol answer, messages and
+counter in one checkpoint. The failed
 operation remains settled in the ledger; recovery reuses its saved result.
 Successful completion permits a classified failed Tool operation only after its
 ID is acknowledged in `tool_repair.operations` in the same checkpoint as the

@@ -62,6 +62,17 @@ policy値入りの固定hintで修正可能にする。容量・保存上限・I
 Memory/Pgの共通driver試験は空query→schema失敗結果→修正search→成功と、Unicode byte超過→実行時失敗結果→修正→成功を保証する。
 PgはControlStoreであり、この試験でもfile bytesはDataStore::memoryが保持する。
 
+`files.exact_replace` の `expected_revision` はワークスペース全体の版。
+`files.list` の各 entry の版はファイル版で、`files.read` や `files.write` に使う。
+`CONFLICT` では同じアクセス権で取り直したワークスペース版と、要求対象の
+ファイルの digest・ファイル版を返す。複数の対象があれば digest が古い最初の
+編集を優先し、残りの版と hash は `files.list` で確認できる。再試行もCASで照合する。
+この版と digest は編集権限に含まれるCAS用の情報。失敗応答で他のパスやファイル一覧は公開しない。
+`MULTIPLE_MATCHES` は対象の編集番号と重複を含む一致数を返し、固有になるまで
+前後の文脈を広げるよう案内する。`NO_MATCH` は対象の編集番号を返し、空白・改行を
+含めて現在のファイルからコピーするよう案内する。本文と指定された文字列は
+失敗応答に含めない。
+
 ## Backend契約の拡張（rt-3c）
 
 標準ツールはWorkspaceStore/ArtifactStoreと証跡用traitを要求し、具体backendを要求しない。Savedは不変blobとmanifestの照合後、Finalizedは現在版・hash・保存済み証跡を照合したcommit markerの保存後にだけ公開する。blob保存、manifest公開、証跡保存、確定marker、Run終端は順序付きの別境界とし、分散transactionを要求しない。adapterは各境界をCASし、応答喪失後は同一IDで再照会する。stagingは所有namespaceと期限を持ち、未確定データだけを所有者が期限後に回収する。確定済みデータをstaging GCの対象にしてはならない。

@@ -80,6 +80,22 @@ impl<S: StandardToolStore> FileTool<S> {
         let policy = self.store.policy();
         match error {
             Error::Invalid(code) => {
+                // Match errors from the reference store carry only the edit index and count.
+                if matches!(self.action, FileAction::ExactReplace)
+                    && let Some((kind, detail)) = code.split_once(':')
+                    && let Some((index, count)) = detail.split_once(':')
+                    && let (Ok(index), Ok(count)) = (index.parse::<usize>(), count.parse::<usize>())
+                {
+                    match (kind, count) {
+                        ("NO_MATCH", 0) => return Some((kind, format!(
+                            "edits[{index}].old_text matched no text. Use files.read on the current file and copy the exact UTF-8 text, including whitespace and line endings. In a batch, account for earlier edits to the same file."
+                        ))),
+                        ("MULTIPLE_MATCHES", 2..) => return Some((kind, format!(
+                            "edits[{index}].old_text has {count} matches, including overlaps. Include more surrounding context so old_text matches exactly once."
+                        ))),
+                        _ => {}
+                    }
+                }
                 let range_hint = match code.as_str() {
                     "PAGE_LIMIT" => Some(format!("Use limit in 1..={}.", policy.max_entries)),
                     "RANGE_LIMIT" => Some(format!("Use length in 1..={} bytes.", policy.max_read)),
@@ -129,6 +145,39 @@ impl<S: StandardToolStore> FileTool<S> {
             )),
             _ => None,
         }
+    }
+    async fn exact_replace_conflict_hint(&self, input: &Value) -> Option<String> {
+        // Re-read under the same access. If metadata is unavailable, retain
+        // the definite rejection without disclosing stale or unauthorized data.
+        let snapshot = self.store.snapshot(&self.access).await.ok()?;
+        let mut hint = format!(
+            "Use expected_revision={} (workspace revision). Re-read changed files before retrying.",
+            snapshot.revision
+        );
+        let mut requested =
+            input["edits"]
+                .as_array()?
+                .iter()
+                .enumerate()
+                .filter_map(|(index, edit)| {
+                    let path = edit["path"].as_str()?;
+                    let file = snapshot.files.iter().find(|file| file.path == path)?;
+                    Some((index, file, edit["expected_digest"] != file.hash))
+                });
+        if let Some((index, file, _)) = requested
+            .clone()
+            .find(|(_, _, stale)| *stale)
+            .or_else(|| requested.next())
+        {
+            hint.push_str(&format!(
+                " For edits[{index}], use expected_digest={} and use file revision {} with files.read.",
+                file.hash, file.revision
+            ));
+        }
+        hint.push_str(
+            " Use files.list to refresh hashes and file revisions for any remaining paths.",
+        );
+        Some(hint)
     }
     fn name(&self) -> &'static str {
         match self.action {
@@ -193,7 +242,7 @@ impl<S: StandardToolStore> FileTool<S> {
         }
         Ok(())
     }
-    async fn execute(&self, input: Value) -> Result<FileToolOutcome> {
+    async fn execute(&self, input: &Value) -> Result<FileToolOutcome> {
         let string = |name: &str| {
             input[name]
                 .as_str()
@@ -347,7 +396,12 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
         );
         ToolDescriptor {
             name: self.name().into(),
-            version: "runtrell-files-4".into(),
+            version: if matches!(self.action, FileAction::ExactReplace) {
+                "runtrell-files-5"
+            } else {
+                "runtrell-files-4"
+            }
+            .into(),
             account: "local-files".into(),
             permission: if write {
                 "workspace.write"
@@ -397,7 +451,7 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
                 provider_diagnostic: None,
             });
         }
-        Ok(match self.execute(input).await {
+        Ok(match self.execute(&input).await {
             Ok(FileToolOutcome::Value(output)) => ExternalResult::Applied {
                 physical_evidence: None,
                 output,
@@ -415,16 +469,28 @@ impl<S: StandardToolStore> Tool for FileTool<S> {
                 retry_after: None,
                 provider_diagnostic: None,
             },
-            Err(e) => ExternalResult::Failed {
-                repair_hint: self.repair_failure(&e).map(|(_, hint)| hint),
-                physical_evidence: None,
-                code: self
-                    .repair_failure(&e)
-                    .map_or_else(|| e.to_string(), |(code, _)| code.into()),
-                usage: Usage::measured(0, 0, 0),
-                retry_after: None,
-                provider_diagnostic: None,
-            },
+            Err(e) => {
+                let (code, repair_hint) =
+                    if matches!(self.action, FileAction::ExactReplace) && e == Error::Conflict {
+                        (
+                            "CONFLICT".into(),
+                            self.exact_replace_conflict_hint(&input).await,
+                        )
+                    } else {
+                        self.repair_failure(&e).map_or_else(
+                            || (e.to_string(), None),
+                            |(code, hint)| (code.into(), Some(hint)),
+                        )
+                    };
+                ExternalResult::Failed {
+                    repair_hint,
+                    physical_evidence: None,
+                    code,
+                    usage: Usage::measured(0, 0, 0),
+                    retry_after: None,
+                    provider_diagnostic: None,
+                }
+            }
         })
     }
     // A write followed by a crash before ledger recording is ambiguous; never replay it.

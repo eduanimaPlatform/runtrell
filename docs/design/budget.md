@@ -87,8 +87,9 @@ there is no default count ceiling. Budget policy and deadline still apply.
 Automatic context summaries use Compaction operations, the host-selected summary
 model's price and limits, and the same account. A summary is committed with CAS
 only after complete measured success; unknown usage keeps the reservation.
-Schema and host-repairable failures use fresh reserved model turns, with optional
-host count/time limits shared across final-output and tool-input repairs.
+Schema and host-repairable failures use fresh reserved model turns. Validation
+repair follows the host's count and time limits. Correctable tool failures have a
+separate [response limit](api.md#correctable-tool-execution-failures).
 
 SchedulingPolicy defaults to priority=0 and weight=2. Priority is an integer;
 weight must be positive. Tenant rotation precedes priority, and the scheduler saves

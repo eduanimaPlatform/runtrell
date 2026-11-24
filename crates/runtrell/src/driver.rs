@@ -17,6 +17,8 @@ use std::{future::Future, sync::Arc};
 mod context;
 mod progress;
 
+const MAX_TOOL_INPUT_CORRECTIONS: u64 = 8;
+
 fn child_result(handle: &RunHandle) -> ExternalResult {
     ExternalResult::Applied {
         physical_evidence: None,
@@ -1763,7 +1765,7 @@ impl<
         Ok(())
     }
 
-    /// Shared by pre-execution schema diagnostics and settled execution failures.
+    /// Prepare model feedback for a tool call or a rejected completion check.
     /// The counter and protocol answer are committed by the caller in one CAS.
     async fn prepare_tool_repair(
         &self,
@@ -1809,18 +1811,33 @@ impl<
             .await?;
             return Err(error);
         }
-        let started = repair_started(current).unwrap_or(self.clock.now());
-        if repair_limit(current, &policy, started, self.clock.now()) {
+        let (counter, limit) = if validation {
+            let now = self.clock.now();
+            let started = repair_started(current).unwrap_or(now);
+            if repair_limit(current, &policy, started, now) {
+                ("validation_tool_repair", Some("VALIDATION_REPAIR_LIMIT"))
+            } else {
+                cp.payload["validation_tool_repair"]["started"] = started.into();
+                ("validation_tool_repair", None)
+            }
+        } else {
+            let limited = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0)
+                >= MAX_TOOL_INPUT_CORRECTIONS;
+            (
+                "tool_repair",
+                limited.then_some("TOOL_INPUT_CORRECTION_LIMIT"),
+            )
+        };
+        if let Some(code) = limit {
             bx(|| {
                 self.store
                     .checkpoint(c, current.revision, cp, self.clock.now())
             })
             .await?;
-            return Err(Error::Invalid("VALIDATION_REPAIR_LIMIT".into()));
+            return Err(Error::Invalid(code.into()));
         }
-        let count = cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0);
-        cp.payload["tool_repair"]["count"] = count.checked_add(1).ok_or(Error::Conflict)?.into();
-        cp.payload["tool_repair"]["started"] = started.into();
+        let count = cp.payload[counter]["count"].as_u64().unwrap_or(0);
+        cp.payload[counter]["count"] = count.checked_add(1).ok_or(Error::Conflict)?.into();
         Ok(cp)
     }
 
@@ -2437,7 +2454,7 @@ fn pending_ack(run: &RunRecord) -> Result<Option<ValidationFeedback>> {
 }
 fn repair_started(run: &RunRecord) -> Option<u64> {
     let cp = run.checkpoint.as_ref()?;
-    ["repair", "tool_repair"]
+    ["repair", "validation_tool_repair"]
         .iter()
         .filter_map(|key| cp.payload[key]["started"].as_u64())
         .min()
@@ -2447,7 +2464,11 @@ fn repair_count(run: &RunRecord) -> u64 {
         cp.payload["repair"]["count"]
             .as_u64()
             .unwrap_or(0)
-            .saturating_add(cp.payload["tool_repair"]["count"].as_u64().unwrap_or(0))
+            .saturating_add(
+                cp.payload["validation_tool_repair"]["count"]
+                    .as_u64()
+                    .unwrap_or(0),
+            )
     })
 }
 fn completed(result: ExternalResult) -> Result<Value> {

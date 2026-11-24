@@ -274,7 +274,7 @@ pub async fn size_repair_respects_limit() {
         },
     };
     let model = FakeModel::scripted(
-        (0..2)
+        (0..9)
             .map(|n| {
                 FakeModel::calls(vec![ToolCall {
                     id: format!("bad-{n}"),
@@ -288,7 +288,7 @@ pub async fn size_repair_respects_limit() {
         validators: vec![],
         schema: json!({}),
         repair: RepairPolicy {
-            max_repairs: Some(1),
+            max_repairs: Some(0),
             max_no_progress: None,
             ..RepairPolicy::default()
         },
@@ -304,7 +304,7 @@ pub async fn size_repair_respects_limit() {
     };
     let done = rt.drive(&claim).await.unwrap();
     assert!(
-        matches!(done.state,RunState::Terminal(Terminal::Failed(ref code)) if code.contains("VALIDATION_REPAIR_LIMIT"))
+        matches!(done.state,RunState::Terminal(Terminal::Failed(ref code)) if code.contains("TOOL_INPUT_CORRECTION_LIMIT"))
     );
     assert_eq!(provider.sends.load(Ordering::SeqCst), 0);
     assert_eq!(

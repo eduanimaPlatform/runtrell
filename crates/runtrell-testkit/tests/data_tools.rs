@@ -28,6 +28,13 @@ fn saved_file_failure_recovers_without_reexecution() {
     ));
 }
 #[test]
+fn exact_replace_recovery_trace() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    block_on(tool_failure_contracts::exact_replace_recovery_trace(
+        Arc::new(MemoryStore::default()),
+    ));
+}
+#[test]
 fn file_repair_preserves_limits_and_budget() {
     let _outcomes = runtrell::test_outcomes::guard();
     block_on(tool_failure_contracts::repair_stops(Arc::new(
