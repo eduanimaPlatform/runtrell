@@ -52,6 +52,9 @@ the three listed sizes. Quality defaults to `low` and also accepts `medium`
 and `high`.
 Complexity and background are sent if supplied. The catalog reservation defines
 the prompt and reference image limits. [OpenAI Images bounds](providers.md#openai-images-usage-and-reservation).
+Unsupported request options detected before send return `InvalidToolInput`
+with the field and its permitted values or an instruction to omit it. Model
+tool calls receive the usual `TOOL_INPUT_INVALID` repair without a send.
 A separate `ImageSizePolicy` applies to each enabled model action
 (generation, reference edit, SVG generation) through `ImageCapabilities`.
 `Values` lists exact `WIDTHxHEIGHT` strings; `Dimensions` declares multiple,

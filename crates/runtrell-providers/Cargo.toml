@@ -15,7 +15,7 @@ openrouter = ["dep:reqwest", "dep:httpdate", "dep:bytes", "dep:http-body"]
 
 [dependencies]
 thiserror = "2"
-runtrell = { path = "../runtrell", version = "0.11.1" }
+runtrell = { path = "../runtrell", version = "0.11.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
@@ -29,8 +29,8 @@ tokio = { version = "1", features = ["time"] }
 lopdf = { version = "0.42.0", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-runtrell-testkit = { path = "../runtrell-testkit", version = "0.11.1" }
-runtrell-postgres = { path = "../runtrell-postgres", version = "0.11.1", features = ["test-support"] }
+runtrell-testkit = { path = "../runtrell-testkit", version = "0.11.2" }
+runtrell-postgres = { path = "../runtrell-postgres", version = "0.11.2", features = ["test-support"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 

@@ -593,10 +593,17 @@ impl Adapter {
                             AmbiguityReason::ResponseIdentityUnverified,
                         )
                     } else {
+                        let usage = self.normalized_usage(&parsed);
+                        // A synchronous final response with measured usage proves
+                        // execution. Let the driver retry the validation failure
+                        // as a new, separately budgeted attempt.
+                        let retry_after = (!self.background()
+                            && matches!(usage.outcome(), UsageOutcome::Measured(_)))
+                        .then_some(0);
                         HttpFailure {
                             code: "PROVIDER_RESPONSE_INVALID".into(),
-                            usage: self.normalized_usage(&parsed),
-                            retry_after: None,
+                            usage,
+                            retry_after,
                             diagnostic,
                         }
                         .into()
@@ -909,7 +916,13 @@ impl Adapter {
         }
     }
 
-    fn rejects_without_execution(&self, status: u16, effective_status: u16, value: &Value) -> bool {
+    fn rejects_without_execution(
+        &self,
+        status: u16,
+        effective_status: u16,
+        value: &Value,
+        model_request: bool,
+    ) -> bool {
         if [
             "usage",
             "usageMetadata",
@@ -927,8 +940,8 @@ impl Adapter {
         {
             return false;
         }
-        // Authentication and access checks reject before execution, even if
-        // the body cannot be decoded. Other statuses need a matching envelope.
+        // Authentication or access denial without a decoded envelope is non-billable.
+        // Truncated responses are handled at the body-read boundary below.
         if matches!(status, 401 | 403) && value.is_null() {
             return true;
         }
@@ -942,7 +955,11 @@ impl Adapter {
         let error = &value["error"];
         match self.wire {
             Wire::Responses => {
-                // The Responses and image wires use textual error codes.
+                // Responses model errors can establish failure without establishing
+                // that inference was never billed. Preserve the image wire policy.
+                if model_request && (status == 429 || (200..300).contains(&status)) {
+                    return false;
+                }
                 error.is_object()
                     && (!(200..300).contains(&status)
                         || Self::responses_envelope_status(value) == Some(effective_status))
@@ -1176,10 +1193,13 @@ impl Adapter {
         };
         let mut parsed: Value = if let Some(phase) = read_failure {
             if (400..500).contains(&status) || (500..600).contains(&status) {
-                let mut usage = normalize(status, &Value::Null);
-                if self.rejects_without_execution(status, status, &Value::Null) {
-                    usage = Usage::non_billable(NonBillableReason::RejectedBeforeExecution);
-                }
+                // A received final 401 proves authentication was denied
+                // before execution, even when the body was lost.
+                let usage = if matches!(status, 401 | 403) {
+                    Usage::non_billable(NonBillableReason::RejectedBeforeExecution)
+                } else {
+                    normalize(status, &Value::Null)
+                };
                 return Ok(HttpResult::Failure(HttpFailure {
                     code: serde_json::to_string(&Failure {
                         class: classify(status, &Value::Null),
@@ -1263,7 +1283,12 @@ impl Adapter {
                     .unwrap_or(u64::MAX),
                 false => 0,
             });
-            let usage = if self.rejects_without_execution(status, effective_status, &parsed) {
+            let usage = if self.rejects_without_execution(
+                status,
+                effective_status,
+                &parsed,
+                input_bound.is_some(),
+            ) {
                 Usage {
                     model: self.config.capabilities.limits.model.clone(),
                     ..Usage::non_billable(NonBillableReason::RejectedBeforeExecution)
@@ -1618,7 +1643,9 @@ impl Adapter {
                 return Ok(u);
             }
         }
-        if self.managed.is_some() {
+        // The chat and Responses totals have the same meaning on every route.
+        // The Gemini equation below is for the cataloged route without tool use.
+        if self.wire != Wire::GenerateContent || self.managed.is_some() {
             let total_path = match self.wire {
                 Wire::Responses | Wire::Chat => "/usage/total_tokens",
                 Wire::GenerateContent => "/usageMetadata/totalTokenCount",

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.2
+
+- Preserve reservations for Responses model errors reported as HTTP 429 or as
+  a successful HTTP status with an error body when usage is unavailable.
+- Reject inconsistent reported token totals on Responses and chat model
+  bindings before pricing. Preserve the provider failure and the reported
+  counters for reconciliation.
+- Settle truncated HTTP 401 responses at zero as authentication rejections.
+  Settle synchronous model replies with measured usage and an invalid response
+  structure as definite failures eligible for bounded retry.
+- Return field-specific repair hints for unsupported OpenAI Images request
+  options detected before sending.
+
 ## 0.11.1
 
 - Check durable run outcomes at test exit for both Memory and PostgreSQL.

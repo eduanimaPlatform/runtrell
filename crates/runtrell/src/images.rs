@@ -78,6 +78,33 @@ fn invalid(code: &str) -> Error {
     Error::Invalid(code.into())
 }
 impl ImageLimits {
+    /// Check the requested output format against the permitted MIME types.
+    /// A missing raster format denotes the separate SVG operation.
+    pub fn check_output_format(&self, format: Option<ImageOutputFormat>) -> Result<()> {
+        let requested = format.map_or("image/svg+xml", ImageOutputFormat::mime_type);
+        if self.allowed_mime.iter().any(|mime| mime == requested) {
+            return Ok(());
+        }
+        let formats: Vec<_> = self
+            .allowed_mime
+            .iter()
+            .filter_map(|mime| match mime.as_str() {
+                "image/png" => Some("png"),
+                "image/jpeg" => Some("jpeg"),
+                "image/webp" => Some("webp"),
+                _ => None,
+            })
+            .collect();
+        Err(Error::InvalidToolInput {
+            path: "/output_format".into(),
+            hint: if format.is_none() || formats.is_empty() {
+                "Choose an image tool that supports the requested format.".into()
+            } else {
+                format!("Use one of these allowed values: {}.", formats.join(", "))
+            },
+        })
+    }
+
     fn dimensions(&self, width: u32, height: u32) -> Result<(u32, u32)> {
         if width == 0
             || height == 0
@@ -1118,21 +1145,19 @@ impl<I: ImagePort, S: StandardToolStore, P: Policy, R: RunStore, C: Clock>
         if request.prompt.is_empty() || request.prompt.len() > 65536 || self.config.timeout == 0 {
             return Err(invalid("IMAGE_REQUEST"));
         }
-        if request.size.as_ref().is_some_and(|s| s.len() > 128)
-            || !self.resolver.limits.allowed_mime.iter().any(|m| {
-                m == request
-                    .output_format
-                    .map_or("image/svg+xml", ImageOutputFormat::mime_type)
-            })
-        {
+        if request.size.as_ref().is_some_and(|s| s.len() > 128) {
             return Err(invalid("IMAGE_OUTPUT_OPTIONS"));
         }
+        self.resolver
+            .limits
+            .check_output_format(request.output_format)?;
         if request.background == Some(ImageBackground::Transparent)
             && request.output_format == Some(ImageOutputFormat::Jpeg)
         {
-            return Err(invalid(
-                "IMAGE_BACKGROUND: transparent requires png or webp",
-            ));
+            return Err(Error::InvalidToolInput {
+                path: "/background".into(),
+                hint: "For jpeg, omit background or use auto or opaque.".into(),
+            });
         }
         if let Some((width, height)) = request.size.as_deref().and_then(parse_size)
             && self.config.action != ImageAction::SvgGenerate

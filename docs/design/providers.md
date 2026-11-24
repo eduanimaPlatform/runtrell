@@ -75,6 +75,22 @@ driver settles that provably never-sent attempt at measured zero, keeps its
 failed no-send audit record, and releases only its reservation and slot. Sent
 or observed attempts cannot use that resolution.
 
+Responses model calls retain a reservation for unresolved usage on HTTP 429
+and on 2xx error envelopes, including when the rejection itself is definite.
+When Responses or chat replies include both component counts and a total,
+the total must equal input plus output before the usage can be priced.
+
+An HTTP 401 with an interrupted response body is an authentication rejection.
+The final status proves that execution was rejected before billing, so the
+runtime releases the reservation at zero and retains the status and receive
+phase for the host's operator diagnostics.
+
+A synchronous 2xx model reply with measured usage and an invalid response
+structure is a definite `PROVIDER_RESPONSE_INVALID` failure. The runtime
+settles that attempt with its measured usage and uses the model's bounded retry
+policy for any new attempt. An unreadable success body without usable outcome
+evidence follows the response ambiguity rules.
+
 Owner recovery of an unsettled `Failed` attempt uses the same documented,
 evidence-bound `SettlementRecovery` path as an `Applied` attempt; it preserves
 the failed result, error and diagnostic. Merely knowing the HTTP status or a

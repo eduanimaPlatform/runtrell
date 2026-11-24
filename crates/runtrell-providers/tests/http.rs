@@ -424,7 +424,7 @@ async fn only_documented_openai_overload_and_slow_down_enable_runtime_retry() {
             panic!("saved failure")
         };
         assert_eq!(retry_after, expected_delay, "HTTP {status} {error_code}");
-        if status == 503 {
+        if matches!(status, 429 | 503) {
             assert!(matches!(usage.outcome(), UsageOutcome::Unresolved { .. }));
         } else {
             assert_eq!(
@@ -478,6 +478,17 @@ fn model_retry_policy_is_host_selected_and_rejects_zero_bounds() {
 #[cfg(feature = "openai")]
 #[tokio::test]
 async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge() {
+    response_failure_retry(false).await;
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn invalid_success_body_settles_before_bounded_model_retry() {
+    response_failure_retry(true).await;
+}
+
+#[cfg(feature = "openai")]
+async fn response_failure_retry(measured: bool) {
     let _outcomes = runtrell::test_outcomes::guard();
     use runtrell::memory::MemoryStore;
     use runtrell::test_outcomes::{OutcomeException, expect_operations};
@@ -488,11 +499,12 @@ async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge()
     let overload =
         json!({"error":{"type":"service_unavailable_error","code":"server_is_overloaded"}});
     let success = json!({"id":"resp-1","status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"decision\":\"answered\"}"}]}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4,"input_tokens_details":{"cached_tokens":0,"image_tokens":0,"cached_image_tokens":0},"output_tokens_details":{"reasoning_tokens":0,"image_tokens":0}}});
-    let (url, server) = sequence_server(vec![
-        (503, "Retry-After: 6\r\n", overload),
-        (200, "", success),
-    ])
-    .await;
+    let first = if measured {
+        (200, "", json!({"output":{},"usage":success["usage"]}))
+    } else {
+        (503, "Retry-After: 6\r\n", overload)
+    };
+    let (url, server) = sequence_server(vec![first, (200, "", success)]).await;
     let store = Arc::new(MemoryStore::default());
     let account = store
         .create_account_with_policy(
@@ -500,7 +512,7 @@ async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge()
             Amount::new(10_000, 10_000),
             None,
             AccountPolicy {
-                continue_with_unknown: true,
+                continue_with_unknown: !measured,
                 ..AccountPolicy::default()
             },
         )
@@ -549,19 +561,30 @@ async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge()
         RunState::Waiting(_)
     ));
     let old = store.operations(&run).await.unwrap().remove(0);
-    assert!(old.unknown_usage);
+    assert_eq!(old.unknown_usage, !measured);
+    assert_eq!(old.settled, measured);
+    let retry_after = if measured { 0 } else { 6_000 };
     assert!(
         matches!(
             old.result,
             Some(ExternalResult::Failed {
-                retry_after: Some(6_000),
+                retry_after: Some(delay),
                 ..
-            })
+            }) if delay == retry_after
         ),
         "actual saved result: {:?}",
         old.result
     );
-    clock.set(base + 5_999);
+    if measured {
+        let saved = store.account(&account).await.unwrap();
+        assert_eq!(saved.used, Amount::new(4, 4));
+        assert_eq!(saved.reserved, Amount::default());
+        assert!(matches!(
+            old.result,
+            Some(ExternalResult::Failed { ref code, .. }) if code == "PROVIDER_RESPONSE_INVALID"
+        ));
+    }
+    clock.set(base + if measured { 999 } else { 5_999 });
     assert!(matches!(
         runtime.drive(&claim).await.unwrap().state,
         RunState::Waiting(_)
@@ -575,17 +598,27 @@ async fn overload_http_retry_uses_new_runtime_attempt_and_keeps_unknown_charge()
     assert_eq!(attempts.len(), 2);
     assert_eq!(attempts[0].request.attempt, 1);
     assert_eq!(attempts[1].request.attempt, 2);
-    assert_eq!(store.account(&account).await.unwrap().unknown, 1);
+    let saved = store.account(&account).await.unwrap();
+    assert_eq!(saved.unknown, u64::from(!measured));
     assert_eq!(server.await.unwrap().len(), 2);
-    expect_operations(
-        &run,
-        [OutcomeException::unresolved_usage(
-            "model:1",
-            OperationKind::Model,
-            OperationState::Failed,
-            UsageIssue::Missing,
-        )],
-    );
+    if measured {
+        assert_eq!(saved.used, Amount::new(8, 8));
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.settled && attempt.send_count == 1)
+        );
+    } else {
+        expect_operations(
+            &run,
+            [OutcomeException::unresolved_usage(
+                "model:1",
+                OperationKind::Model,
+                OperationState::Failed,
+                UsageIssue::Missing,
+            )],
+        );
+    }
 }
 
 #[cfg(feature = "openai")]
@@ -764,6 +797,84 @@ async fn rejected_request_settles_without_reported_counters() {
     };
     assert_eq!(usage.amount(), Ok(Amount::default()));
     assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn responses_error_without_non_billable_evidence_retains_usage_reservation() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    for (status, error) in [
+        (
+            429,
+            json!({"type":"invalid_request_error","code":"invalid_value"}),
+        ),
+        (429, json!({"type":"rate_limit_error"})),
+        (
+            200,
+            json!({"type":"invalid_request_error","code":"invalid_value"}),
+        ),
+    ] {
+        let (url, task) = server(status, "", json!({"error":error})).await;
+        let result = OpenAi::new(config(url))
+            .unwrap()
+            .invoke(&context(), text(request()))
+            .await
+            .unwrap();
+        assert!(matches!(result, ExternalResult::Failed { .. }));
+        assert!(matches!(
+            result.usage_outcome(),
+            UsageOutcome::Unresolved { .. }
+        ));
+        assert_eq!(
+            result.provider_diagnostic().unwrap().http_status,
+            Some(status)
+        );
+        assert_eq!(task.await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(any(feature = "openai", feature = "openrouter"))]
+async fn conflicting_failure_usage<T: ModelPort>(make: fn(Config) -> Result<T>) {
+    for status in [429, 500] {
+        let (url, task) = server(
+            status,
+            "",
+            json!({"error":{"type":"server_error"},"usage":{
+                "input_tokens":12,"output_tokens":8,"prompt_tokens":12,
+                "completion_tokens":8,"total_tokens":2
+            }}),
+        )
+        .await;
+        let result = make(config(url))
+            .unwrap()
+            .invoke(&context(), text(request()))
+            .await
+            .unwrap();
+        assert!(matches!(result, ExternalResult::Failed { .. }));
+        let UsageOutcome::Unresolved {
+            reason: UsageIssue::Invalid,
+            reported: Some(usage),
+        } = result.usage_outcome()
+        else {
+            panic!("expected inconsistent usage to remain unresolved: {result:?}");
+        };
+        assert_eq!((usage.input, usage.output), (Some(12), Some(8)));
+        assert_eq!(task.await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn responses_conflicting_failure_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    conflicting_failure_usage(OpenAi::new).await;
+}
+
+#[cfg(feature = "openrouter")]
+#[tokio::test]
+async fn chat_conflicting_failure_usage() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    conflicting_failure_usage(OpenRouter::new).await;
 }
 
 #[cfg(feature = "openai")]

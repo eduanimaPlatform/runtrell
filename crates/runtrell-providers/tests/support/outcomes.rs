@@ -19,6 +19,17 @@ enum Wire {
 }
 
 impl Wire {
+    fn unproven_rejection_usage(self, case: OutcomeCase) -> bool {
+        match case {
+            OutcomeCase::Rejection(status) => {
+                (self == Self::Responses && status == 429)
+                    || (self.gemini() && matches!(status, 402 | 413 | 422))
+            }
+            OutcomeCase::ErrorEnvelope => matches!(self, Self::Responses | Self::Chat),
+            _ => false,
+        }
+    }
+
     fn image(self) -> bool {
         matches!(
             self,
@@ -300,7 +311,19 @@ fn assert_receipt(case: OutcomeCase, wire: Wire, receipt: &ExternalResult) {
         assert_eq!(usage.amount(), Ok(Amount::new(8, 8)));
         return;
     }
-    if matches!(case, OutcomeCase::InvalidSuccessUsage) {
+    if !wire.image() && matches!(case, OutcomeCase::InvalidSchema) {
+        assert!(
+            matches!(
+                receipt,
+                ExternalResult::Failed {
+                    code,
+                    retry_after: Some(0),
+                    ..
+                } if code == "PROVIDER_RESPONSE_INVALID"
+            ),
+            "{wire:?} {case:?}: {receipt:?}"
+        );
+    } else if matches!(case, OutcomeCase::InvalidSuccessUsage) {
         assert!(
             matches!(receipt, ExternalResult::Applied { .. }),
             "{wire:?} {receipt:?}"
@@ -331,24 +354,36 @@ fn assert_receipt(case: OutcomeCase, wire: Wire, receipt: &ExternalResult) {
         | OutcomeCase::RequestByteLimit
         | OutcomeCase::PermissionDenied
         | OutcomeCase::InvalidToolInput
-        | OutcomeCase::TruncatedRejection
         | OutcomeCase::OversizedRejection => {
             assert!(
                 matches!(receipt.usage_outcome(), UsageOutcome::NonBillable(_)),
                 "{case:?} {receipt:?}"
             );
         }
-        OutcomeCase::Rejection(status) => {
-            let unsupported = wire.gemini() && matches!(status, 402 | 413 | 422);
+        OutcomeCase::TruncatedRejection => {
+            let ExternalResult::Failed {
+                code,
+                repair_hint: None,
+                ..
+            } = receipt
+            else {
+                panic!("expected an operator-facing authentication failure: {receipt:?}");
+            };
+            let failure: Failure = serde_json::from_str(code).unwrap();
+            assert_eq!(failure.class, ErrorClass::Authentication);
+            assert_eq!(failure.status, 401);
             assert_eq!(
-                matches!(receipt.usage_outcome(), UsageOutcome::NonBillable(_)),
-                !unsupported
+                receipt.usage_outcome(),
+                UsageOutcome::NonBillable(NonBillableReason::RejectedBeforeExecution)
             );
+            let diagnostic = receipt.provider_diagnostic().unwrap();
+            assert_eq!(diagnostic.http_status, Some(401));
+            assert_eq!(diagnostic.phase, ProviderFailurePhase::ResponseRead);
         }
-        OutcomeCase::ErrorEnvelope => {
+        OutcomeCase::Rejection(_) | OutcomeCase::ErrorEnvelope => {
             assert_eq!(
                 matches!(receipt.usage_outcome(), UsageOutcome::NonBillable(_)),
-                wire != Wire::Chat,
+                !wire.unproven_rejection_usage(case),
             );
         }
         OutcomeCase::FailureWithUsage | OutcomeCase::InvalidSchema => {
@@ -365,6 +400,9 @@ fn assert_receipt(case: OutcomeCase, wire: Wire, receipt: &ExternalResult) {
 }
 
 async fn contract<S: ControlStore>(store: Arc<S>, wire: Wire, kind: OperationKind) {
+    // Parallel wires exercise independent callers. Share the store, but avoid
+    // racing to provision the same tenant's capacity rows.
+    let tenant = format!("fixture-{wire:?}-{kind:?}").to_ascii_lowercase();
     for &case in OUTCOME_CASES {
         let mut spy = None;
         let (endpoint, server) = match case {
@@ -428,12 +466,12 @@ async fn contract<S: ControlStore>(store: Arc<S>, wire: Wire, kind: OperationKin
         );
         let now = clock.now();
         let account = store
-            .create_account("tenant", Amount::new(100_000, 100_000), None)
+            .create_account(&tenant, Amount::new(100_000, 100_000), None)
             .await
             .unwrap();
         let key = format!("fixture-{wire:?}-{kind:?}-{case:?}");
         let run = store
-            .start(RunSpec::new("tenant", &key, account.clone(), "fixture"))
+            .start(RunSpec::new(&tenant, &key, account.clone(), "fixture"))
             .await
             .unwrap();
         let claim = store.claim(&run, "worker", now, 120_000).await.unwrap();
@@ -486,7 +524,7 @@ async fn contract<S: ControlStore>(store: Arc<S>, wire: Wire, kind: OperationKin
                 |_| async { Ok(Lookup::Unknown) },
             )
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{wire:?} {kind:?} {case:?}: {error:?}"));
         assert_receipt(case, wire, &receipt);
         let op = store.operation(&run, "effect").await.unwrap().unwrap();
         assert_eq!(op.result.as_ref(), Some(&receipt));
@@ -509,12 +547,7 @@ async fn contract<S: ControlStore>(store: Arc<S>, wire: Wire, kind: OperationKin
             }
         );
         let issue = match case {
-            OutcomeCase::Rejection(status)
-                if wire.gemini() && matches!(status, 402 | 413 | 422) =>
-            {
-                Some(UsageIssue::Missing)
-            }
-            OutcomeCase::ErrorEnvelope if wire == Wire::Chat => Some(UsageIssue::Missing),
+            case if wire.unproven_rejection_usage(case) => Some(UsageIssue::Missing),
             OutcomeCase::FailureWithPartialUsage => Some(UsageIssue::Incomplete),
             OutcomeCase::FailureWithoutUsage | OutcomeCase::TruncatedFailure => {
                 Some(UsageIssue::Missing)
@@ -641,11 +674,23 @@ async fn outcome_matrix_memory() {
 
 #[tokio::test]
 async fn outcome_matrix_postgres() {
-    let _outcomes = runtrell::test_outcomes::guard();
+    let outcomes = runtrell::test_outcomes::guard();
     let url = std::env::var("RUNTRELL_TEST_DATABASE_URL").expect("disposable test database");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    let store = runtrell_postgres::PgStore::initialize(pool, "outcome_contract", matrix_capacity())
+    let schema: String = sqlx::query_scalar(
+        "SELECT 'outcome_contract_' || replace(gen_random_uuid()::text, '-', '')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let store = runtrell_postgres::PgStore::initialize(pool.clone(), &schema, matrix_capacity())
         .await
         .unwrap();
     all_wires(Arc::new(store)).await;
+    // The outcome guard reads the durable rows when it is dropped.
+    drop(outcomes);
+    sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+        .execute(&pool)
+        .await
+        .unwrap();
 }

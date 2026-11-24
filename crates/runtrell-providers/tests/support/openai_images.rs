@@ -3,6 +3,33 @@
 use super::still_images::encoded_output;
 
 #[tokio::test]
+async fn unsupported_image_options_name_the_field_and_offer_a_correction() {
+    let _outcomes = runtrell::test_outcomes::guard();
+    let (mut tool, ctx) = fixture(
+        image_config("http://127.0.0.1:1/test".into()),
+        ImageAction::Generate,
+    )
+    .await;
+    tool.resolver.limits.allowed_mime.push("image/webp".into());
+    let run = tool.runs.get(&ctx.claim.run).await.unwrap();
+    for (field, value, allowed) in [
+        ("output_format", json!("webp"), "png"),
+        ("quality", json!("high"), "omit"),
+        ("complexity", json!("medium"), "omit"),
+        ("background", json!("opaque"), "omit"),
+    ] {
+        let mut input = json!({"prompt":"Draw a labeled diagram","size":"1024x1024"});
+        input[field] = value;
+        let error = tool.quote(&run, &input).await.unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidToolInput { path, hint }
+                if path == &format!("/{field}") && hint.to_lowercase().contains(allowed)),
+            "{field}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn img26_optional_raster_fields_reach_the_wire() {
     let _outcomes = runtrell::test_outcomes::guard();
     let (url, http) = server(200, "", image_response()).await;
@@ -261,13 +288,22 @@ async fn managed_image_feedback(pre_send: bool) {
     let runs = tool.runs.clone();
     let account = runs.get(&handle).await.unwrap().spec.account;
     let claim = runs.claim(&handle, "worker", now, 100_000).await.unwrap();
+    let mut arguments = json!({"prompt":"Draw a labeled diagram","size":"1024x1024",
+                              "output_format":"png","complexity":"medium","background":"opaque","quality":"auto"});
+    let run = runs.get(&handle).await.unwrap();
+    assert!(matches!(
+        tool.quote(&run, &arguments).await,
+        Err(Error::InvalidToolInput { path, hint })
+            if path == "/quality" && ["low", "medium", "high"].iter().all(|q| hint.contains(q))
+    ));
+    arguments["quality"] = json!("low");
     let runtime = Runtime {
         store: runs.clone(),
         model: FakeModel::scripted(vec![
             FakeModel::calls(vec![ToolCall {
                 id: "draw".into(),
                 name: "image.generate".into(),
-                arguments: json!({"prompt":"draw","size":"1024x1024"}),
+                arguments,
             }]),
             FakeModel::decision(json!({"decision":"answered"})),
         ]),

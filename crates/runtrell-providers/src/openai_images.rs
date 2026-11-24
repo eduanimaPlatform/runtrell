@@ -79,18 +79,14 @@ impl OpenAiImages {
         if request.images().len() > config.image_limits.max_images {
             return Err(Error::Invalid("IMAGE_COUNT_LIMIT".into()));
         }
-        if !config
+        config
             .image_limits
-            .allowed_mime
-            .iter()
-            .any(|m| m == request.output_mime())
-        {
-            return Err(Error::Unsupported("image_output_format".into()));
-        }
+            .check_output_format(request.output_format())?;
         if request.svg().is_some() && !config.capabilities.images.svg_model_selection {
-            return Err(Error::Unsupported(
-                "svg: enable model-selection access or omit the svg object".into(),
-            ));
+            return Err(Error::InvalidToolInput {
+                path: "/svg".into(),
+                hint: "Omit svg or set it to null for this binding.".into(),
+            });
         }
         if request
             .svg()
@@ -100,14 +96,19 @@ impl OpenAiImages {
             return Err(Error::Invalid("SVG_MODEL".into()));
         }
         let model = config.capabilities.limits.model.as_str();
-        if (request.quality().is_some()
-            || request.complexity().is_some()
-            || request.background().is_some())
-            && !matches!(model, "gpt-image-2.6-sunburst" | "gpt-image-2.6-flare")
-        {
-            return Err(Error::Unsupported(
-                "image options require configured Images 2.6 model".into(),
-            ));
+        if !matches!(model, "gpt-image-2.6-sunburst" | "gpt-image-2.6-flare") {
+            for (path, supplied) in [
+                ("/quality", request.quality().is_some()),
+                ("/complexity", request.complexity().is_some()),
+                ("/background", request.background().is_some()),
+            ] {
+                if supplied {
+                    return Err(Error::InvalidToolInput {
+                        path: path.into(),
+                        hint: "Omit this field or set it to null for this binding.".into(),
+                    });
+                }
+            }
         }
         let format = request.output_format().map_or(json!("svg"), |f| json!(f));
         let mut body =
@@ -135,9 +136,43 @@ impl OpenAiImages {
             }
             body["images"] = json!(images);
         }
-        if self.adapter.managed.is_some() {
+        if let Some(managed) = &self.adapter.managed {
             if request.quality().is_none() {
                 body["quality"] = json!("low");
+            }
+            if let Some(rule) = managed.model.image_reservation() {
+                let choices = request
+                    .size()
+                    .and_then(|size| rule.calculator_output_tokens.get(size))
+                    .ok_or_else(|| Error::InvalidToolInput {
+                        path: "/size".into(),
+                        hint: format!(
+                            "Use one of these allowed values: {}.",
+                            rule.calculator_output_tokens
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    })?;
+                if !body["quality"]
+                    .as_str()
+                    .is_some_and(|quality| choices.contains_key(quality))
+                {
+                    return Err(Error::InvalidToolInput {
+                        path: "/quality".into(),
+                        hint: format!(
+                            "For this size, use one of these allowed values: {}.",
+                            choices.keys().cloned().collect::<Vec<_>>().join(", ")
+                        ),
+                    });
+                }
+                if request.prompt().len() > rule.prompt_bytes {
+                    return Err(Error::InvalidToolInput {
+                        path: "/prompt".into(),
+                        hint: format!("Use at most {} UTF-8 bytes.", rule.prompt_bytes),
+                    });
+                }
             }
             self.adapter.managed_quote(&body, None)?;
         }
@@ -294,6 +329,9 @@ impl ImagePort for OpenAiImages {
 }
 
 fn image_input_hint(diagnostic: &ProviderDiagnostic) -> Option<String> {
+    if diagnostic.http_status == Some(401) {
+        return None;
+    }
     if !matches!(diagnostic.http_status, Some(400 | 422))
         || diagnostic
             .provider_type
