@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.4
+
+- Preserve definite tool failures and their settled usage when a host dispatches
+  a tool outside the model loop. An unacknowledged failure blocks successful
+  completion with its failure code.
+- Require recorded ambiguity before ending a run with an unknown outcome.
+
 ## 0.11.3
 
 - Return a bounded number of correctable tool failures to the model independently

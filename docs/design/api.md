@@ -160,6 +160,12 @@ protocol answer. A hint alone never bypasses the completion guard.
 Only a new model call may attempt a corrected action. Budgets, deadlines,
 authorization and unknown-outcome reconciliation remain mandatory.
 
+A host can dispatch a tool independently of the model loop and receive the
+same ledger receipt. When a settled failure blocks completion or phase sealing,
+the runtime reports its saved failure code. A proven pre-send failure settles
+at zero and a failure after send keeps its measured usage. An unresolved outcome
+requires recorded ambiguity evidence.
+
 File tools opt in only known input/match errors and workspace CAS/path lookup
 failures. Storage capacity, output exhaustion, storage, permission, artifact-integrity and unknown
 errors remain fatal. Feedback excludes file bodies, raw decoder errors and

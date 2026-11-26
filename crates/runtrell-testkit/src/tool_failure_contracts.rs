@@ -152,6 +152,131 @@ pub async fn failure_boundaries<S: ControlStore>(store: Arc<S>) {
     }
 }
 
+/// Host dispatch returns the settled receipt without producing a model tool answer.
+pub async fn host_tool_settlement<S: ControlStore>(store: Arc<S>) {
+    let measured = Usage::measured(2, 3, 7);
+    for (key, result, used, terminal) in [
+        (
+            "before-send",
+            ExternalResult::retryable_not_sent(),
+            Amount::default(),
+            Terminal::Failed(Error::Invalid("REQUEST_NOT_SENT".into()).to_string()),
+        ),
+        (
+            "before-send-with-next-phase",
+            ExternalResult::retryable_not_sent(),
+            Amount::default(),
+            Terminal::Failed(Error::Invalid("REQUEST_NOT_SENT".into()).to_string()),
+        ),
+        (
+            "sent-and-applied",
+            ExternalResult::Applied {
+                physical_evidence: None,
+                output: json!({"value":1}),
+                usage: measured.clone(),
+                external_id: Some("receipt".into()),
+            },
+            Amount::new(5, 7),
+            Terminal::Succeeded,
+        ),
+        (
+            "sent-and-failed",
+            ExternalResult::Failed {
+                physical_evidence: None,
+                code: "REMOTE_FAILURE".into(),
+                usage: measured,
+                retry_after: None,
+                repair_hint: None,
+                provider_diagnostic: Some(ProviderDiagnostic {
+                    phase: ProviderFailurePhase::HttpError,
+                    send_certainty: ProviderSendCertainty::Sent,
+                    http_status: Some(500),
+                    provider_type: None,
+                    provider_code: None,
+                    provider_param: None,
+                    request_id: None,
+                }),
+            },
+            Amount::new(5, 7),
+            Terminal::Failed(Error::Invalid("REMOTE_FAILURE".into()).to_string()),
+        ),
+    ] {
+        let account = store
+            .create_account("t", Amount::new(1000, 1000), None)
+            .await
+            .unwrap();
+        let tool = BusinessTool::new("host-tool");
+        let descriptor = tool.descriptor();
+        let mut spec = RunSpec::new("t", key, account.clone(), "act");
+        if key == "before-send-with-next-phase" {
+            spec.phases = ["prepare", "finish"]
+                .into_iter()
+                .map(|id| PhaseConfig {
+                    id: id.into(),
+                    tools: [descriptor.name.clone()].into(),
+                    completion: CompletionPolicy::default(),
+                })
+                .collect();
+        }
+        let run = store.start(spec).await.unwrap();
+        let claim = store.claim(&run, "host", 0, 100).await.unwrap();
+        let rt = Runtime {
+            store: store.clone(),
+            model: FakeModel::scripted(vec![FakeModel::decision(json!({"decision":"keep"}))]),
+            tools: vec![tool],
+            policy: FakePolicy::default(),
+            clock: TestClock::default(),
+            validator: Arc::new(DecisionValidator::default()),
+            finalizer: Arc::new(DecisionFinalizer),
+        };
+        let mut request = DispatchRequest::new(
+            "host-call",
+            OperationKind::Tool,
+            &descriptor.name,
+            json!({}),
+            Amount::new(10, 10),
+        );
+        request.version = descriptor.version.clone();
+        request.scope = Some(catalog_digest(&descriptor));
+        request.account_binding = descriptor.account.clone();
+        let first = rt
+            .dispatch(
+                &claim,
+                request.clone(),
+                &descriptor.permission,
+                |_| async { Ok(result.clone()) },
+                |_| async { panic!("a fresh call must not look up a receipt") },
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, result);
+        let replay = rt
+            .dispatch(
+                &claim,
+                request,
+                &descriptor.permission,
+                |_| async { panic!("a settled call must not execute again") },
+                |_| async { panic!("a settled call must not look up a receipt") },
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay, first);
+        let op = store.operation(&run, "host-call").await.unwrap().unwrap();
+        assert!(op.settled);
+        assert_eq!(op.usage_outcome(), first.usage_outcome());
+        assert_eq!(op.send_count, 1);
+        let balance = store.account(&account).await.unwrap();
+        assert_eq!(balance.used, used);
+        assert_eq!(balance.reserved, Amount::default());
+        assert_eq!(balance.unknown, 0);
+        assert_eq!(
+            rt.drive(&claim).await.unwrap().state,
+            RunState::Terminal(terminal),
+            "{key}"
+        );
+    }
+}
+
 struct SaveThenPause<S> {
     store: Arc<S>,
     inner: FileTool,
@@ -248,10 +373,10 @@ pub async fn saved_failure_recovery<S: ControlStore>(store: Arc<S>, reopened: Ar
     let output = json!({"decision":"keep"});
     let receipt = rt.validator.validate(&before, &output).unwrap();
     let completion = rt.finalizer.finalize(&before, output, receipt).unwrap();
-    // A hint alone cannot bypass the completion guard before model delivery.
+    // The completion guard preserves the known failure until model delivery.
     assert_eq!(
         reopened.finalize(&claim, completion, 0).await.unwrap_err(),
-        Error::UsageUnknown
+        Error::Invalid("MULTIPLE_MATCHES".into())
     );
     rt.store = reopened.clone();
     let recovered = rt.drive(&claim).await.unwrap();

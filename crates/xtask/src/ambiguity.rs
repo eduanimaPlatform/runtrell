@@ -32,6 +32,19 @@ impl<'ast> Visit<'ast> for Sites {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let Expr::Path(path) = call.func.as_ref()
             && let Some(name) = path.path.segments.last()
+            && name.ident == "OutcomeUnknown"
+        {
+            self.sites
+                .entry((self.function.clone(), "TerminalOutcomeUnknown".into()))
+                .or_default()
+                .push(name.ident.span().start().line);
+            for arg in &call.args {
+                self.visit_expr(arg);
+            }
+            return;
+        }
+        if let Expr::Path(path) = call.func.as_ref()
+            && let Some(name) = path.path.segments.last()
             && name.ident == "ambiguous"
         {
             let line = name.ident.span().start().line;
@@ -64,7 +77,7 @@ impl<'ast> Visit<'ast> for Sites {
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
         if path.path.segments.len() > 1
             && let Some(name) = path.path.segments.last()
-            && name.ident == "ambiguous"
+            && (name.ident == "ambiguous" || name.ident == "OutcomeUnknown")
         {
             self.errors.push(format!(
                 "{}: call the ambiguity constructor directly",
@@ -81,7 +94,7 @@ impl<'ast> Visit<'ast> for Sites {
             _ => None,
         };
         if let Some(ident) = ident
-            && ident == "ambiguous"
+            && (ident == "ambiguous" || ident == "OutcomeUnknown")
         {
             self.errors.push(format!(
                 "{}: do not alias the ambiguity constructor",
@@ -127,6 +140,11 @@ fn constructor_token(tokens: proc_macro2::TokenStream) -> bool {
     }) || tokens.windows(2).any(|tokens| {
         matches!(&tokens[0], TokenTree::Ident(ident) if ident == "AmbiguousOutcome")
             && matches!(&tokens[1], TokenTree::Group(group) if group.delimiter() == Delimiter::Brace)
+    }) || tokens.windows(2).any(|tokens| {
+        // Keep wildcard patterns in assertions usable. Other uses belong in the AST.
+        matches!(&tokens[0], TokenTree::Ident(ident) if ident == "OutcomeUnknown")
+            && matches!(&tokens[1], TokenTree::Group(group) if group.delimiter() == Delimiter::Parenthesis
+                && group.stream().to_string() != "_")
     }) || tokens.into_iter().any(|token| match token {
         TokenTree::Group(group) => constructor_token(group.stream()),
         _ => false,
@@ -208,6 +226,28 @@ mod tests {
         let mut sites = Sites::default();
         sites.visit_file(&syn::parse_file(code).unwrap());
         assert_eq!(sites.sites.values().next().unwrap().len(), 2);
+        assert_eq!(sites.errors.len(), 2);
+    }
+
+    #[test]
+    fn terminal_construction_is_listed_and_patterns_are_ignored() {
+        let code = r#"
+            use Terminal::OutcomeUnknown as Unlisted;
+            fn project(state: Terminal) -> Terminal {
+                if let Terminal::OutcomeUnknown(_) = state {
+                    return state;
+                }
+                assert!(!matches!(state, Terminal::OutcomeUnknown(_)));
+                dbg!(Terminal::OutcomeUnknown(String::new()));
+                Terminal::OutcomeUnknown(String::new())
+            }
+        "#;
+        let mut sites = Sites::default();
+        sites.visit_file(&syn::parse_file(code).unwrap());
+        assert_eq!(
+            sites.sites[&("project".into(), "TerminalOutcomeUnknown".into())].len(),
+            1
+        );
         assert_eq!(sites.errors.len(), 2);
     }
 }

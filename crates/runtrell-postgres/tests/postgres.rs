@@ -31,6 +31,13 @@ async fn tool_failures_preserve_stop_and_reconciliation_boundaries() {
     runtrell_testkit::tool_failure_contracts::failure_boundaries(std::sync::Arc::new(store)).await;
 }
 #[tokio::test]
+async fn host_tool_settlement_keeps_definite_outcomes() {
+    let _outcomes = runtrell_testkit::outcome_contracts::guard();
+    let (_, _, store, _, _) = setup().await;
+    runtrell_testkit::tool_failure_contracts::host_tool_settlement(std::sync::Arc::new(store))
+        .await;
+}
+#[tokio::test]
 async fn saved_file_failure_recovers_without_reexecution() {
     let _outcomes = runtrell::test_outcomes::guard();
     let (_, schema, store, _, _) = setup().await;

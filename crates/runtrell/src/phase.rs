@@ -221,6 +221,56 @@ pub fn phase_child_admissions_pending<'a>(
         })
 }
 
+/// Check the operations that can block successful completion in either store.
+#[doc(hidden)]
+pub fn check_completion_operations(
+    operations: &BTreeMap<String, Operation>,
+    run: &RunRecord,
+) -> Result<()> {
+    for op in operations
+        .values()
+        .filter(|op| op.run == run.handle && !op.retired)
+    {
+        let superseded = operations.values().any(|later| {
+            later.run == op.run
+                && later.request.key == op.request.key
+                && later.request.attempt > op.request.attempt
+        });
+        let superseded_model_retry = superseded
+            && matches!(
+                op.request.kind,
+                OperationKind::Model | OperationKind::Compaction
+            )
+            && matches!(
+                op.result,
+                Some(ExternalResult::Failed {
+                    retry_after: Some(_),
+                    ..
+                })
+            );
+        if (run.spec.transcript == TranscriptPolicy::PurgeOnSuccess && !op.transcript_purge_ready())
+            || (!op.settled && !superseded_model_retry)
+            || matches!(op.state, OperationState::Unknown | OperationState::Accepted)
+        {
+            return Err(Error::UsageUnknown);
+        }
+        if !superseded {
+            reject_unacknowledged_failure(op, run)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_unacknowledged_failure(op: &Operation, run: &RunRecord) -> Result<()> {
+    if op.state == OperationState::Failed && !op.model_repair_acknowledged(run) {
+        let Some(ExternalResult::Failed { code, .. }) = &op.result else {
+            return Err(Error::Conflict);
+        };
+        return Err(Error::Invalid(code.clone()));
+    }
+    Ok(())
+}
+
 /// Retire every attempt in the sealed conversation after checking settlement.
 #[doc(hidden)]
 pub fn retire_phase_operations(
@@ -235,7 +285,6 @@ pub fn retire_phase_operations(
             return Err(Error::Pending("external reconciliation".into()));
         }
         if op.state == OperationState::Failed
-            && !op.model_repair_acknowledged(run)
             && !operations.values().any(|later| {
                 later.run == op.run
                     && later.request.key == op.request.key
@@ -243,7 +292,7 @@ pub fn retire_phase_operations(
                     && later.state == OperationState::Applied
             })
         {
-            return Err(Error::UsageUnknown);
+            reject_unacknowledged_failure(op, run)?;
         }
     }
     for op in operations

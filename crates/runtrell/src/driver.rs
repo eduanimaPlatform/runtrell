@@ -928,6 +928,17 @@ impl<
         self.park_for_operator(c, &r).await
     }
 
+    async fn unresolved_outcome(&self, c: &Claim) -> Result<Option<Terminal>> {
+        let operations = bx(|| self.store.list_operations(&c.run)).await?;
+        let ambiguity = operations.iter().filter(|op| !op.retired).find_map(|op| {
+            op.unsettled_result
+                .as_ref()
+                .or(op.result.as_ref())
+                .and_then(ExternalResult::ambiguity)
+        });
+        Ok(ambiguity.map(|outcome| Terminal::OutcomeUnknown(format!("{:?}", outcome.reason()))))
+    }
+
     async fn finish_drive(&self, c: &Claim, result: Result<RunRecord>) -> Result<RunRecord> {
         if let Err(e) = &result {
             if e == &Error::Closed {
@@ -960,7 +971,14 @@ impl<
                 Error::BudgetAtLimit | Error::ReservationDenied | Error::PriceNotConfigured => {
                     Some(Terminal::BudgetReached(e.to_string()))
                 }
-                Error::UsageUnknown => Some(Terminal::OutcomeUnknown(e.to_string())),
+                Error::UsageUnknown => {
+                    let terminal = bx(|| self.unresolved_outcome(c)).await?;
+                    if terminal.is_none() {
+                        bx(|| self.wait_pending(c, "external reconciliation")).await?;
+                        return bx(|| self.store.get(&c.run)).await;
+                    }
+                    terminal
+                }
                 Error::PermissionDenied
                 | Error::Unsupported(_)
                 | Error::Invalid(_)

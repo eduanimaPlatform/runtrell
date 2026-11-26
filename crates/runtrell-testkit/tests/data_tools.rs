@@ -48,6 +48,13 @@ fn tool_failures_preserve_stop_and_reconciliation_boundaries() {
         MemoryStore::default(),
     )));
 }
+#[test]
+fn host_tool_settlement_keeps_definite_outcomes() {
+    let _outcomes = outcome_contracts::guard();
+    block_on(tool_failure_contracts::host_tool_settlement(Arc::new(
+        MemoryStore::default(),
+    )));
+}
 async fn start(s: &MemoryStore) -> (RunHandle, Claim) {
     let account = s
         .create_account("tenant", Amount::new(10000, 10000), None)

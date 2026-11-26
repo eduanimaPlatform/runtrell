@@ -11,8 +11,8 @@ mod phase;
 mod transcript;
 pub use erasure::RunPayloadStore;
 pub use phase::{
-    PhaseConfig, PhaseInput, PhaseSeal, PhaseState, phase_child_admissions_pending,
-    retire_phase_operations,
+    PhaseConfig, PhaseInput, PhaseSeal, PhaseState, check_completion_operations,
+    phase_child_admissions_pending, retire_phase_operations,
 };
 mod driver;
 pub mod memory;

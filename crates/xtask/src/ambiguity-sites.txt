@@ -1,4 +1,4 @@
-# Path, function, closed reason, number of occurrences.
+# Path, function, closed reason or terminal projection, number of occurrences.
 crates/runtrell-providers/src/adapter.rs invoke ResponseIdentityUnverified 2
 crates/runtrell-providers/src/adapter.rs send_at_with_usage TransportAfterPossibleWrite 1
 crates/runtrell-providers/src/adapter.rs send_at_with_usage ResponseByteLimit 1
@@ -10,3 +10,8 @@ crates/runtrell-testkit/src/lib.rs ambiguous_fixture InvocationInterrupted 1
 crates/runtrell-testkit/src/recovery_contracts.rs provider_diagnostic_survives_reopen ResponseLost 1
 crates/runtrell/tests/contracts.rs reservation_is_idempotent_and_unknown_is_not_zero RecoveryUnconfirmed 1
 crates/runtrell/src/driver.rs dispatch ResponseIdentityUnverified 1
+# Persisted ambiguity only. Covered by bounded_tool_timeout_keeps_unknown_cost_and_records_separate_stop
+# and host_tool_settlement_keeps_definite_outcomes.
+crates/runtrell/src/driver.rs unresolved_outcome TerminalOutcomeUnknown 1
+# Guard self-test deliberately writes an invalid terminal state.
+crates/runtrell/src/test_outcomes.rs undeclared_terminal_unknown_fails_on_scope_exit TerminalOutcomeUnknown 1

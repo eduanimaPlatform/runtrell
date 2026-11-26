@@ -1391,36 +1391,7 @@ impl PgStore {
             for id in ancestors(s, &r.spec.account)? {
                 s.accounts[&id].admission(true)?;
             }
-            if s.operations.values().any(|o| {
-                let superseded = s.operations.values().any(|later| {
-                    later.run == o.run
-                        && later.request.key == o.request.key
-                        && later.request.attempt > o.request.attempt
-                });
-                let superseded_model_retry = superseded
-                    && matches!(
-                        o.request.kind,
-                        OperationKind::Model | OperationKind::Compaction
-                    )
-                    && matches!(
-                        o.result,
-                        Some(ExternalResult::Failed {
-                            retry_after: Some(_),
-                            ..
-                        })
-                    );
-                o.run == c.run
-                    && !o.retired
-                    && ((r.spec.transcript == TranscriptPolicy::PurgeOnSuccess
-                        && !o.transcript_purge_ready())
-                        || (!o.settled && !superseded_model_retry)
-                        || matches!(o.state, OperationState::Unknown | OperationState::Accepted)
-                        || (o.state == OperationState::Failed
-                            && !o.model_repair_acknowledged(&r)
-                            && !superseded))
-            }) {
-                return Err(Error::UsageUnknown);
-            }
+            check_completion_operations(&s.operations, &r)?;
             let v = &completion.receipt;
             if !v.passed
                 || v.hash != digest(&completion.output)
