@@ -104,7 +104,22 @@ pub async fn intermediate_completion_reopens_only_after_purge<S: ControlStore>(
             tries: AtomicUsize::new(0),
         }),
     };
+    // Fix the heartbeat request before seal and observe it after commit. This
+    // is the order of a heartbeat whose locked read is serialized behind seal.
+    let renewal = reopened.renew(&first, 0, 100);
     let sealed = runtime.drive(&first).await.unwrap();
+    assert_eq!(renewal.await, Ok(RenewOutcome::Released));
+    assert_eq!(reopened.get(&run).await.unwrap(), sealed);
+    let mut wrong_worker = first.clone();
+    wrong_worker.worker = "other".into();
+    assert_eq!(
+        reopened.renew(&wrong_worker, 1, 100).await,
+        Err(Error::OwnershipLost)
+    );
+    assert_eq!(
+        reopened.renew(&first, first.lease_until, 100).await,
+        Err(Error::OwnershipLost)
+    );
     assert_eq!(sealed.state, RunState::Finalizing);
     assert_eq!(sealed.handle, run);
     assert_eq!(sealed.spec.account, account);
@@ -129,6 +144,10 @@ pub async fn intermediate_completion_reopens_only_after_purge<S: ControlStore>(
     runtime.store = reopened.clone();
     clock.set(1);
     let interrupted = reopened.claim(&run, "purge", 1, 2).await.unwrap();
+    assert_eq!(
+        reopened.renew(&first, 1, 100).await,
+        Err(Error::OwnershipLost)
+    );
     runtime.drive(&interrupted).await.unwrap();
     assert_eq!(model.requests.lock().unwrap().len(), 2);
     assert_eq!(

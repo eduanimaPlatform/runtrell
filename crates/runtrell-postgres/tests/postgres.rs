@@ -1354,7 +1354,11 @@ async fn parallel_run_update_throughput_measurement() {
                 tasks.push(tokio::spawn(async move {
                     for step in 1..=20 {
                         let now = (round as u64) * 20 + step;
-                        let renewed = store.renew(&claim, now, 100).await.unwrap();
+                        let RenewOutcome::Renewed(renewed) =
+                            store.renew(&claim, now, 100).await.unwrap()
+                        else {
+                            panic!("the active claim must renew");
+                        };
                         assert_eq!(renewed.worker, claim.worker);
                         assert_eq!(renewed.generation, claim.generation);
                         assert_eq!(renewed.lease_until, now + 100);

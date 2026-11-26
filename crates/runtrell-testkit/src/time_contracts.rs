@@ -44,17 +44,21 @@ pub async fn lease_and_deadline_boundaries<S: ControlStore>(store: Arc<S>) {
     );
 
     // Renewal moves the expiry forward only: max(old, now + lease).
-    let renewed = store.renew(&first, 1_400, 500).await.unwrap();
+    let RenewOutcome::Renewed(renewed) = store.renew(&first, 1_400, 500).await.unwrap() else {
+        panic!("the active claim must renew");
+    };
     assert_eq!(renewed.lease_until, 1_900);
-    let not_shorter = store.renew(&renewed, 1_410, 100).await.unwrap();
-    assert_eq!(not_shorter.lease_until, 1_900);
-    assert!(store.check(&not_shorter, 1_899, false).await.is_ok());
     assert_eq!(
-        store.check(&not_shorter, 1_900, false).await,
+        store.renew(&renewed, 1_410, 100).await,
+        Ok(RenewOutcome::Renewed(renewed.clone()))
+    );
+    assert!(store.check(&renewed, 1_899, false).await.is_ok());
+    assert_eq!(
+        store.check(&renewed, 1_900, false).await,
         Err(Error::OwnershipLost)
     );
     assert_eq!(
-        store.renew(&not_shorter, 1_900, 500).await,
+        store.renew(&renewed, 1_900, 500).await,
         Err(Error::OwnershipLost),
         "an expired lease cannot be renewed"
     );
@@ -68,12 +72,14 @@ pub async fn lease_and_deadline_boundaries<S: ControlStore>(store: Arc<S>) {
     assert_eq!(second.lease_until, 2_500);
     assert_eq!(second.generation, first.generation + 1);
     assert_eq!(
-        store.check(&not_shorter, 1_900, false).await,
+        store.check(&renewed, 1_900, false).await,
         Err(Error::OwnershipLost)
     );
 
     // Run deadline 2_500: new work is refused at and after it, never before.
-    let live = store.renew(&second, 2_000, 10_000).await.unwrap();
+    let RenewOutcome::Renewed(live) = store.renew(&second, 2_000, 10_000).await.unwrap() else {
+        panic!("the successor claim must renew");
+    };
     assert_eq!(live.lease_until, 12_000);
     assert!(store.check(&live, 2_499, true).await.is_ok());
     for now in [2_500, 2_501] {

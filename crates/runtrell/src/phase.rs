@@ -35,6 +35,8 @@ pub struct PhaseSeal {
 pub struct PhaseState {
     request_digest: String,
     pub seals: Vec<PhaseSeal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    released_claim: Option<Claim>,
 }
 
 impl PhaseState {
@@ -69,11 +71,42 @@ impl RunSpec {
         Ok(Some(PhaseState {
             request_digest,
             seals: vec![],
+            released_claim: None,
         }))
     }
 }
 
 impl RunRecord {
+    #[doc(hidden)]
+    pub fn renew_claim(&mut self, claim: &Claim, now: u64, lease: u64) -> Result<RenewOutcome> {
+        let released_claim = self
+            .phase
+            .as_ref()
+            .and_then(|phase| phase.released_claim.as_ref())
+            .filter(|released| released.generation == self.generation);
+        let holder = self.owner.as_ref().or(released_claim);
+        if !holder.is_some_and(|holder| {
+            holder.worker == claim.worker
+                && holder.generation == claim.generation
+                && now < holder.lease_until
+        }) {
+            return Err(Error::OwnershipLost);
+        }
+        if self.schema != 1 {
+            return Err(Error::Unsupported("run schema".into()));
+        }
+        if lease == 0 {
+            return Err(Error::Invalid("zero lease".into()));
+        }
+        let Some(owner) = &mut self.owner else {
+            return Ok(RenewOutcome::Released);
+        };
+        owner.lease_until = owner
+            .lease_until
+            .max(now.checked_add(lease).ok_or(Error::Conflict)?);
+        Ok(RenewOutcome::Renewed(owner.clone()))
+    }
+
     pub fn active_phase(&self) -> Option<&PhaseConfig> {
         let phase = self.phase.as_ref()?;
         if self.pending_phase().is_some() {
@@ -158,22 +191,19 @@ impl RunRecord {
         )?;
         receipt.diagnostics.clear();
         let phase = self.active_phase().ok_or(Error::Conflict)?.id.clone();
-        self.phase
-            .as_mut()
-            .ok_or(Error::Conflict)?
-            .seals
-            .push(PhaseSeal {
-                phase,
-                generation: self.generation,
-                output,
-                receipt,
-                sealed_at: now,
-                purged_at: None,
-            });
+        let state = self.phase.as_mut().ok_or(Error::Conflict)?;
+        state.seals.push(PhaseSeal {
+            phase,
+            generation: self.generation,
+            output,
+            receipt,
+            sealed_at: now,
+            purged_at: None,
+        });
+        state.released_claim = self.owner.take();
         self.spec.input.clear();
         self.spec.images.clear();
         self.checkpoint = None;
-        self.owner = None;
         self.state = RunState::Finalizing;
         self.delivery = Delivery::None;
         self.revision += 1;
@@ -186,11 +216,9 @@ impl RunRecord {
             return Err(Error::Conflict);
         }
         let completion = self.next_phase().ok_or(Error::Conflict)?.completion.clone();
-        self.phase
-            .as_mut()
-            .and_then(|phase| phase.seals.last_mut())
-            .ok_or(Error::Conflict)?
-            .purged_at = Some(now);
+        let state = self.phase.as_mut().ok_or(Error::Conflict)?;
+        state.seals.last_mut().ok_or(Error::Conflict)?.purged_at = Some(now);
+        state.released_claim = None;
         if !matches!(self.state, RunState::Terminal(_)) {
             if self.spec.deadline.is_some_and(|deadline| now >= deadline) {
                 self.state = RunState::Terminal(Terminal::DeadlineReached);

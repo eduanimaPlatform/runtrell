@@ -61,7 +61,7 @@ impl Deref for TestPg {
 }
 
 impl RunStore for TestPg {
-    async fn renew(&self, claim: &Claim, now: u64, lease: u64) -> Result<Claim> {
+    async fn renew(&self, claim: &Claim, now: u64, lease: u64) -> Result<RenewOutcome> {
         self.0.renew(claim, now, lease).await
     }
     async fn find_request(&self, spec: &RunSpec) -> Result<Option<RunHandle>> {

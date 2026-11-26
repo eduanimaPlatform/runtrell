@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.5
+
+- Return `RenewOutcome::Released` when the current claim sealed an intermediate
+  phase and released its lease. Hosts can stop that heartbeat and complete the
+  in-flight drive. Active renewals return `RenewOutcome::Renewed(Claim)`.
+
 ## 0.11.4
 
 - Preserve definite tool failures and their settled usage when a host dispatches

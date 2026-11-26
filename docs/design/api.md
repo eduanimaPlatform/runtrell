@@ -49,6 +49,8 @@ Policyは毎回現在の認可を検査する。SecretProviderは限定context�
 
 host設定が秒（HTTP timeout、`*_SECONDS`等）の場合は、runtime境界で1回だけcheckedに変換する。実時間のsleepは`Duration::from_millis`。heartbeat間隔のような`Duration`は単位が型で明確なので対象外。時刻は`Clock`以外から取らない（adapterが比較に使うSystemTimeはUnix millisecondへ変換する）。
 
+`renew`は継続中のclaimに`RenewOutcome::Renewed(Claim)`を返す。同じclaimによる中間phaseのsealが先に確定し、renewの時刻が解放時のlease内で後続claimも未発行なら`RenewOutcome::Released`を返す。hostはそのheartbeatを終了して進行中の処理結果を待てる。新規処理・書込みは引き続き現在のownerのfenceに従う。
+
 Validatorは候補hash、根拠revision、設定/検証器版に結び付くValidationReceiptを返す。Finalizerは信頼済み業務拡張であり、外部反映済みreceiptを確認した安定completion IDを返す。RunStoreは現行revisionとreceiptをCAS照合する。別ownerへの業務書込みはoperationとしてdispatchし、その結果をFinalizerが確認する。Finalizer内で未記録の有料I/Oや副作用を実行してはならない。
 
 WorkspaceStore / ArtifactStoreは2bでAccessを受け取る契約へ改訂し、[data.rs](../../crates/runtrell/src/data.rs)を型・traitの正本とする。本実装と制約は[workspace](workspace.md)参照。Workspaceはtenant/Run/Agent、版付き共有、digest/revision/manifest、CAS一括編集・exact-replace・copy回収を扱う。ArtifactはStaged / Saved / Finalizedを分け、範囲取得・外部出力・retention・削除確認を扱う。RunStore/OperationStore/BudgetAuthority/Schedulerの予算・受付方針は[budget](budget.md)を参照。ExecutionBackend・ExecutionLedgerの正本は[execution/mod.rs](../../crates/runtrell/src/execution/mod.rs)、能力とOS別制約は[execution](execution.md)。実行backendは能力/強制上限、acquire、start、lookup、cancel、stop、destroyを分け、ledger.pendingから回収を再照合する。必要制限非対応はUnsupported、host実行へfallbackしない。
@@ -748,9 +750,12 @@ pub trait RunStore: Send + Sync {
         false
     }
     /// Extend the current owner's lease without changing RunRecord::revision.
-    /// The returned Claim and persisted owner.lease_until witness renewal;
-    /// checkpoint CAS remains valid across same-generation heartbeats.
-    /// Expired leases and mismatched worker/generation remain fenced out.
+    /// `Renewed` returns the persisted Claim. Checkpoint CAS remains valid
+    /// across same-generation heartbeats.
+    /// `Released` confirms this claim sealed an intermediate phase while
+    /// its lease was valid at `now` and no new claim has been issued.
+    /// Neither result grants access beyond the current owner fence.
+    /// Expired leases and mismatched worker/generation return OwnershipLost.
     /// `now` is Unix milliseconds and `lease` is a nonzero duration in
     /// milliseconds; the expiry only moves forward (`max(old, now + lease)`).
     fn renew(
@@ -758,7 +763,7 @@ pub trait RunStore: Send + Sync {
         claim: &Claim,
         now: u64,
         lease: u64,
-    ) -> impl std::future::Future<Output = Result<Claim>> + Send;
+    ) -> impl std::future::Future<Output = Result<RenewOutcome>> + Send;
     /// Strongly consistent lookup of the original request: an equal spec finds
     /// its run, a conflicting spec returns Conflict, and None proves absence.
     fn find_request(

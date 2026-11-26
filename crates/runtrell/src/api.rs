@@ -763,9 +763,15 @@ pub struct Claim {
     pub run: RunHandle,
     pub worker: String,
     pub generation: u64,
-    /// Absolute lease expiry in Unix milliseconds: `claim`/`renew` set it to
-    /// `now + lease` with both operands in milliseconds.
+    /// Absolute lease expiry in Unix milliseconds. Renewal may extend it.
     pub lease_until: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RenewOutcome {
+    /// The current owner's lease remains held at the returned expiry.
+    Renewed(Claim),
+    /// This claim sealed an intermediate phase and released its lease.
+    Released,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -1980,9 +1986,12 @@ pub trait RunStore: Send + Sync {
         false
     }
     /// Extend the current owner's lease without changing RunRecord::revision.
-    /// The returned Claim and persisted owner.lease_until witness renewal;
-    /// checkpoint CAS remains valid across same-generation heartbeats.
-    /// Expired leases and mismatched worker/generation remain fenced out.
+    /// `Renewed` returns the persisted Claim. Checkpoint CAS remains valid
+    /// across same-generation heartbeats.
+    /// `Released` confirms this claim sealed an intermediate phase while
+    /// its lease was valid at `now` and no new claim has been issued.
+    /// Neither result grants access beyond the current owner fence.
+    /// Expired leases and mismatched worker/generation return OwnershipLost.
     /// `now` is Unix milliseconds and `lease` is a nonzero duration in
     /// milliseconds; the expiry only moves forward (`max(old, now + lease)`).
     fn renew(
@@ -1990,7 +1999,7 @@ pub trait RunStore: Send + Sync {
         claim: &Claim,
         now: u64,
         lease: u64,
-    ) -> impl std::future::Future<Output = Result<Claim>> + Send;
+    ) -> impl std::future::Future<Output = Result<RenewOutcome>> + Send;
     /// Strongly consistent lookup of the original request: an equal spec finds
     /// its run, a conflicting spec returns Conflict, and None proves absence.
     fn find_request(

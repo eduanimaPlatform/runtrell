@@ -155,7 +155,9 @@ fn renewal_between_check_and_checkpoint_preserves_cas() {
             cursor: 0,
         };
         // Deterministic save interleaving: read -> heartbeat -> CAS, no sleeps.
-        let renewed = s.renew(&c, 90, 100).await.unwrap();
+        let RenewOutcome::Renewed(renewed) = s.renew(&c, 90, 100).await.unwrap() else {
+            panic!("the active claim must renew");
+        };
         assert_eq!(renewed.run, c.run);
         assert_eq!(renewed.worker, c.worker);
         assert_eq!(renewed.generation, c.generation);
@@ -165,7 +167,10 @@ fn renewal_between_check_and_checkpoint_preserves_cas() {
         assert_eq!(s.get(&c.run).await.unwrap(), expected);
         // A shorter request cannot shorten the persisted lease, and even an
         // unchanged heartbeat must leave the checkpoint revision intact.
-        assert_eq!(s.renew(&c, 91, 1).await.unwrap(), renewed);
+        assert_eq!(
+            s.renew(&c, 91, 1).await,
+            Ok(RenewOutcome::Renewed(renewed.clone()))
+        );
         let result = s.checkpoint(&c, before.revision, cp.clone(), 101).await;
         assert_eq!(result, Ok(()), "same-generation heartbeat must not conflict");
         let saved = s.get(&c.run).await.unwrap();
@@ -227,7 +232,9 @@ fn stale_result_and_checkpoint_are_fenced_after_lease_renew_and_handoff() {
     block_on(async {
         let (s, c, _) = setup().await;
         let op = s.begin(&c, request(), 0).await.unwrap();
-        let renewed = s.renew(&c, 90, 100).await.unwrap();
+        let RenewOutcome::Renewed(renewed) = s.renew(&c, 90, 100).await.unwrap() else {
+            panic!("the active claim must renew");
+        };
         assert_eq!(renewed.generation, c.generation);
         assert_eq!(
             s.claim(&c.run, "other", 101, 100).await,

@@ -151,7 +151,9 @@ fn stale_result_and_checkpoint_are_fenced_after_lease_renew_and_handoff() {
     block_on(async {
         let (s, c, _) = setup().await;
         let op = s.begin(&c, request(), 0).await.unwrap();
-        let renewed = s.renew(&c, 90, 100).await.unwrap();
+        let RenewOutcome::Renewed(renewed) = s.renew(&c, 90, 100).await.unwrap() else {
+            panic!("the active claim must renew");
+        };
         assert_eq!(renewed.generation, c.generation);
         assert_eq!(
             s.claim(&c.run, "other", 101, 100).await,

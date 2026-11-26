@@ -411,19 +411,9 @@ impl RunStore for PgStore {
         true
     }
 
-    async fn renew(&self, c: &Claim, now: u64, lease: u64) -> Result<Claim> {
+    async fn renew(&self, c: &Claim, now: u64, lease: u64) -> Result<RenewOutcome> {
         self.tx(Scope::Run(&c.run, Mode::Bare), |s| {
-            fence(s, c, now, false)?;
-            if lease == 0 {
-                return Err(Error::Invalid("zero lease".into()));
-            }
-            let r = get_mut(s, &c.run)?;
-            let owner = r.owner.as_mut().ok_or(Error::OwnershipLost)?;
-            owner.lease_until = owner
-                .lease_until
-                .max(now.checked_add(lease).ok_or(Error::Conflict)?);
-            // Liveness is independent of checkpoint CAS; fencing uses the owner.
-            Ok(owner.clone())
+            get_mut(s, &c.run)?.renew_claim(c, now, lease)
         })
         .await
     }
